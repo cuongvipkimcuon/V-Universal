@@ -217,7 +217,7 @@ with tab1:
                     # --- GỌI REVIEW (CÓ TIMEOUT DÀI) ---
                     try:
                         # Dùng Gemini 3 Pro Preview như yêu cầu
-                        model_review = genai.GenerativeModel('gemini-2.0-flash-thinking-exp-01-21', system_instruction=REVIEW_PROMPT)
+                        model_review = genai.GenerativeModel('gemini-3-flash-preview', system_instruction=REVIEW_PROMPT)
                         # Lưu ý: Hiện tại API key thường gọi gemini-1.5 hoặc 2.0. 
                         # Nếu bạn chắc chắn tên model là 'gemini-3-pro-preview' thì giữ nguyên.
                         # Tuy nhiên, tôi sẽ để 'gemini-1.5-pro' làm fallback an toàn hoặc bạn sửa lại tên model đúng của bạn ở đây.
@@ -225,7 +225,7 @@ with tab1:
                         
                         # UPDATE: Tên model Gemini 3 chưa public rộng rãi, có thể bạn đang dùng bản private hoặc nhầm tên.
                         # Tôi sẽ dùng tên model trong code cũ của bạn: 'gemini-3-pro-preview'
-                        model_review = genai.GenerativeModel('gemini-1.5-pro', system_instruction=REVIEW_PROMPT) 
+                        model_review = genai.GenerativeModel('gemini-3-pro-preview', system_instruction=REVIEW_PROMPT) 
                         # (Lưu ý: Tôi để 1.5 Pro ở đây để code CHẠY ĐƯỢC cho người khác test. 
                         # Bạn hãy đổi lại thành 'gemini-3-pro-preview' nếu key bạn có quyền truy cập nó).
                         
@@ -247,7 +247,7 @@ with tab1:
 
                     # --- GỌI EXTRACT (CÓ TIMEOUT) ---
                     try:
-                        model_extract = genai.GenerativeModel('gemini-1.5-flash', system_instruction=EXTRACTOR_PROMPT)
+                        model_extract = genai.GenerativeModel('gemini-3-flash-preview', system_instruction=EXTRACTOR_PROMPT)
                         extract_res = model_extract.generate_content(
                             content, 
                             safety_settings=safe_config,
@@ -336,7 +336,7 @@ with tab2:
 
             try:
                 # Dùng Gemini 3 Pro Preview cho Chat
-                model_chat = genai.GenerativeModel('gemini-1.5-pro', system_instruction=V_CORE_INSTRUCTION)
+                model_chat = genai.GenerativeModel('gemini-3-pro-preview', system_instruction=V_CORE_INSTRUCTION)
                 # (Nhớ đổi tên model lại thành gemini-3 nếu bạn có quyền access)
                 
                 # TIMEOUT 600s
@@ -438,7 +438,7 @@ with tab3:
                         Trả về JSON list các ID cần XÓA (giữ lại dòng chi tiết nhất).
                         """
                         try:
-                            model_cleaner = genai.GenerativeModel('gemini-1.5-flash', 
+                            model_cleaner = genai.GenerativeModel('gemini-3-flash-preview', 
                                                                   system_instruction="Trả về JSON thuần. Chỉ chứa list ID.")
                             res = model_cleaner.generate_content(prompt_cleaner)
                             clean_text = res.text.strip()
@@ -480,3 +480,4 @@ with tab3:
 
         cols_show = ['source_chapter', 'entity_name', 'description', 'created_at'] if 'source_chapter' in df.columns else ['entity_name', 'description', 'created_at']
         st.dataframe(df[cols_show], use_container_width=True, height=500)
+
