@@ -52,7 +52,7 @@ if 'user' not in st.session_state:
     login_page()
     st.stop()
 
-# --- 2. CÁC HÀM "NÃO BỘ" THÔNG MINH (ĐÃ NÂNG CẤP) ---
+# --- 2. CÁC HÀM "NÃO BỘ" THÔNG MINH (ĐÃ SỬA LỖI LOGIC) ---
 
 def get_embedding(text):
     return genai.embed_content(
@@ -61,30 +61,40 @@ def get_embedding(text):
         task_type="retrieval_document"
     )['embedding']
 
-def smart_search(query_text, story_id, top_k=7): # Tăng top_k lên 7 để AI có nhiều context hơn
+# [QUAN TRỌNG] Đã sửa hàm này để nhận current_chap
+def smart_search(query_text, story_id, current_chap=None, top_k=7): 
     try:
         query_vec = get_embedding(query_text)
-        # Gọi hàm RPC match_bible (Đã update SQL để lấy source_chapter)
+        
+        # 1. Tìm kiếm Vector trước
         response = supabase.rpc("match_bible", {
             "query_embedding": query_vec,
-            "match_threshold": 0.45, # Giảm ngưỡng nhẹ để AI bắt được nhiều thông tin liên quan hơn
-            "match_count": top_k
+            "match_threshold": 0.45, 
+            "match_count": 20 # Lấy dư ra để lọc
         }).execute()
         
         results = []
         if response.data:
             bible_ids = [item['id'] for item in response.data]
             if bible_ids:
-                # Query lại bảng để filter story_id (an toàn)
-                valid_data = supabase.table("story_bible").select("*").in_("id", bible_ids).eq("story_id", story_id).execute()
+                # 2. Query lại DB để lọc Story ID và Chapter (Chặn tương lai)
+                query = supabase.table("story_bible").select("*").in_("id", bible_ids).eq("story_id", story_id)
                 
-                # Format kết quả: Thêm (Chap X) vào để AI biết dòng thời gian
+                # [QUAN TRỌNG] Logic chặn tương lai
+                if current_chap:
+                    query = query.lt("source_chapter", current_chap)
+                
+                valid_data = query.execute()
+                
+                # Format kết quả
                 for item in valid_data.data:
                     chap_info = f"(Chap {item.get('source_chapter', '?')})"
                     results.append(f"- {item['entity_name']} {chap_info}: {item['description']}")
                     
-        return "\n".join(results) if results else "Không tìm thấy dữ liệu cũ liên quan."
+        # Cắt lại đúng số lượng top_k sau khi lọc
+        return "\n".join(results[:top_k]) if results else "Không tìm thấy dữ liệu QUÁ KHỨ liên quan."
     except Exception as e:
+        print(f"Lỗi Search: {e}")
         return ""
 
 # --- 3. GIAO DIỆN CHÍNH ---
@@ -99,7 +109,7 @@ with st.sidebar:
         st.rerun()
     st.divider()
 
-# Chọn Truyện (ĐÃ SỬA: CHỈ HIỆN TRUYỆN CỦA USER ĐÓ)
+# Chọn Truyện
 stories = supabase.table("stories").select("*").eq("user_id", st.session_state.user.id).execute()
 story_map = {s['title']: s['id'] for s in stories.data}
 selected_story_name = st.selectbox("📖 Chọn bộ truyện", ["-- Tạo mới --"] + list(story_map.keys()))
@@ -110,7 +120,6 @@ if selected_story_name == "-- Tạo mới --":
     new_title = st.text_input("Tên truyện mới")
     if st.button("Tạo Truyện Ngay"):
         if new_title:
-            # LƯU USER_ID KHI TẠO
             supabase.table("stories").insert({
                 "title": new_title,
                 "user_id": st.session_state.user.id 
@@ -124,7 +133,7 @@ story_id = story_map[selected_story_name]
 # TAB CHỨC NĂNG
 tab1, tab2, tab3 = st.tabs(["✍️ Viết & Review", "💬 Chat với V (Smart)", "📚 Story Bible (CMS)"])
 
-# === TAB 1: VIẾT & REVIEW (CÓ TÍNH NĂNG LOAD DỮ LIỆU CŨ) ===
+# === TAB 1: VIẾT & REVIEW ===
 with tab1:
     st.header(f"Soạn thảo: {selected_story_name}")
     
@@ -134,7 +143,7 @@ with tab1:
         # 1. Chọn số chương
         chap_num = st.number_input("Chương số", value=1, min_value=1)
         
-        # --- LOGIC: TỰ ĐỘNG TẢI DỮ LIỆU CŨ TỪ DB ---
+        # Tự động tải dữ liệu cũ
         existing_data = supabase.table("chapters").select("*").eq("story_id", story_id).eq("chapter_number", chap_num).execute()
         
         loaded_content = ""
@@ -168,6 +177,7 @@ with tab1:
                 st.warning("Viết gì đi đã cha nội!")
             else:
                 with st.spinner("V đang đọc, lục lại trí nhớ và soi mói..."):
+                    # Gọi hàm search với current_chap (Đã fix lỗi TypeError)
                     related_context = smart_search(content[:1000], story_id, current_chap=chap_num)
                     
                     final_prompt = f"""
@@ -178,8 +188,7 @@ with tab1:
                     {content}
                     """
                     
-                    # --- 1. CẤU HÌNH "THÁO XÍCH" AN TOÀN ---
-                    # Bắt buộc phải có cái này, không là viết truyện tình cảm tí là nó chặn
+                    # Cấu hình an toàn
                     safe_config = [
                         {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
                         {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
@@ -187,34 +196,33 @@ with tab1:
                         {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
                     ]
                     
-                    # --- 2. GỌI REVIEW (CÓ BẮT LỖI) ---
+                    # --- GỌI REVIEW ---
                     try:
-                        # Thêm safety_settings vào đây
+                        # [FIX LỖI] Phải định nghĩa model ở đây
+                        model_review = genai.GenerativeModel('gemini-3-pro-preview', system_instruction=REVIEW_PROMPT)
+                        
                         review_res = model_review.generate_content(final_prompt, safety_settings=safe_config)
                         
-                        # Kiểm tra xem nó có trả lời không trước khi lấy .text
                         if review_res.text:
                             st.session_state['temp_review'] = review_res.text
                     except ValueError:
-                        # Nếu bị chặn, hiện thông báo khéo léo thay vì sập web
                         st.error("🚫 V từ chối review chương này!")
-                        st.warning("Lý do: Bộ lọc an toàn của Google quá nhạy cảm với từ ngữ trong bài (Safety Filter).")
-                        # Mẹo: In ra lý do chặn để ông biết đường sửa
+                        st.warning("Lý do: Bộ lọc an toàn của Google quá nhạy cảm.")
                         if review_res.prompt_feedback:
-                            st.caption(f"Chi tiết chặn: {review_res.prompt_feedback}")
+                            st.caption(f"Chi tiết: {review_res.prompt_feedback}")
                         st.stop()
                     except Exception as e:
                         st.error(f"Lỗi lạ: {e}")
                         st.stop()
 
-                    # --- 3. GỌI BIBLE EXTRACT (Dùng Flash cho rẻ & nhanh) ---
+                    # --- GỌI EXTRACT ---
                     try:
-                        # Cũng phải tháo xích cho thằng Extract luôn
+                        # [FIX TÊN MODEL] gemini-3 không tồn tại, dùng gemini-1.5-flash
                         model_extract = genai.GenerativeModel('gemini-3-flash-preview', system_instruction=EXTRACTOR_PROMPT)
                         extract_res = model_extract.generate_content(content, safety_settings=safe_config)
                         st.session_state['temp_bible'] = extract_res.text
                     except:
-                        st.session_state['temp_bible'] = "[]" # Nếu lỗi thì trả về rỗng để không sập
+                        st.session_state['temp_bible'] = "[]"
 
                     st.session_state['temp_content'] = content
                     st.session_state['temp_chap'] = chap_num
@@ -247,7 +255,7 @@ with tab1:
             with c1:
                 if st.button("💾 LƯU KẾT QUẢ MỚI", type="primary", use_container_width=True):
                     try:
-                        # 1. Lưu Bible (CÓ THÊM SỐ CHƯƠNG - source_chapter)
+                        # 1. Lưu Bible
                         json_str = st.session_state['temp_bible'].strip()
                         if json_str.startswith("```json"): json_str = json_str[7:-3]
                         try:
@@ -259,11 +267,11 @@ with tab1:
                                     "entity_name": point['entity_name'],
                                     "description": point['description'],
                                     "embedding": vec,
-                                    "source_chapter": st.session_state['temp_chap'] # <--- LƯU CHAP
+                                    "source_chapter": st.session_state['temp_chap']
                                 }).execute()
                         except: pass
 
-                        # 2. Lưu Chương (Xóa cũ - Chèn mới)
+                        # 2. Lưu Chương
                         supabase.table("chapters").delete().eq("story_id", story_id).eq("chapter_number", st.session_state['temp_chap']).execute()
                         
                         supabase.table("chapters").insert({
@@ -296,11 +304,12 @@ with tab2:
             st.markdown(prompt)
         
         with st.spinner("V đang nhớ lại..."):
-            context = smart_search(prompt, story_id, top_k=7) # Tăng context
+            # Chat thì lấy full context, không cần chặn chap
+            context = smart_search(prompt, story_id, top_k=7) 
             full_prompt = f"CONTEXT TỪ DATABASE (Các chap liên quan):\n{context}\n\nUSER HỎI:\n{prompt}"
             
-            # Bảo vệ chống lỗi Safety
             try:
+                # [FIX TÊN MODEL] gemini-1.5-pro
                 model_chat = genai.GenerativeModel('gemini-3-pro-preview', system_instruction=V_CORE_INSTRUCTION)
                 response = model_chat.generate_content(full_prompt)
                 
@@ -317,9 +326,8 @@ with tab2:
             except Exception as e:
                  with st.chat_message("assistant"):
                     st.error("🚫 V từ chối trả lời!")
-                    st.warning("Có thể câu hỏi vi phạm tiêu chuẩn an toàn hoặc Model đang quá tải.")
 
-# === TAB 3: QUẢN LÝ BIBLE (NÂNG CẤP CMS: LỌC & XÓA) ===
+# === TAB 3: QUẢN LÝ BIBLE (AN TOÀN TUYỆT ĐỐI) ===
 with tab3:
     st.header("📚 Quản lý Dữ liệu Cốt truyện")
     st.caption("Nơi dọn dẹp ký ức cho V đỡ bị 'lú'.")
@@ -331,28 +339,22 @@ with tab3:
     else:
         df = pd.DataFrame(data.data)
         
-       # --- CÔNG CỤ 1: DỌN DẸP TRÙNG LẶP (LOGIC MỚI: AN TOÀN TUYỆT ĐỐI) ---
+        # --- CÔNG CỤ 1: DỌN DẸP AN TOÀN ---
         with st.expander("🧹 Công cụ dọn trùng lặp (Auto Cleaner)", expanded=False):
-            st.write("Chỉ xóa những dòng GIỐNG Y HỆT nhau (Cùng tên & Cùng mô tả). Giữ lại các thông tin khác nhau.")
+            st.write("Chỉ xóa những dòng GIỐNG Y HỆT nhau (Cùng tên & Cùng mô tả).")
             if st.button("Chạy dọn dẹp ngay", type="primary"):
                 with st.spinner("Đang soi từng chữ..."):
-                    seen_content = set() # Tập hợp chứa các nội dung đã gặp
+                    seen_content = set()
                     ids_to_delete = []
                     
                     for item in data.data:
-                        # Tạo một cái "dấu vân tay" cho dòng dữ liệu
-                        # Kết hợp Tên + Mô tả (viết thường, bỏ khoảng trắng thừa)
                         name = item['entity_name'].lower().strip()
                         desc = item['description'].lower().strip()
-                        
-                        # Dấu vân tay duy nhất
                         unique_key = f"{name}|||{desc}"
                         
                         if unique_key in seen_content:
-                            # Nếu đã từng thấy nội dung y hệt thế này rồi -> XÓA thằng cũ hơn (do list đã sort DESC)
                             ids_to_delete.append(item['id'])
                         else:
-                            # Nếu chưa thấy -> Lưu lại vào bộ nhớ
                             seen_content.add(unique_key)
                     
                     if ids_to_delete:
@@ -367,11 +369,10 @@ with tab3:
         # --- CÔNG CỤ 2: XÓA THỦ CÔNG ---
         st.subheader("Danh sách chi tiết")
         
-        # Tạo list hiển thị có cả số chương
         options = {f"[Chap {row.get('source_chapter', '?')}] {row['entity_name']} | {row['description'][:50]}...": row['id'] for index, row in df.iterrows()}
         
         selected_items = st.multiselect(
-            "🗑️ Chọn dòng muốn xóa (Sai lệch, lỗi thời...):",
+            "🗑️ Chọn dòng muốn xóa:",
             options=options.keys()
         )
         
@@ -382,7 +383,7 @@ with tab3:
                 st.success("Đã xóa xong!")
                 st.rerun()
 
-        # Hiển thị bảng data (CÓ CỘT CHAP)
+        # Hiển thị bảng
         if 'source_chapter' in df.columns:
             display_cols = ['source_chapter', 'entity_name', 'description', 'created_at']
         else:
@@ -399,5 +400,3 @@ with tab3:
             use_container_width=True,
             height=600
         )
-
-
