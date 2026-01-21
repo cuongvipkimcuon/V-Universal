@@ -12,82 +12,119 @@ import time
 
 import extra_streamlit_components as stx  # <--- THƯ VIỆN QUẢN LÝ COOKIE
 
-# --- LOGIC CHÍNH: KIỂM TRA TRẠNG THÁI ĐĂNG NHẬP ---
+# --- 1. CẤU HÌNH TRANG ---
+st.set_page_config(page_title="V-Reviewer", page_icon="🔥", layout="wide")
 
-# 1. Nếu chưa có User trong RAM
-if 'user' not in st.session_state:
-    
-    # Kiểm tra xem đã thực hiện quy trình "Quay 3 giây tìm cookie" chưa?
-    if 'cookie_check_done' not in st.session_state:
+# --- 2. KHỞI TẠO KẾT NỐI (AN TOÀN) ---
+def init_services():
+    try:
+        SUPABASE_URL = st.secrets["supabase"]["SUPABASE_URL"]
+        SUPABASE_KEY = st.secrets["supabase"]["SUPABASE_KEY"]
+        GEMINI_KEY = st.secrets["gemini"]["API_KEY"]
         
-        # CHƯA LÀM -> THỰC HIỆN QUAY 3 GIÂY
-        with st.spinner("⏳ Đang lục lọi ký ức (Chờ 3s)..."):
-            time.sleep(3) # Ép hệ thống ngủ đúng 3 giây (Backend)
-            
-            # Sau 3 giây, tỉnh dậy và kiểm tra cookie
-            access_token = cookie_manager.get("supabase_access_token")
-            refresh_token = cookie_manager.get("supabase_refresh_token")
-            
-            if access_token and refresh_token:
-                try:
-                    session = supabase.auth.set_session(access_token, refresh_token)
-                    if session:
-                        st.session_state.user = session.user
-                        st.toast("👋 Đã tìm thấy chìa khóa cũ!", icon="🍪")
-                        st.rerun() # Vào luôn, không chạy xuống dưới nữa
-                except:
-                    pass
-            
-            # Nếu chạy đến đây nghĩa là Không tìm thấy hoặc Cookie lỗi
-            # Đánh dấu là "Đã kiểm tra xong" để lần rerun sau nó hiện Form đăng nhập
-            st.session_state['cookie_check_done'] = True
-            st.rerun()
+        client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        genai.configure(api_key=GEMINI_KEY)
+        return client
+    except Exception as e:
+        return None
 
-# 2. Nếu đã check cookie rồi (sau 3s) mà vẫn chưa có User -> HIỆN FORM ĐĂNG NHẬP
-if 'user' not in st.session_state and 'cookie_check_done' in st.session_state:
-    st.title("🔐 Đăng nhập V-Reviewer")
-    st.write("Hệ thống trợ lý viết truyện cực chiến (Gemini 3 Powered)")
-    
-    col_main, _ = st.columns([1, 1])
-    with col_main:
-        email = st.text_input("Email")
-        password = st.text_input("Mật khẩu", type="password")
-        
-        col1, col2 = st.columns(2)
-        
-        # --- NÚT ĐĂNG NHẬP ---
-        if col1.button("Đăng Nhập", type="primary", use_container_width=True):
-            try:
-                res = supabase.auth.sign_in_with_password({"email": email, "password": password})
-                st.session_state.user = res.user
-                
-                # GHI COOKIE
-                cookie_manager.set("supabase_access_token", res.session.access_token, key="set_access")
-                cookie_manager.set("supabase_refresh_token", res.session.refresh_token, key="set_refresh")
-                
-                st.success("Đăng nhập thành công!")
-                time.sleep(1)
-                st.rerun()
-            except Exception as e:
-                st.error(f"Lỗi đăng nhập: {e}")
-                
-        # --- NÚT ĐĂNG KÝ ---
-        if col2.button("Đăng Ký Mới", use_container_width=True):
-            try:
-                res = supabase.auth.sign_up({"email": email, "password": password})
-                st.session_state.user = res.user
-                
-                if res.session:
-                    cookie_manager.set("supabase_access_token", res.session.access_token, key="set_access_up")
-                    cookie_manager.set("supabase_refresh_token", res.session.refresh_token, key="set_refresh_up")
-                
-                st.success("Đã tạo user! Vào việc luôn.")
-                time.sleep(1)
-                st.rerun()
-            except Exception as e:
-                st.error(f"Lỗi đăng ký: {e}")
-    
+supabase = init_services()
+
+if not supabase:
+    st.error("❌ Lỗi kết nối! Kiểm tra lại file secrets.toml")
     st.stop()
+
+# --- 3. KHỞI TẠO COOKIE MANAGER (QUAN TRỌNG: PHẢI NẰM Ở ĐÂY) ---
+# Dòng này phải chạy TRƯỚC khi bất kỳ hàm nào gọi đến nó
+cookie_manager = stx.CookieManager()
+
+# --- 4. HÀM KIỂM TRA LOGIN & UI ĐĂNG NHẬP ---
+def check_login_status():
+    # A. Nếu chưa có User trong RAM -> Check Cookie với hiệu ứng chờ 3s
+    if 'user' not in st.session_state:
+        
+        # Nếu chưa từng check cookie lần nào thì mới check
+        if 'cookie_check_done' not in st.session_state:
+            with st.spinner("⏳ Đang lục lọi ký ức (Chờ 3s)..."):
+                time.sleep(3) # Đợi 3 giây để cookie load kịp
+                
+                # Lấy token từ cookie
+                access_token = cookie_manager.get("supabase_access_token")
+                refresh_token = cookie_manager.get("supabase_refresh_token")
+                
+                if access_token and refresh_token:
+                    try:
+                        session = supabase.auth.set_session(access_token, refresh_token)
+                        if session:
+                            st.session_state.user = session.user
+                            st.toast("👋 Mừng ông giáo trở lại!", icon="🍪")
+                            st.rerun() # Reload để vào app ngay
+                    except:
+                        pass # Token lỗi thì thôi
+                
+                # Đánh dấu là đã check xong -> Lần sau không check nữa mà hiện form login
+                st.session_state['cookie_check_done'] = True
+                st.rerun()
+
+    # B. Nếu đã check cookie rồi mà vẫn không có user -> HIỆN FORM ĐĂNG NHẬP
+    if 'user' not in st.session_state:
+        st.title("🔐 Đăng nhập V-Reviewer")
+        st.write("Hệ thống trợ lý viết truyện cực chiến (Gemini 3 Powered)")
+        
+        col_main, _ = st.columns([1, 1])
+        with col_main:
+            email = st.text_input("Email")
+            password = st.text_input("Mật khẩu", type="password")
+            
+            c1, c2 = st.columns(2)
+            
+            # Nút Đăng Nhập
+            if c1.button("Đăng Nhập", type="primary", use_container_width=True):
+                try:
+                    res = supabase.auth.sign_in_with_password({"email": email, "password": password})
+                    st.session_state.user = res.user
+                    
+                    # LƯU COOKIE
+                    cookie_manager.set("supabase_access_token", res.session.access_token, key="set_access")
+                    cookie_manager.set("supabase_refresh_token", res.session.refresh_token, key="set_refresh")
+                    
+                    st.success("Đăng nhập thành công!")
+                    time.sleep(1)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Lỗi: {e}")
+            
+            # Nút Đăng Ký
+            if c2.button("Đăng Ký", use_container_width=True):
+                try:
+                    res = supabase.auth.sign_up({"email": email, "password": password})
+                    st.session_state.user = res.user
+                    if res.session:
+                        cookie_manager.set("supabase_access_token", res.session.access_token, key="set_acc_up")
+                        cookie_manager.set("supabase_refresh_token", res.session.refresh_token, key="set_ref_up")
+                    st.success("Tạo user thành công!")
+                    time.sleep(1)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Lỗi: {e}")
+        
+        st.stop() # Dừng code tại đây, không cho chạy xuống dưới
+
+# --- 5. CHẠY LOGIC LOGIN ---
+check_login_status()
+
+# --- 6. GIAO DIỆN CHÍNH (SAU KHI LOGIN THÀNH CÔNG) ---
+
+# Sidebar: Thông tin user & Đăng xuất
+with st.sidebar:
+    st.info(f"👤 {st.session_state.user.email}")
+    if st.button("🚪 Đăng xuất", use_container_width=True):
+        supabase.auth.sign_out()
+        cookie_manager.delete("supabase_access_token")
+        cookie_manager.delete("supabase_refresh_token")
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        st.rerun()
 
 # ... (PHẦN CODE CÒN LẠI CỦA ÔNG: TAB 1, TAB 2, TAB 3...) ...
 # --- 2. CÁC HÀM "NÃO BỘ" THÔNG MINH ---
@@ -590,6 +627,7 @@ with tab3:
 
         cols_show = ['source_chapter', 'entity_name', 'description', 'created_at'] if 'source_chapter' in df.columns else ['entity_name', 'description', 'created_at']
         st.dataframe(df[cols_show], use_container_width=True, height=500)
+
 
 
 
