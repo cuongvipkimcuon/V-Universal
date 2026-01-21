@@ -329,6 +329,7 @@ with tab1:
                         stream_review = generate_content_with_fallback(
                             prompt=forced_prompt,
                             system_instruction=None, # Tắt cái này đi cho đỡ lỗi
+                            safety_settings=SAFE_CONFIG,
                             stream=True
                         )
                         
@@ -349,6 +350,7 @@ with tab1:
                         res_extract = generate_content_with_fallback(
                             prompt=content,
                             system_instruction=EXTRACTOR_PROMPT, # Dùng cái Prompt nâng cấp ở trên
+                            safety_settings=SAFE_CONFIG,
                             stream=False
                         )
                         st.session_state['temp_bible'] = res_extract.text
@@ -537,6 +539,7 @@ with tab2:
                             keyword_res = generate_content_with_fallback(
                                 f"Từ câu hỏi: '{prompt}', lấy 3 từ khóa tìm kiếm (dấu phẩy).",
                                 system_instruction="Chỉ trả về keywords.",
+                                safety_settings=SAFE_CONFIG,
                                 stream=False
                             )
                             keywords = keyword_res.text.strip()
@@ -563,6 +566,7 @@ with tab2:
                     response_stream = generate_content_with_fallback(
                         prompt=full_prompt,
                         system_instruction=V_CORE_INSTRUCTION,
+                        safety_settings=SAFE_CONFIG,
                         stream=True
                     )
                     
@@ -665,6 +669,7 @@ with tab3:
                             merged_desc_res = generate_content_with_fallback(
                                 prompt=merge_prompt,
                                 system_instruction="Bạn là người tóm tắt cốt truyện.",
+                                safety_settings=SAFE_CONFIG,
                                 stream=False
                             )
                             new_desc = merged_desc_res.text.strip()
@@ -777,6 +782,7 @@ with tab3:
                     
                 except Exception as e:
                     st.error(f"Lỗi khi lưu: {e}")
+
 
 
 
