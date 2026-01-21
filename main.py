@@ -12,14 +12,14 @@ from google.generativeai.types import HarmCategory, HarmBlockThreshold
 st.set_page_config(page_title="V-Reviewer", page_icon="🔥", layout="wide")
 
 # Dùng cache_resource để giữ kết nối, F5 không phải kết nối lại từ đầu -> Đỡ lag
-@st.cache_resource
+# Mỗi khi có người vào, Server sẽ tạo một kết nối MỚI RIÊNG BIỆT cho người đó.
 def init_services():
     try:
         SUPABASE_URL = st.secrets["supabase"]["SUPABASE_URL"]
         SUPABASE_KEY = st.secrets["supabase"]["SUPABASE_KEY"]
         GEMINI_KEY = st.secrets["gemini"]["API_KEY"]
         
-        # Kết nối Client
+        # Tạo client mới tinh cho user này
         client = create_client(SUPABASE_URL, SUPABASE_KEY)
         genai.configure(api_key=GEMINI_KEY)
         
@@ -27,6 +27,7 @@ def init_services():
     except Exception as e:
         return None
 
+# Gọi hàm (Không cache)
 # Khởi tạo dịch vụ
 supabase = init_services()
 
@@ -589,6 +590,7 @@ with tab3:
 
         cols_show = ['source_chapter', 'entity_name', 'description', 'created_at'] if 'source_chapter' in df.columns else ['entity_name', 'description', 'created_at']
         st.dataframe(df[cols_show], use_container_width=True, height=500)
+
 
 
 
