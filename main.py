@@ -170,25 +170,34 @@ def get_embedding(text):
 def smart_search(query_text, story_id, current_chap=None, top_k=80): 
     try:
         query_vec = get_embedding(query_text)
+        
+        # 1. Tìm kiếm Vector
         response = supabase.rpc("match_bible", {
             "query_embedding": query_vec,
-            "match_threshold": 0.45, 
-            "match_count": 20 
+            "match_threshold": 0.35, # <--- Hạ thấp ngưỡng một chút để lấy được nhiều context rộng hơn (đừng khắt khe quá)
+            "match_count": top_k # <--- QUAN TRỌNG: Truyền biến top_k vào đây, đừng để số cứng 20 nữa!
         }).execute()
         
         results = []
         if response.data:
             bible_ids = [item['id'] for item in response.data]
             if bible_ids:
+                # 2. Query lại DB
                 query = supabase.table("story_bible").select("*").in_("id", bible_ids).eq("story_id", story_id)
+                
+                # Logic chặn tương lai (Spoiler)
                 if current_chap:
                     query = query.lt("source_chapter", current_chap)
+                
                 valid_data = query.execute()
+                
+                # Format kết quả
                 for item in valid_data.data:
                     chap_info = f"(Chap {item.get('source_chapter', '?')})"
                     results.append(f"- {item['entity_name']} {chap_info}: {item['description']}")
                     
-        return "\n".join(results[:top_k]) if results else "Không tìm thấy dữ liệu QUÁ KHỨ liên quan."
+        # Trả về TOÀN BỘ kết quả tìm được (vì giờ mình tin tưởng khả năng đọc hiểu của Gemini)
+        return "\n".join(results) if results else "Không tìm thấy dữ liệu QUÁ KHỨ liên quan."
     except Exception as e:
         print(f"Lỗi Search: {e}")
         return ""
@@ -523,4 +532,5 @@ with tab3:
         # ... (Phần hiển thị list giữ nguyên) ...
         cols_show = ['source_chapter', 'entity_name', 'description', 'created_at'] if 'source_chapter' in df.columns else ['entity_name', 'description', 'created_at']
         st.dataframe(df[cols_show], use_container_width=True, height=500)
+
 
