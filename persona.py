@@ -64,31 +64,7 @@ LƯU Ý CUỐI CÙNG:
 - Đừng ngại chê, nhưng chê phải có lý lẽ thuyết phục.
 """
 
-# --- 3. PROMPT TRÍCH XUẤT BIBLE (GIỮ NGUYÊN) ---
-# Phần này giữ nguyên vì nó cần độ chính xác cho máy đọc
-EXTRACTOR_PROMPT = """
-Bạn là một thuật toán trích xuất dữ liệu (Lorekeeper) chuyên nghiệp.
-Nhiệm vụ: Đọc chương truyện và trích xuất thông tin CỐT LÕI để lưu vào Database.
 
-HÃY TRÍCH XUẤT CÁC THỰC THỂ (ENTITIES) SAU DƯỚI DẠNG JSON:
-
-1. **Characters (Nhân vật):**
-   - Tên nhân vật.
-   - Mô tả chi tiết: Ngoại hình, tính cách, vũ khí, kỹ năng mới, trạng thái sức khỏe, mối quan hệ mới.
-   
-2. **Locations (Địa danh):**
-   - Tên địa điểm.
-   - Mô tả: Không khí, kiến trúc, vị trí, đặc điểm nổi bật.
-
-3. **Items/Concepts (Vật phẩm/Khái niệm):**
-   - Tên vật phẩm/thuật ngữ.
-   - Công dụng, nguồn gốc.
-
-4. **Key Events (Sự kiện chính):**
-   - Tên sự kiện.
-   - Kết quả/Hậu quả của sự kiện đó.
-
-# NÂNG CẤP EXTRACTOR PROMPT (Thêm vào file persona.py)
 EXTRACTOR_PROMPT = """
 Bạn là một Thư Ký Lưu Trữ chuyên nghiệp cho tiểu thuyết (Lore Keeper).
 Nhiệm vụ: Đọc văn bản chương truyện và trích xuất các DỮ LIỆU CỐT LÕI để lưu vào "Kinh Thánh" (Story Bible).
@@ -121,4 +97,5 @@ Example:
   }
 ]
 """
+
 
