@@ -227,16 +227,22 @@ story_id = story_map[selected_story_name]
 
 tab1, tab2, tab3 = st.tabs(["✍️ Viết & Review", "💬 Chat với V (Smart)", "📚 Story Bible (CMS)"])
 
-# === TAB 1: VIẾT & REVIEW ===
+# ... (Phần import giữ nguyên) ...
+
+# === TAB 1: VIẾT & REVIEW (GIAO DIỆN MỚI: TÁCH NÚT LƯU) ===
 with tab1:
     st.header(f"Soạn thảo: {selected_story_name}")
-    col_l, col_r = st.columns([2, 1])
     
+    # Chia layout: 65% Soạn thảo - 35% Công cụ & Review
+    col_l, col_r = st.columns([65, 35])
+    
+    # --- CỘT TRÁI: SOẠN THẢO ---
     with col_l:
-        c_chap_1, c_chap_2 = st.columns([1, 3])
+        c_chap_1, c_chap_2 = st.columns([1, 4])
         with c_chap_1:
              chap_num = st.number_input("Chương số:", value=1, min_value=1, step=1, format="%d")
         
+        # Load dữ liệu cũ
         existing_data = supabase.table("chapters").select("*").eq("story_id", story_id).eq("chapter_number", chap_num).execute()
         loaded_content = ""
         loaded_review = ""
@@ -245,130 +251,209 @@ with tab1:
             record = existing_data.data[0]
             loaded_content = record['content']
             loaded_review = record['review_content']
-            st.toast(f"📂 Đã tìm thấy dữ liệu cũ của Chương {chap_num}", icon="✅")
+            if 'temp_content' not in st.session_state: # Chỉ báo toast lần đầu load
+                 st.toast(f"📂 Đã tải dữ liệu Chương {chap_num}", icon="✅")
 
+        # Logic hiển thị nội dung (Ưu tiên bản đang sửa trong Session)
         display_content = st.session_state.get('temp_content', loaded_content) if st.session_state.get('temp_chap') == chap_num else loaded_content
         
         content = st.text_area(
-            "Nội dung chương", 
-            height=450, 
+            "Nội dung chương (Viết ở đây)", 
+            height=600, 
             value=display_content, 
-            placeholder="Paste chương truyện vào đây và để V lo phần còn lại...",
+            placeholder="Paste chương truyện vào đây...",
             key=f"editor_{story_id}_{chap_num}"
         )
         
-    with col_r:
-        st.write("### 🎮 Điều khiển")
-        if loaded_review and 'temp_review' not in st.session_state:
-            with st.expander("📂 Xem lại Review cũ", expanded=False):
-                st.markdown(loaded_review)
-                st.info("Đây là review đã lưu trong Database.")
-        
-        if st.button("🚀 Gửi V Thẩm Định (Chế độ Bất Tử)", type="primary", use_container_width=True):
-            if not content:
-                st.warning("Viết gì đi đã cha nội!")
-            else:
-                review_box = st.empty() 
-                full_response = "" 
+        # Cập nhật session state khi gõ (để không mất chữ khi bấm nút khác)
+        st.session_state['temp_content'] = content
+        st.session_state['temp_chap'] = chap_num
 
-                with st.spinner("V đang đọc (Kích hoạt chế độ tự chuyển mạng)..."):
-                    related_context = smart_search(content[:1000], story_id, current_chap=chap_num)
+        # --- NÚT LƯU NỘI DUNG CHƯƠNG (NÚT 1) ---
+        # Nằm ngay dưới ô soạn thảo cho tiện tay
+        if st.button("💾 Lưu Nội Dung Chương (Chỉ Text)", use_container_width=True):
+            if not content:
+                st.warning("Có chữ nào đâu mà lưu cha!")
+            else:
+                try:
+                    # Upsert (Chèn hoặc Cập nhật)
+                    supabase.table("chapters").upsert({
+                        "story_id": story_id,
+                        "chapter_number": chap_num,
+                        "content": content,
+                        # Giữ nguyên review cũ nếu có, đừng ghi đè null vào
+                        "review_content": loaded_review if loaded_review else None 
+                    }, on_conflict="story_id, chapter_number").execute()
+                    st.success(f"✅ Đã lưu nội dung Chương {chap_num}!")
+                except Exception as e:
+                    st.error(f"Lỗi lưu chương: {e}")
+
+    # --- CỘT PHẢI: AI REVIEW & BIBLE ---
+    with col_r:
+        st.write("### 🤖 Trợ lý V")
+        
+        # 1. NÚT GỌI AI (TRIGGER)
+        if st.button("🚀 Phân Tích & Trích Xuất (AI Run)", type="primary", use_container_width=True):
+            if not content:
+                st.warning("Chưa có nội dung để phân tích!")
+            else:
+                # Clear kết quả cũ
+                if 'temp_review' in st.session_state: del st.session_state['temp_review']
+                if 'temp_bible' in st.session_state: del st.session_state['temp_bible']
+
+                # --- CHẠY REVIEW (STREAM) ---
+                review_box = st.empty()
+                full_review = ""
+                
+                with st.spinner("V đang đọc & soi lỗi..."):
+                    # Lấy context
+                    related_context = smart_search(content[:1000], story_id, current_chap=chap_num, top_k=30)
                     
                     final_prompt = f"""
-                    THÔNG TIN BỐI CẢNH TÌM ĐƯỢC TỪ QUÁ KHỨ:
+                    THÔNG TIN QUÁ KHỨ (CONTEXT):
                     {related_context}
                     
-                    NỘI DUNG CHƯƠNG {chap_num} CẦN REVIEW:
+                    NỘI DUNG CHƯƠNG {chap_num}:
                     {content}
                     """
                     
-                    safe_config = {
-                        HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-                        HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-                        HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-                        HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-                    }
-                    
                     try:
-                        # [THAY ĐỔI] GỌI HÀM FALLBACK THAY VÌ GỌI TRỰC TIẾP
-                        response_stream = generate_content_with_fallback(
+                        # Gọi Review
+                        stream_review = generate_content_with_fallback(
                             prompt=final_prompt,
-                            system_instruction=REVIEW_PROMPT,
-                            safety_settings=safe_config,
+                            system_instruction=REVIEW_PROMPT, # Nhớ import REVIEW_PROMPT
                             stream=True
                         )
                         
-                        for chunk in response_stream:
+                        for chunk in stream_review:
                             if chunk.text:
-                                full_response += chunk.text
-                                review_box.markdown(full_response + "▌") 
+                                full_review += chunk.text
+                                review_box.markdown(full_review + "▌")
                         
-                        review_box.markdown(full_response)
-                        st.session_state['temp_review'] = full_response
-
+                        review_box.markdown(full_review)
+                        st.session_state['temp_review'] = full_review
+                        
                     except Exception as e:
-                        st.error(f"🚫 Tất cả Model đều thất bại! Lỗi: {e}")
-                        st.stop()
+                        st.error(f"Lỗi Review: {e}")
 
-                    # --- GỌI EXTRACT (Cũng dùng fallback cho chắc) ---
+                # --- CHẠY BIBLE EXTRACT (NGẦM) ---
+                with st.spinner("Đang trích xuất dữ liệu Bible..."):
                     try:
-                        # Không cần stream cho extract
-                        extract_res = generate_content_with_fallback(
+                        res_extract = generate_content_with_fallback(
                             prompt=content,
-                            system_instruction=EXTRACTOR_PROMPT,
-                            safety_settings=safe_config,
-                            stream=False # False để lấy kết quả luôn
+                            system_instruction=EXTRACTOR_PROMPT, # Dùng cái Prompt nâng cấp ở trên
+                            stream=False
                         )
-                        st.session_state['temp_bible'] = extract_res.text
-                    except:
-                        st.session_state['temp_bible'] = "[]"
+                        st.session_state['temp_bible'] = res_extract.text
+                        st.toast("Đã trích xuất xong Bible!", icon="✨")
+                    except Exception as e:
+                        st.error(f"Lỗi Extract: {e}")
 
-                    st.session_state['temp_content'] = content
-                    st.session_state['temp_chap'] = chap_num
+        st.divider()
 
-    st.divider()
-    
-    if 'temp_review' in st.session_state and st.session_state.get('temp_chap') == chap_num:
-        st.subheader("🔥 Kết quả thẩm định MỚI NHẤT")
-        st.warning("Đây là bản Review MỚI (Chưa lưu). Hãy đọc kỹ rồi bấm LƯU.")
+        # 2. KHU VỰC HIỂN THỊ KẾT QUẢ & LƯU RIÊNG LẺ
         
-        with st.chat_message("assistant", avatar="🔥"):
-            st.markdown(st.session_state['temp_review'])
-            
-        c1, c2 = st.columns([1, 3])
-        with c1:
-            if st.button("💾 LƯU KẾT QUẢ NÀY", type="primary", use_container_width=True):
-                try:
-                    # Lưu Bible
-                    json_str = st.session_state['temp_bible'].strip()
-                    if json_str.startswith("```json"): json_str = json_str[7:-3]
+        # A. HIỂN THỊ REVIEW
+        review_to_show = st.session_state.get('temp_review', loaded_review)
+        
+        with st.expander("📝 Kết quả Review", expanded=True):
+            if review_to_show:
+                st.markdown(review_to_show)
+                st.divider()
+                # --- NÚT LƯU REVIEW (NÚT 2) ---
+                if st.button("💾 Lưu bản Review này", key="btn_save_review", use_container_width=True):
                     try:
-                        data_points = json.loads(json_str)
-                        for point in data_points:
-                            vec = get_embedding(point['description'])
-                            supabase.table("story_bible").insert({
-                                "story_id": story_id,
-                                "entity_name": point['entity_name'],
-                                "description": point['description'],
-                                "embedding": vec,
-                                "source_chapter": st.session_state['temp_chap']
-                            }).execute()
-                    except: pass
+                         supabase.table("chapters").upsert({
+                            "story_id": story_id,
+                            "chapter_number": chap_num,
+                            "content": content, # Vẫn phải gửi content để đảm bảo row tồn tại
+                            "review_content": review_to_show
+                        }, on_conflict="story_id, chapter_number").execute()
+                         st.success("Đã lưu Review vào DB!")
+                    except Exception as e:
+                        st.error(f"Lỗi: {e}")
+            else:
+                st.info("Chưa có review nào.")
 
-                    # Lưu Chương
-                    supabase.table("chapters").delete().eq("story_id", story_id).eq("chapter_number", st.session_state['temp_chap']).execute()
-                    supabase.table("chapters").insert({
-                        "story_id": story_id,
-                        "chapter_number": st.session_state['temp_chap'],
-                        "content": st.session_state['temp_content'],
-                        "review_content": st.session_state['temp_review']
-                    }).execute()
+        # B. HIỂN THỊ & LƯU BIBLE (QUAN TRỌNG: CƠ CHẾ GỘP THÔNG MINH)
+        bible_json = st.session_state.get('temp_bible', "[]")
+        
+        with st.expander("📚 Dữ liệu Bible trích xuất", expanded=False):
+            if bible_json and bible_json != "[]":
+                # Clean chuỗi JSON nếu có markdown ```json
+                clean_json = bible_json.strip()
+                if clean_json.startswith("```json"): clean_json = clean_json[7:-3]
+                
+                try:
+                    data_points = json.loads(clean_json)
                     
-                    st.success("✅ Đã cập nhật dữ liệu thành công!")
-                    del st.session_state['temp_review']
-                    st.rerun()
+                    # Hiện bảng Preview cho user check trước khi lưu
+                    df_preview = pd.DataFrame(data_points)
+                    if not df_preview.empty:
+                        # Chọn cột hiển thị cho gọn
+                        cols_show = ['entity_name', 'type', 'description'] if 'type' in df_preview.columns else ['entity_name', 'description']
+                        st.dataframe(df_preview[cols_show], hide_index=True)
+                    
+                    # --- NÚT LƯU BIBLE (NÚT 3) ---
+                    # Logic gộp: Tìm tên trùng -> Gộp mô tả
+                    if st.button("💾 Cập nhật vào Story Bible", key="btn_save_bible", type="primary", use_container_width=True):
+                        success_count = 0
+                        with st.status("Đang đồng bộ dữ liệu...", expanded=True) as status:
+                            for point in data_points:
+                                name = point['entity_name']
+                                new_desc = point['description']
+                                p_type = point.get('type', 'General')
+                                
+                                # 1. Kiểm tra xem entity này đã có trong DB chưa (Check trùng tên)
+                                # Dùng RPC hoặc Select thường
+                                existing = supabase.table("story_bible").select("*").eq("story_id", story_id).eq("entity_name", name).execute()
+                                
+                                if existing.data:
+                                    # --- TRƯỜNG HỢP TRÙNG: GỘP THÔNG TIN ---
+                                    old_record = existing.data[0]
+                                    old_desc = old_record['description']
+                                    old_id = old_record['id']
+                                    
+                                    # Chỉ gộp nếu mô tả khác nhau đáng kể (đỡ spam)
+                                    if new_desc not in old_desc:
+                                        # Tạo mô tả gộp: "Mô tả cũ [Cập nhật Chap X]: Mô tả mới"
+                                        merged_desc = f"{old_desc}\n\n[Cập nhật Chap {chap_num}]: {new_desc}"
+                                        
+                                        # Cập nhật lại Embedding cho mô tả mới
+                                        new_vec = get_embedding(merged_desc)
+                                        
+                                        supabase.table("story_bible").update({
+                                            "description": merged_desc,
+                                            "embedding": new_vec,
+                                            "source_chapter": chap_num # Cập nhật chap mới nhất
+                                        }).eq("id", old_id).execute()
+                                        st.write(f"🔄 Đã gộp thông tin mới cho: **{name}**")
+                                        success_count += 1
+                                else:
+                                    # --- TRƯỜNG HỢP MỚI: TẠO MỚI ---
+                                    vec = get_embedding(new_desc)
+                                    supabase.table("story_bible").insert({
+                                        "story_id": story_id,
+                                        "entity_name": name,
+                                        "description": new_desc, # Có thể lưu thêm cột 'type' vào DB nếu ông muốn mở rộng bảng
+                                        "embedding": vec,
+                                        "source_chapter": chap_num
+                                    }).execute()
+                                    st.write(f"✨ Đã thêm mới: **{name}**")
+                                    success_count += 1
+                            
+                            status.update(label=f"✅ Hoàn tất! Đã xử lý {success_count} mục.", state="complete", expanded=False)
+                            
+                        # Xóa cache để tab quản lý tải lại data mới
+                        if 'bible_data_cache' in st.session_state: del st.session_state['bible_data_cache']
+                        
+                except json.JSONDecodeError:
+                    st.error("AI trả về JSON lỗi, không lưu được. Hãy thử lại.")
+                    st.code(bible_json) # Hiện code lỗi cho ông debug
                 except Exception as e:
-                    st.error(f"Lỗi lưu: {e}")
+                     st.error(f"Lỗi logic lưu Bible: {e}")
+            else:
+                st.info("Chưa có dữ liệu trích xuất.")
 
 # === TAB 2: CHAT THÔNG MINH (PHIÊN BẢN BẤT TỬ) ===
 with tab2:
@@ -532,5 +617,6 @@ with tab3:
         # ... (Phần hiển thị list giữ nguyên) ...
         cols_show = ['source_chapter', 'entity_name', 'description', 'created_at'] if 'source_chapter' in df.columns else ['entity_name', 'description', 'created_at']
         st.dataframe(df[cols_show], use_container_width=True, height=500)
+
 
 
