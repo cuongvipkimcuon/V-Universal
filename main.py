@@ -319,9 +319,11 @@ with tab1:
                     
                     try:
                         # Gọi Review
+                        forced_prompt = f"{REVIEW_PROMPT}\n\n---\n{final_prompt}"
+
                         stream_review = generate_content_with_fallback(
-                            prompt=final_prompt,
-                            system_instruction=REVIEW_PROMPT, # Nhớ import REVIEW_PROMPT
+                            prompt=forced_prompt,
+                            system_instruction=None, # Tắt cái này đi cho đỡ lỗi
                             stream=True
                         )
                         
@@ -770,4 +772,5 @@ with tab3:
                     
                 except Exception as e:
                     st.error(f"Lỗi khi lưu: {e}")
+
 
