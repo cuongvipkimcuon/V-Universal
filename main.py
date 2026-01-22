@@ -142,7 +142,7 @@ def get_embedding(text):
         return None 
     return genai.embed_content(model="models/text-embedding-004", content=text, task_type="retrieval_document")['embedding']
 
-def smart_search_hybrid(query_text, project_id, top_k=10):
+def smart_search_hybrid(query_text, project_id, top_k=15):
     try:
         query_vec = get_embedding(query_text)
         if not query_vec: return "" # Nếu không embed được thì trả về rỗng
@@ -150,7 +150,7 @@ def smart_search_hybrid(query_text, project_id, top_k=10):
         response = supabase.rpc("hybrid_search", {
             "query_text": query_text, 
             "query_embedding": query_vec,
-            "match_threshold": 0.3, "match_count": top_k, "story_id_input": project_id
+            "match_threshold": 0.01, "match_count": top_k, "story_id_input": project_id
         }).execute()
         results = []
         if response.data:
@@ -434,10 +434,22 @@ with tab2:
                 # Context 2: Bible (Chỉ chạy khi bật Toggle)
                 if use_bible:
                     bible_res = smart_search_hybrid(prompt, proj_id)
+                    
+                    # --- [START DEBUG BLOCK] ---
+                    # Thêm cái này để soi xem nó tìm được gì
+                    with st.expander("🕵️ [DEBUG] Soi kết quả tìm kiếm Bible"):
+                        if bible_res:
+                            st.success("✅ Tìm thấy dữ liệu:")
+                            st.code(bible_res)
+                        else:
+                            st.error("❌ Không tìm thấy gì (bible_res rỗng)!")
+                            st.caption("Nguyên nhân: Có thể do ngưỡng match_threshold quá cao hoặc query không khớp.")
+                    # --- [END DEBUG BLOCK] ---
+
                     if bible_res: 
                         ctx += f"\n--- BIBLE (Ký ức liên quan) ---\n{bible_res}\n"
                         note.append("Bible Context")
-                        bible_found_count = bible_res.count("- [") # Đếm sơ bộ số mục tìm thấy
+                        bible_found_count = bible_res.count("- [")
 
                 # Context 3: Recent Chat (Chỉ lấy tin sau mốc cutoff)
                 recent_msgs = [m for m in msgs if m['created_at'] > st.session_state['chat_cutoff']]
@@ -625,6 +637,7 @@ with tab3:
                     st.rerun()
                 except Exception as e:
                     st.error(f"Lỗi khi xóa: {e}")
+
 
 
 
