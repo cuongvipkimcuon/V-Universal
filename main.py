@@ -422,6 +422,7 @@ with tab2:
                             {"story_id": proj_id, "role": "user", "content": str(prompt)},
                             {"story_id": proj_id, "role": "model", "content": str(full_res)}
                         ]).execute()
+                        st.rerun()
                 except Exception as e: st.error(f"Lỗi Chat: {e}")
 
 # === TAB 3: BIBLE (FIX LỖI MERGE) ===
@@ -473,3 +474,4 @@ with tab3:
         
         st.dataframe(pd.DataFrame(bible)[['entity_name', 'description']], use_container_width=True)
     else: st.info("Bible trống.")
+
