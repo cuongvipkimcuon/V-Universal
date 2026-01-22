@@ -242,38 +242,84 @@ tab1, tab2, tab3 = st.tabs(["✍️ Workstation", "💬 Smart Chat & Memory", "�
 # === TAB 1: WORKSTATION ===
 with tab1:
     col_edit, col_tool = st.columns([2, 1])
-    with col_edit:
-        files = supabase.table("chapters").select("chapter_number, title").eq("story_id", proj_id).order("chapter_number").execute()
-        f_opts = {f"File {f['chapter_number']}": f['chapter_number'] for f in files.data}
-        sel_file = st.selectbox("Chọn File", ["-- New --"] + list(f_opts.keys()))
-        chap_num = f_opts[sel_file] if sel_file != "-- New --" else len(files.data) + 1
-        
-        content = ""
-        if sel_file != "-- New --":
-            res = supabase.table("chapters").select("content").eq("story_id", proj_id).eq("chapter_number", chap_num).execute()
-            if res.data: content = res.data[0]['content']
-            
-        input_text = st.text_area("Nội dung", value=content, height=600, placeholder="Start typing...")
-        if st.button("💾 Lưu File"):
-            supabase.table("chapters").upsert({"story_id": proj_id, "chapter_number": chap_num, "content": input_text}, on_conflict="story_id, chapter_number").execute()
-            st.toast("Saved!")
+    
+    # 1. LẤY DANH SÁCH FILE
+    files = supabase.table("chapters").select("chapter_number, title").eq("story_id", proj_id).order("chapter_number").execute()
+    f_opts = {f"File {f['chapter_number']}": f['chapter_number'] for f in files.data}
+    sel_file = st.selectbox("Chọn File", ["-- New --"] + list(f_opts.keys()))
+    
+    # Xác định số chương
+    chap_num = f_opts[sel_file] if sel_file != "-- New --" else len(files.data) + 1
+    
+    # 2. LOAD DỮ LIỆU TỪ DB (CONTENT + REVIEW_CONTENT)
+    # Biến để hứng dữ liệu
+    db_content = ""
+    db_review = ""
+    
+    if sel_file != "-- New --":
+        # Lấy cả content và review_content từ DB
+        try:
+            # === SỬA TÊN CỘT Ở ĐÂY ===
+            res = supabase.table("chapters").select("content, review_content").eq("story_id", proj_id).eq("chapter_number", chap_num).execute()
+            if res.data: 
+                db_content = res.data[0].get('content', '')
+                # === SỬA TÊN CỘT Ở ĐÂY ===
+                db_review = res.data[0].get('review_content', '') 
+        except Exception as e:
+            st.error(f"Lỗi tải dữ liệu: {e}")
 
+    # Logic đồng bộ Session State cho Review
+    if 'current_chap_view' not in st.session_state or st.session_state['current_chap_view'] != chap_num:
+        st.session_state['review_res'] = db_review
+        st.session_state['current_chap_view'] = chap_num
+
+    # 3. CỘT EDIT CONTENT
+    with col_edit:
+        input_text = st.text_area("Nội dung", value=db_content, height=600, placeholder="Viết gì đó đi...")
+        
+        # Nút Lưu Content (Chỉ update content)
+        if st.button("💾 Lưu Nội Dung (Content Only)"):
+            supabase.table("chapters").upsert({
+                "story_id": proj_id, 
+                "chapter_number": chap_num, 
+                "content": input_text
+            }, on_conflict="story_id, chapter_number").execute()
+            st.toast("Đã lưu nội dung!", icon="✅")
+
+    # 4. CỘT CÔNG CỤ (REVIEW & EXTRACT)
     with col_tool:
         st.write("### 🤖 Review & Extract")
-        if st.button("🚀 Review", type="primary"):
-            if not input_text: st.warning("Empty!")
+        
+        # Nút Chạy Review Mới
+        if st.button("🚀 Review Mới (AI)", type="primary"):
+            if not input_text: st.warning("Chưa có nội dung để review!")
             else:
-                with st.status("Analyzing..."):
+                with st.status("Đang đọc và nhận xét..."):
                     context = smart_search_hybrid(input_text[:500], proj_id)
                     final_prompt = f"CONTEXT: {context}\nCONTENT: {input_text}\nTASK: {persona['review_prompt']}"
-                    # === ĐÃ SỬA: THÊM stream=False ĐỂ LẤY TEXT NGAY ===
+                    
+                    # Gọi AI (stream=False để lấy text ngay)
                     res = generate_content_with_fallback(final_prompt, system_instruction=persona['core_instruction'], stream=False)
                     st.session_state['review_res'] = res.text
+                    st.rerun()
         
-        if 'review_res' in st.session_state:
-            with st.expander("Result", expanded=True): st.markdown(st.session_state['review_res'])
-        
+        # Hiển thị kết quả Review
+        if 'review_res' in st.session_state and st.session_state['review_res']:
+            with st.expander("📝 Kết quả Review", expanded=True):
+                st.markdown(st.session_state['review_res'])
+                
+                # --- NÚT SAVE REVIEW RIÊNG BIỆT ---
+                st.divider()
+                if st.button("💾 Lưu Review này vào DB"):
+                    # === SỬA TÊN CỘT Ở ĐÂY THÀNH review_content ===
+                    supabase.table("chapters").update({
+                        "review_content": st.session_state['review_res']
+                    }).eq("story_id", proj_id).eq("chapter_number", chap_num).execute()
+                    st.toast("Đã lưu Review!", icon="💾")
+
         st.divider()
+        
+        # Phần Extract Bible (Giữ nguyên)
         if st.button("📥 Trích xuất Bible"):
             with st.spinner("Extracting..."):
                 ext_prompt = f"CONTENT: {input_text}\nTASK: {persona['extractor_prompt']}"
@@ -450,3 +496,4 @@ with tab3:
         st.dataframe(df, use_container_width=True)
     else:
         st.info("Trống.")
+
