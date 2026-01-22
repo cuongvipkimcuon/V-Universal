@@ -163,12 +163,12 @@ def ai_router_pro(user_prompt):
     router_prompt = f"""
     Phân tích User Prompt và trả về JSON:
     1. "intent": "search_bible" OR "chat_casual".
-    2. "target_chapter": Số chương cần đọc (Int/Null).
+    2. "target_chapter": Số File cần đọc (Int/Null).
     USER: "{user_prompt}"
     JSON OUTPUT ONLY.
     """
     try:
-        model = genai.GenerativeModel("gemini-2.0-flash")
+        model = genai.GenerativeModel("gemini-2.5-flash")
         res = model.generate_content(router_prompt, generation_config={"response_mime_type": "application/json"})
         return json.loads(res.text)
     except: return {"intent": "chat_casual", "target_chapter": None}
@@ -232,11 +232,11 @@ with tab1:
     
     f_opts = {}
     for f in files.data:
-        display_name = f"Chương {f['chapter_number']}"
+        display_name = f"File {f['chapter_number']}"
         if f['title']: display_name += f": {f['title']}"
         f_opts[display_name] = f['chapter_number']
 
-    sel_file = st.selectbox("📂 Chọn Chương:", ["-- New --"] + list(f_opts.keys()))
+    sel_file = st.selectbox("📂 Chọn File:", ["-- New --"] + list(f_opts.keys()))
     chap_num = f_opts[sel_file] if sel_file != "-- New --" else len(files.data) + 1
     
     db_content, db_review, db_title = "", "", ""
@@ -258,7 +258,7 @@ with tab1:
     # 2. UI EDIT
     col_edit, col_tool = st.columns([2, 1])
     with col_edit:
-        chap_title = st.text_input("🔖 Tên Chương", value=db_title, placeholder="VD: Sự khởi đầu...")
+        chap_title = st.text_input("🔖 Tên File", value=db_title, placeholder="VD: Sự khởi đầu...")
         input_text = st.text_area("Nội dung", value=db_content, height=600)
         
         if st.button("💾 Lưu Nội Dung & Tên"):
@@ -295,12 +295,12 @@ with tab1:
         # EXTRACT META
         if st.button("📥 Trích xuất Bible"):
             with st.spinner("Phân tích..."):
-                meta_desc = "Mô tả ngắn gọn MỤC ĐÍCH, DIỄN BIẾN CHÍNH và KẾT QUẢ của chương này."
+                meta_desc = "Mô tả ngắn gọn MỤC ĐÍCH, DIỄN BIẾN CHÍNH và KẾT QUẢ của File này."
                 if proj_type == "Coder": meta_desc = "Mô tả MỤC ĐÍCH, THÀNH PHẦN CHÍNH (Hàm/Class) và INPUT/OUTPUT."
                 
                 extra_req = f"""
                 YÊU CẦU BẮT BUỘC: Thêm vào đầu JSON một mục tổng hợp:
-                - entity_name: "[META] {chap_title if chap_title else f'Chương {chap_num}'}"
+                - entity_name: "[META] {chap_title if chap_title else f'File {chap_num}'}"
                 - type: "Overview"
                 - description: "{meta_desc}"
                 """
@@ -342,7 +342,7 @@ with tab2:
         if 'chat_cutoff' not in st.session_state:
             st.session_state['chat_cutoff'] = "1970-01-01" # Mặc định hiện tất cả
 
-        if st.button("🧹 Clear Screen (Dọn màn hình)"):
+        if st.button("🧹 Clear Screen"):
             # Đặt mốc cutoff là giờ hiện tại -> Ẩn hết tin cũ
             st.session_state['chat_cutoff'] = datetime.now().isoformat()
             st.rerun()
@@ -499,5 +499,6 @@ with tab3:
         
         st.dataframe(pd.DataFrame(bible)[['entity_name', 'description']], use_container_width=True)
     else: st.info("Bible trống.")
+
 
 
