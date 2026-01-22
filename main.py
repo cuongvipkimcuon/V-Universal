@@ -241,74 +241,78 @@ tab1, tab2, tab3 = st.tabs(["✍️ Workstation", "💬 Smart Chat & Memory", "�
 
 # === TAB 1: WORKSTATION ===
 with tab1:
-    col_edit, col_tool = st.columns([2, 1])
+    # --- PHẦN 1: LOGIC LOAD DỮ LIỆU (ĐƯA LÊN ĐẦU) ---
     
-    # 1. LẤY DANH SÁCH FILE
-    # Lấy thêm title để hiển thị trên dropdown cho đẹp (nếu muốn)
+    # 1. Lấy danh sách file trước
     files = supabase.table("chapters").select("chapter_number, title").eq("story_id", proj_id).order("chapter_number").execute()
     
-    # Tạo dictionary để map lựa chọn
+    # Tạo dictionary map tên hiển thị
     f_opts = {}
     for f in files.data:
-        # Hiển thị: "Chương 1: Tên chương" (nếu có tên)
         display_name = f"Chương {f['chapter_number']}"
         if f['title']:
             display_name += f": {f['title']}"
         f_opts[display_name] = f['chapter_number']
 
-    sel_file = st.selectbox("Chọn File", ["-- New --"] + list(f_opts.keys()))
+    # 2. HIỂN THỊ SELECT BOX NGAY TẠI ĐÂY (Full Width)
+    sel_file = st.selectbox("📂 Chọn Chương để làm việc:", ["-- New --"] + list(f_opts.keys()))
     
     # Xác định số chương
     chap_num = f_opts[sel_file] if sel_file != "-- New --" else len(files.data) + 1
     
-    # 2. LOAD DỮ LIỆU TỪ DB (CONTENT + REVIEW + TITLE)
+    # 3. LOAD CONTENT + TITLE + REVIEW TỪ DB
     db_content = ""
     db_review = ""
-    db_title = "" # Biến hứng title
+    db_title = "" 
     
     if sel_file != "-- New --":
         try:
-            # === LẤY THÊM CỘT title ===
+            # Lấy đúng cột 'review_content' như trong hình database ông gửi
             res = supabase.table("chapters").select("content, review_content, title").eq("story_id", proj_id).eq("chapter_number", chap_num).execute()
             if res.data: 
                 db_content = res.data[0].get('content', '')
-                db_review = res.data[0].get('review_content', '') 
-                db_title = res.data[0].get('title', '') # Lấy title về
+                db_review = res.data[0].get('review_content', '') # Sửa thành review_content
+                db_title = res.data[0].get('title', '')
         except Exception as e:
             st.error(f"Lỗi tải dữ liệu: {e}")
 
-    # Logic đồng bộ Session State
+    # Logic đồng bộ Session State (để UI cập nhật ngay khi đổi file)
     if 'current_chap_view' not in st.session_state or st.session_state['current_chap_view'] != chap_num:
         st.session_state['review_res'] = db_review
         st.session_state['current_chap_view'] = chap_num
 
-    # 3. CỘT EDIT CONTENT
+    st.divider() # Kẻ 1 đường ngăn cách cho đẹp
+
+    # --- PHẦN 2: GIAO DIỆN CHÍNH (CHIA CỘT) ---
+    col_edit, col_tool = st.columns([2, 1])
+
+    # CỘT TRÁI: EDIT CONTENT
     with col_edit:
-        # === Ô NHẬP TÊN CHƯƠNG ===
+        # Ô nhập Title
         chap_title = st.text_input("🔖 Tên Chương", value=db_title, placeholder="VD: Sự khởi đầu...")
         
-        input_text = st.text_area("Nội dung", value=db_content, height=600, placeholder="Viết gì đó đi...")
+        # Ô nhập Content
+        input_text = st.text_area("Nội dung", value=db_content, height=600, placeholder="Viết truyện vào đây...")
         
-        # Nút Lưu Content & Title
+        # Nút Lưu (Lưu cả Title + Content)
         if st.button("💾 Lưu Nội Dung & Tên Chương"):
             supabase.table("chapters").upsert({
                 "story_id": proj_id, 
                 "chapter_number": chap_num, 
-                "title": chap_title,   # === LƯU TITLE ===
+                "title": chap_title,   
                 "content": input_text
             }, on_conflict="story_id, chapter_number").execute()
             st.toast("Đã lưu Chương & Nội dung!", icon="✅")
-            # Trick nhỏ: Chờ 1s rồi reload để cập nhật tên trên Dropdown
             time.sleep(1) 
-            st.rerun()
+            st.rerun() # Refresh để cập nhật tên chương trên danh sách
 
-    # 4. CỘT CÔNG CỤ (REVIEW & EXTRACT)
+    # CỘT PHẢI: CÔNG CỤ (REVIEW)
     with col_tool:
         st.write("### 🤖 Review & Extract")
         
-        # Nút Chạy Review Mới
+        # Nút Chạy Review
         if st.button("🚀 Review Mới (AI)", type="primary"):
-            if not input_text: st.warning("Chưa có nội dung để review!")
+            if not input_text: st.warning("Chưa có nội dung!")
             else:
                 with st.status("Đang đọc và nhận xét..."):
                     context = smart_search_hybrid(input_text[:500], proj_id)
@@ -324,6 +328,7 @@ with tab1:
                 st.markdown(st.session_state['review_res'])
                 
                 st.divider()
+                # Nút Lưu Review (Lưu vào cột review_content)
                 if st.button("💾 Lưu Review này vào DB"):
                     supabase.table("chapters").update({
                         "review_content": st.session_state['review_res']
@@ -509,5 +514,6 @@ with tab3:
         st.dataframe(df, use_container_width=True)
     else:
         st.info("Trống.")
+
 
 
