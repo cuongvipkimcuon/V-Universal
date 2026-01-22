@@ -38,37 +38,22 @@ MODEL_PRIORITY = ["gemini-3-flash-preview","gemini-2.0-flash", "gemini-1.5-flash
 # --- 2. KHỞI TẠO KẾT NỐI (AN TOÀN) ---
 
 def init_services():
-
     try:
-
         SUPABASE_URL = st.secrets["supabase"]["SUPABASE_URL"]
-
         SUPABASE_KEY = st.secrets["supabase"]["SUPABASE_KEY"]
-
         GEMINI_KEY = st.secrets["gemini"]["API_KEY"]
-
         
-
         client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
         genai.configure(api_key=GEMINI_KEY)
-
         return client
-
     except Exception as e:
-
         return None
-
 
 supabase = init_services()
 
-
 if not supabase:
-
     st.error("❌ Lỗi kết nối! Kiểm tra lại file secrets.toml")
-
     st.stop()
-
 
 # --- 3. KHỞI TẠO COOKIE MANAGER ---
 
@@ -77,105 +62,56 @@ cookie_manager = stx.CookieManager()
 # --- 4. HÀM KIỂM TRA LOGIN ---
 
 def check_login_status():
-
     if 'user' not in st.session_state:
-
         if 'cookie_check_done' not in st.session_state:
-
             with st.spinner("⏳ Đang lục lọi ký ức (Chờ 3s)..."):
-
                 time.sleep(3) 
-
                 access_token = cookie_manager.get("supabase_access_token")
-
                 refresh_token = cookie_manager.get("supabase_refresh_token")
-
                 
-
                 if access_token and refresh_token:
-
                     try:
-
                         session = supabase.auth.set_session(access_token, refresh_token)
-
                         if session:
-
                             st.session_state.user = session.user
-
                             st.toast("👋 Mừng ông giáo trở lại!", icon="🍪")
-
                             st.rerun() 
-
                     except: pass
-
                 st.session_state['cookie_check_done'] = True
-
                 st.rerun()
 
     if 'user' not in st.session_state:
-
         st.title("🔐 Đăng nhập V-Brainer")
-
         st.write("Hệ thống trợ lý cực chiến (Gemini Fallback System)")
-
         
-
         col_main, _ = st.columns([1, 1])
-
         with col_main:
-
             email = st.text_input("Email")
-
             password = st.text_input("Mật khẩu", type="password")
-
             
-
             c1, c2 = st.columns(2)
-
             if c1.button("Đăng Nhập", type="primary", use_container_width=True):
-
                 try:
-
                     res = supabase.auth.sign_in_with_password({"email": email, "password": password})
-
                     st.session_state.user = res.user
-
                     cookie_manager.set("supabase_access_token", res.session.access_token, key="set_access")
-
                     cookie_manager.set("supabase_refresh_token", res.session.refresh_token, key="set_refresh")
-
                     st.success("Đăng nhập thành công!")
-
                     time.sleep(1)
-
                     st.rerun()
-
                 except Exception as e:
-
                     st.error(f"Lỗi: {e}")
-
             if c2.button("Đăng Ký", use_container_width=True):
-
                 try:
-
                     res = supabase.auth.sign_up({"email": email, "password": password})
-
                     st.session_state.user = res.user
-
                     if res.session:
-
                         cookie_manager.set("supabase_access_token", res.session.access_token, key="set_acc_up")
-
                         cookie_manager.set("supabase_refresh_token", res.session.refresh_token, key="set_ref_up")
-
                     st.success("Tạo user thành công!")
-
                     time.sleep(1)
-
                     st.rerun()
-
                 except Exception as e:
-
                     st.error(f"Lỗi: {e}")
         st.stop() 
 
@@ -184,21 +120,13 @@ check_login_status()
 # --- SIDEBAR ---
 
 with st.sidebar:
-
     st.info(f"👤 {st.session_state.user.email}")
-
     if st.button("🚪 Đăng xuất", use_container_width=True):
-
         supabase.auth.sign_out()
-
         cookie_manager.delete("supabase_access_token")
-
         cookie_manager.delete("supabase_refresh_token")
-
         for key in list(st.session_state.keys()):
-
             del st.session_state[key]
-
         st.rerun()
 
 
@@ -338,7 +266,8 @@ with tab1:
                 with st.status("Analyzing..."):
                     context = smart_search_hybrid(input_text[:500], proj_id)
                     final_prompt = f"CONTEXT: {context}\nCONTENT: {input_text}\nTASK: {persona['review_prompt']}"
-                    res = generate_content_with_fallback(final_prompt, system_instruction=persona['core_instruction'])
+                    # === ĐÃ SỬA: THÊM stream=False ĐỂ LẤY TEXT NGAY ===
+                    res = generate_content_with_fallback(final_prompt, system_instruction=persona['core_instruction'], stream=False)
                     st.session_state['review_res'] = res.text
         
         if 'review_res' in st.session_state:
@@ -521,4 +450,3 @@ with tab3:
         st.dataframe(df, use_container_width=True)
     else:
         st.info("Trống.")
-
