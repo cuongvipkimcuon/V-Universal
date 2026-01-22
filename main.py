@@ -450,55 +450,141 @@ with tab2:
 
                 except Exception as e: st.error(f"Lỗi Chat: {e}")
 
-# === TAB 3: BIBLE (FIX LỖI MERGE) ===
+# === TAB 3: BIBLE (CẬP NHẬT: THÊM/SỬA/SEARCH/MERGE) ===
 with tab3:
-    st.subheader("📚 Project Bible")
-    if st.button("🔄 Refresh"): st.rerun()
+    st.subheader("📚 Project Bible Manager")
     
-    bible = supabase.table("story_bible").select("*").eq("story_id", proj_id).order("created_at", desc=True).execute().data
-    if bible:
-        opts = {f"{b['entity_name']}": b for b in bible}
-        selections = st.multiselect("Chọn mục Gộp/Xóa:", opts.keys())
+    # 1. THANH TÌM KIẾM (Chỉ để lọc hiển thị)
+    col_search, col_ref = st.columns([4, 1])
+    with col_search:
+        search_kw = st.text_input("🔍 Tìm kiếm trong Bible", placeholder="Nhập từ khóa để lọc danh sách bên dưới...")
+    with col_ref:
+        if st.button("🔄 Refresh", use_container_width=True): st.rerun()
+
+    # 2. LOAD DATA & FILTER
+    bible_query = supabase.table("story_bible").select("*").eq("story_id", proj_id).order("created_at", desc=True).execute()
+    bible_data = bible_query.data if bible_query.data else []
+
+    # Filter logic (Local filter)
+    filtered_bible = []
+    if search_kw:
+        kw = search_kw.lower()
+        filtered_bible = [b for b in bible_data if kw in b['entity_name'].lower() or kw in b['description'].lower()]
+    else:
+        filtered_bible = bible_data
+
+    # Map ID -> Item
+    opts = {f"{b['entity_name']}": b for b in filtered_bible}
+
+    # 3. KHU VỰC THÊM MỚI (MANUAL ADD)
+    with st.expander("➕ Thêm Bible thủ công", expanded=False):
+        with st.form("add_bible_form"):
+            new_name = st.text_input("Tên mục (Entity Name)")
+            new_desc = st.text_area("Mô tả chi tiết")
+            if st.form_submit_button("Lưu mới"):
+                if not new_name or not new_desc:
+                    st.error("Vui lòng nhập đủ thông tin!")
+                else:
+                    with st.spinner("Đang vector hóa..."):
+                        vec = get_embedding(f"{new_name}: {new_desc}")
+                        if vec:
+                            supabase.table("story_bible").insert({
+                                "story_id": proj_id,
+                                "entity_name": new_name,
+                                "description": new_desc,
+                                "embedding": vec,
+                                "source_chapter": 0 # 0 = Manual
+                            }).execute()
+                            st.success("Đã thêm thành công!")
+                            time.sleep(1)
+                            st.rerun()
+                        else:
+                            st.error("Lỗi tạo Embedding.")
+
+    st.divider()
+
+    # 4. DANH SÁCH & THAO TÁC (CHỌN/GỘP/SỬA)
+    if filtered_bible:
+        selections = st.multiselect(
+            f"Chọn mục để thao tác (Đang hiển thị {len(filtered_bible)} mục):", 
+            list(opts.keys()),
+            key="bible_selector"
+        )
         
-        c1, c2 = st.columns(2)
-        if c1.button("🔥 Xóa"):
-            ids = [opts[k]['id'] for k in selections]
-            supabase.table("story_bible").delete().in_("id", ids).execute()
-            st.success("Đã xóa!")
-            time.sleep(0.5)
-            st.rerun()
-            
-        if c2.button("🧬 Gộp (AI Merge)"):
-            if len(selections) < 2: st.warning("Chọn >= 2 mục!")
-            else:
+        col_actions = st.columns([1, 1, 2])
+        
+        # NÚT XÓA
+        with col_actions[0]:
+            if st.button("🔥 Xóa Mục Chọn", use_container_width=True, disabled=len(selections)==0):
+                ids = [opts[k]['id'] for k in selections]
+                supabase.table("story_bible").delete().in_("id", ids).execute()
+                st.success("Đã xóa!")
+                time.sleep(0.5)
+                st.rerun()
+
+        # NÚT GỘP (MERGE) - Chọn >= 2
+        with col_actions[1]:
+            if st.button("🧬 Gộp (AI Merge)", use_container_width=True, disabled=len(selections)<2):
                 items = [opts[k] for k in selections]
                 txt = "\n".join([f"- {i['description']}" for i in items])
                 prompt_merge = f"Gộp các mục sau thành 1 nội dung duy nhất:\n{txt}"
                 
                 try:
-                    res = generate_content_with_fallback(prompt_merge, system_instruction="Merge Expert", stream=False)
-                    merged_text = res.text
-                    
-                    # === FIX: Kiểm tra kết quả trước khi embed ===
-                    if not merged_text or not merged_text.strip():
-                        st.error("AI trả về rỗng, không thể gộp.")
-                    else:
-                        vec = get_embedding(merged_text)
-                        if vec:
-                            supabase.table("story_bible").insert({
-                                "story_id": proj_id, "entity_name": items[0]['entity_name'],
-                                "description": merged_text, "embedding": vec, "source_chapter": items[0]['source_chapter']
-                            }).execute()
-                            ids = [i['id'] for i in items]
-                            supabase.table("story_bible").delete().in_("id", ids).execute()
-                            st.success("Gộp xong!")
-                            time.sleep(0.5)
-                            st.rerun()
-                        else: st.error("Lỗi Embedding.")
+                    with st.spinner("AI đang gộp..."):
+                        res = generate_content_with_fallback(prompt_merge, system_instruction="Merge Expert", stream=False)
+                        merged_text = res.text
+                        
+                        if merged_text and merged_text.strip():
+                            vec = get_embedding(merged_text)
+                            if vec:
+                                # Insert cái mới
+                                supabase.table("story_bible").insert({
+                                    "story_id": proj_id, "entity_name": items[0]['entity_name'],
+                                    "description": merged_text, "embedding": vec, "source_chapter": items[0]['source_chapter']
+                                }).execute()
+                                # Xóa cái cũ
+                                ids = [i['id'] for i in items]
+                                supabase.table("story_bible").delete().in_("id", ids).execute()
+                                st.success("Gộp xong!")
+                                time.sleep(0.5)
+                                st.rerun()
+                            else: st.error("Lỗi Embedding.")
+                        else: st.error("AI trả về rỗng.")
                 except Exception as e: st.error(f"Lỗi: {e}")
-        
-        st.dataframe(pd.DataFrame(bible)[['entity_name', 'description']], use_container_width=True)
-    else: st.info("Bible trống.")
+
+        # KHU VỰC SỬA (EDIT) - Chỉ hiện khi chọn đúng 1 mục
+        if len(selections) == 1:
+            st.info("🛠️ Chế độ chỉnh sửa")
+            item_to_edit = opts[selections[0]]
+            with st.form("edit_bible_form"):
+                edit_name = st.text_input("Sửa Tên", value=item_to_edit['entity_name'])
+                edit_desc = st.text_area("Sửa Mô tả", value=item_to_edit['description'], height=150)
+                
+                if st.form_submit_button("Cập nhật & Re-Vectorize"):
+                    with st.spinner("Đang cập nhật..."):
+                        # Luôn vector hóa lại để đảm bảo chính xác
+                        vec = get_embedding(f"{edit_name}: {edit_desc}")
+                        if vec:
+                            supabase.table("story_bible").update({
+                                "entity_name": edit_name,
+                                "description": edit_desc,
+                                "embedding": vec
+                            }).eq("id", item_to_edit['id']).execute()
+                            st.success("Đã cập nhật!")
+                            time.sleep(1)
+                            st.rerun()
+                        else:
+                            st.error("Lỗi vector hóa.")
+
+        st.divider()
+        # 5. HIỂN THỊ DATAFRAME
+        st.dataframe(
+            pd.DataFrame(filtered_bible)[['entity_name', 'description', 'created_at']], 
+            use_container_width=True,
+            hide_index=True
+        )
+    else:
+        st.info("Không tìm thấy dữ liệu phù hợp.")
 
 
 
