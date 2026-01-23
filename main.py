@@ -532,7 +532,9 @@ with tab2:
                 current_system_instruction = persona['core_instruction']
                 if not use_bible: current_system_instruction += "\n\n[BRAINSTORM MODE] Ignore constraints."
 
-                recent_pairs = msgs[-6:] 
+                # [FIX 1: LỌC TIN NHẮN THEO CUTOFF TRƯỚC KHI GỬI CHO ROUTER]
+                valid_history = [m for m in msgs if m['created_at'] > st.session_state['chat_cutoff']]
+                recent_pairs = valid_history[-6:] # Chỉ lấy 6 tin GẦN NHẤT trong phiên chat hiện tại
                 chat_ctx_text = "\n".join([f"{m['role']}: {m['content']}" for m in recent_pairs])
                 
                 # Gọi Router V2 (Đã fix lỗi json)
@@ -561,8 +563,9 @@ with tab2:
                             ctx += f"\n--- VECTOR MEMORY ---\n{bible_res}\n"
                             note.append("Vector")
 
-                # Recent Chat Context
-                recent = "\n".join([f"{m['role']}: {m['content']}" for m in msgs if m['created_at'] > st.session_state['chat_cutoff']][-10:])
+                # Recent Chat Context (Lấy 10 tin để AI nhớ)
+                # [FIX 2: Lại dùng valid_history đã lọc ở trên cho nhất quán]
+                recent = "\n".join([f"{m['role']}: {m['content']}" for m in valid_history[-10:]])
                 ctx += f"\n--- RECENT ---\n{recent}"
                 
                 final_prompt = f"CONTEXT:\n{ctx}\n\nUSER QUERY: {prompt}\n(Intent: {better_query})"
@@ -585,7 +588,6 @@ with tab2:
                     st.rerun() # Rerun để nút Like hiện ra ở vòng lặp trên
 
                 except Exception as e: st.error(f"Lỗi: {e}")
-
     # --- E. UI QUYẾT ĐỊNH LUẬT (Nằm ngoài cùng để luôn hiện) ---
     if 'pending_rule' in st.session_state:
         pending = st.session_state['pending_rule']
@@ -767,6 +769,7 @@ with tab3:
                     st.rerun()
                 except Exception as e:
                     st.error(f"Lỗi khi xóa: {e}")
+
 
 
 
