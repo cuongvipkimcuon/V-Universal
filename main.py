@@ -476,19 +476,21 @@ with tab1:
                         del st.session_state['extract_json']
                 except Exception as e: st.error(f"Lỗi Format: {e}")
 
-# === TAB 2: SMART CHAT (FIXED VERSION) ===
+# === TAB 2: SMART CHAT (FIXED RAW OUTPUT) ===
 with tab2:
     col_left, col_right = st.columns([3, 1])
     
-    # --- CỘT PHẢI: QUẢN LÝ KÝ ỨC (Giữ nguyên) ---
+    # --- CỘT PHẢI (Giữ nguyên) ---
     with col_right:
         st.write("### 🧠 Ký ức")
         use_bible = st.toggle("Dùng Bible Context", value=True)
         
         if 'chat_cutoff' not in st.session_state: st.session_state['chat_cutoff'] = "1970-01-01" 
+        
         if st.button("🧹 Clear Screen"):
             st.session_state['chat_cutoff'] = datetime.utcnow().isoformat()
             st.rerun()
+            
         if st.button("🔄 Hiện lại toàn bộ"):
              st.session_state['chat_cutoff'] = "1970-01-01"
              st.rerun()
@@ -524,137 +526,82 @@ with tab2:
                     del st.session_state['crys_summary']
                     st.rerun()
 
-    # --- CỘT TRÁI: CHAT UI (LOGIC ĐÃ SỬA) ---
+    # --- CỘT TRÁI: CHAT UI ---
     with col_left:
         # 1. LOAD & HIỂN THỊ LỊCH SỬ
         try:
-            # [FIX 1]: Lấy 50 tin MỚI NHẤT (desc=True) thay vì cũ nhất
             msgs_data = supabase.table("chat_history").select("*").eq("story_id", proj_id).order("created_at", desc=True).limit(50).execute().data
-            
-            # Đảo ngược lại để hiển thị từ trên xuống dưới (Cũ -> Mới)
             msgs = msgs_data[::-1] if msgs_data else []
-            
-            # Lọc theo thời gian (Clear screen logic)
             visible_msgs = [m for m in msgs if m['created_at'] > st.session_state['chat_cutoff']]
             
             for i, m in enumerate(visible_msgs):
                 with st.chat_message(m['role']):
                     st.markdown(m['content'])
-                    
-                    # Nút Like (Logic cũ)
                     if m['role'] == 'model' and i > 0:
-                        prev_msg = visible_msgs[i-1]
-                        if st.button("❤️ Dạy V học", key=f"like_btn_{i}_{m['id']}", help="AI sẽ học style này"):
-                            raw = extract_rule_raw(prev_msg['content'], m['content'])
-                            if raw:
-                                ana = analyze_rule_conflict(raw, proj_id)
-                                st.session_state['pending_rule'] = {"raw": raw, "analysis": ana}
-                                st.rerun()
+                        if st.button("❤️ Dạy V học", key=f"like_{m['id']}"): pass 
 
         except Exception as e: st.error(f"Lỗi load history: {e}")
 
-        # 2. XỬ LÝ CHAT MỚI (INPUT)
+        # 2. XỬ LÝ CHAT MỚI
         if prompt := st.chat_input("Hỏi V..."):
             with st.chat_message("user"): st.markdown(prompt)
             
-            with st.spinner("V đang suy nghĩ..."):
-                # --- A. PREP & ROUTER ---
-                current_system_instruction = persona['core_instruction']
-                if not use_bible: current_system_instruction += "\n\n[BRAINSTORM MODE] Ignore constraints."
-
-                valid_history_for_context = [m for m in msgs if m['created_at'] > st.session_state['chat_cutoff']]
-                recent_pairs = valid_history_for_context[-6:] 
-                chat_ctx_text = "\n".join([f"{m['role']}: {m['content']}" for m in recent_pairs])
+            with st.spinner("Thinking..."):
+                now_timestamp = datetime.utcnow().isoformat()
                 
-                route = ai_router_pro_v2(prompt, chat_ctx_text)
-                intent = route.get('intent')
-                target_files = route.get('target_files', [])
-                better_query = route.get('rewritten_query', prompt)
+                # --- A. PREP & ROUTER ---
+                route = ai_router_pro(prompt)
+                target_chap = route.get('target_chapter')
                 
                 ctx = ""
                 note = []
                 
                 # --- B. LOAD CONTEXT ---
-                if target_files:
-                    raw_content, sources = load_full_content(target_files, proj_id)
-                    if raw_content:
-                        ctx += f"\n🔥 --- FULL SOURCE ---\n{raw_content}\n"
-                        note.extend(sources)
-
-                if use_bible:
-                    mandatory = get_mandatory_rules(proj_id)
-                    if mandatory: ctx += mandatory
-                    
-                    if intent == "search_bible" or (not target_files):
-                        bible_res = smart_search_hybrid(better_query, proj_id)
-                        if bible_res: 
-                            ctx += f"\n--- VECTOR MEMORY ---\n{bible_res}\n"
-                            note.append("Vector")
-
-                recent = "\n".join([f"{m['role']}: {m['content']}" for m in valid_history_for_context[-10:]])
-                ctx += f"\n--- RECENT ---\n{recent}"
+                if target_chap:
+                    c_res = supabase.table("chapters").select("content").eq("story_id", proj_id).eq("chapter_number", target_chap).execute()
+                    if c_res.data: 
+                        ctx += f"\n--- RAW CHAP {target_chap} ---\n{c_res.data[0]['content']}\n"
+                        note.append(f"Read Chap {target_chap}")
                 
-                final_prompt = f"CONTEXT:\n{ctx}\n\nUSER QUERY: {prompt}\n(Intent: {better_query})"
+                if use_bible:
+                    bible_res = smart_search_hybrid(prompt, proj_id)
+                    if bible_res: 
+                        ctx += f"\n--- BIBLE & MEMORY ---\n{bible_res}\n"
+                        note.append("Vector")
 
-                # --- C. GENERATE ---
+                valid_msgs = [m for m in msgs if m['created_at'] > st.session_state['chat_cutoff']]
+                recent = "\n".join([f"{m['role']}: {m['content']}" for m in valid_msgs[-10:]])
+                ctx += f"\n--- RECENT ---\n{recent}"
+
+                final_prompt = f"CONTEXT:\n{ctx}\n\nUSER: {prompt}"
+                
+                # --- C. GENERATE (Đã thêm bộ lọc Stream Parser) ---
+                
+                # Hàm lọc rác, chỉ lấy text
+                def stream_parser(stream_obj):
+                    for chunk in stream_obj:
+                        try:
+                            # Chỉ yield khi chunk có text
+                            if chunk.text: yield chunk.text
+                        except: pass
+
                 try:
-                    res_stream = generate_content_with_fallback(final_prompt, system_instruction=current_system_instruction)
+                    res_stream = generate_content_with_fallback(final_prompt, system_instruction=persona['core_instruction'], stream=True)
                     
                     with st.chat_message("assistant"):
                         if note: st.caption(f"📚 {', '.join(note)}")
-                        # Stream nội dung ra màn hình
-                        full_res = st.write_stream(res_stream) 
                         
-                        # [QUAN TRỌNG] Nếu stream bị lỗi generator, convert sang text thường
-                        if not isinstance(full_res, str): 
-                             full_res = str(full_res)
-
-                    # Lưu DB
-                    supabase.table("chat_history").insert([
-                        {"story_id": proj_id, "role": "user", "content": str(prompt)},
-                        {"story_id": proj_id, "role": "model", "content": str(full_res)}
-                    ]).execute()
+                        # [QUAN TRỌNG] Bọc stream bằng hàm parser
+                        full_res = st.write_stream(stream_parser(res_stream))
+                        
+                        if not isinstance(full_res, str): full_res = str(full_res)
                     
-                    # [FIX 2]: BỎ LỆNH st.rerun() Ở ĐÂY!
-                    # Để tin nhắn vừa chat không bị load lại (tránh chớp màn hình)
-                    # Lần chat tiếp theo nó sẽ tự hiện trong lịch sử.
+                    supabase.table("chat_history").insert([
+                        {"story_id": proj_id, "role": "user", "content": prompt, "created_at": now_timestamp},
+                        {"story_id": proj_id, "role": "model", "content": full_res, "created_at": now_timestamp}
+                    ]).execute()
 
                 except Exception as e: st.error(f"Lỗi: {e}")
-
-    # --- E. UI QUYẾT ĐỊNH LUẬT (Nằm ngoài cùng) ---
-    if 'pending_rule' in st.session_state:
-        pending = st.session_state['pending_rule']
-        ana = pending['analysis']
-        status = ana.get('status')
-        
-        with st.status("🧠 Đang cập nhật tri thức...", expanded=True):
-            st.write(f"**Luật mới:** {pending['raw']}")
-            
-            col1, col2 = st.columns(2)
-            
-            if status == "NEW":
-                st.success("Luật mới hợp lệ.")
-                if col1.button("Lưu ngay"):
-                    save_rule_to_db(pending['raw'], proj_id)
-                    st.toast("Đã học!")
-                    del st.session_state['pending_rule']
-                    st.rerun()
-            elif status == "CONFLICT":
-                st.error(f"Xung đột: {ana.get('existing_rule_summary')}")
-                if col1.button("Ghi đè"):
-                    save_rule_to_db(pending['raw'], proj_id, overwrite=True)
-                    del st.session_state['pending_rule']
-                    st.rerun()
-            elif status == "MERGE":
-                st.warning(f"Tương tự: {ana.get('existing_rule_summary')}")
-                if col1.button("Gộp"):
-                    save_rule_to_db(ana.get('merged_content'), proj_id, overwrite=True)
-                    del st.session_state['pending_rule']
-                    st.rerun()
-            
-            if col2.button("Hủy"):
-                del st.session_state['pending_rule']
-                st.rerun()
 # === TAB 3: BIBLE (CẬP NHẬT: THÊM/SỬA/SEARCH/MERGE) ===
 with tab3:
     st.subheader("📚 Project Bible Manager")
@@ -802,6 +749,7 @@ with tab3:
                     st.rerun()
                 except Exception as e:
                     st.error(f"Lỗi khi xóa: {e}")
+
 
 
 
