@@ -145,12 +145,15 @@ def get_embedding(text):
         return genai.embed_content(model="models/text-embedding-004", content=text, task_type="retrieval_document")['embedding']
     except: return None
 
-def generate_content_with_fallback(prompt, system_instruction, stream=True):
+# --- SỬA LẠI HÀM NÀY Ở ĐẦU FILE ---
+def generate_content_with_fallback(prompt, system_instruction, stream=True, temperature=1.0):
     for model_name in MODEL_PRIORITY:
         try:
             model = genai.GenerativeModel(model_name, system_instruction=system_instruction)
             response = model.generate_content(
-                prompt, safety_settings=SAFE_CONFIG, stream=stream, request_options={'timeout': 60}
+                prompt, safety_settings=SAFE_CONFIG, stream=stream, 
+                generation_config=genai.types.GenerationConfig(temperature=temperature), # <--- Thêm dòng này
+                request_options={'timeout': 60}
             )
             return response
         except Exception as e: continue
@@ -480,6 +483,12 @@ with tab2:
         if st.button("🔄 Hiện lại toàn bộ"):
              st.session_state['chat_cutoff'] = "1970-01-01"
              st.rerun()
+        # === THÊM CÁI NÀY ===
+        strict_mode = st.toggle(
+            "🚫 Chế độ Nghiêm túc (Strict)", 
+            value=False, 
+            help="Bật lên: AI chỉ trả lời dựa trên dữ liệu tìm được. Cấm chém gió. (Temp = 0)"
+        )
         st.divider()
 
         # Crystallize logic (Giữ nguyên)
@@ -566,14 +575,35 @@ with tab2:
                 # B3: Chat History
                 ctx += f"\n--- RECENT CHAT ---\n{recent_history_text}"
 
-                # --- C. GENERATION ---
+                # --- C. GENERATION (LOGIC MỚI) ---
                 final_prompt = f"CONTEXT:\n{ctx}\n\nUSER QUERY: {prompt}"
                 
+                # 1. Cấu hình Strict Mode
+                run_instruction = persona['core_instruction']
+                run_temperature = 1.0 # Mặc định sáng tạo vừa phải
+
+                # Biến strict_mode lấy từ cái toggle bên cột phải (col_right)
+                if strict_mode:
+                    run_temperature = 0.0 # Lạnh lùng, chính xác
+                    run_instruction += """
+                    \n\n‼️ STRICT MODE ACTIVATED:
+                    1. CHỈ trả lời dựa trên thông tin trong CONTEXT.
+                    2. Tuyệt đối KHÔNG dùng kiến thức bên ngoài (training data) để bịa đặt.
+                    3. Nếu không có thông tin, trả lời: "Dữ liệu dự án không có thông tin này."
+                    """
+
                 try:
-                    res_stream = generate_content_with_fallback(final_prompt, system_instruction=persona['core_instruction'], stream=True)
+                    # Gọi hàm với config mới
+                    res_stream = generate_content_with_fallback(
+                        final_prompt, 
+                        system_instruction=run_instruction, 
+                        stream=True,
+                        temperature=run_temperature
+                    )
                     
                     with st.chat_message("assistant"):
                         if debug_notes: st.caption(f"🧠 {', '.join(debug_notes)}")
+                        if strict_mode: st.caption("🔒 Strict Mode: ON")
                         
                         full_response_text = ""
                         placeholder = st.empty()
@@ -584,12 +614,25 @@ with tab2:
                                 placeholder.markdown(full_response_text + "▌")
                         placeholder.markdown(full_response_text)
                     
-                    # Save Log
-                    if full_response_text:
+                    # Save Log & Rule Mining (Chỉ lưu nếu enable_history bật)
+                    # Biến enable_history lấy từ toggle bên cột phải
+                    if full_response_text and enable_history:
+                        # 1. Lưu Chat
                         supabase.table("chat_history").insert([
                             {"story_id": proj_id, "role": "user", "content": prompt, "created_at": now_timestamp},
                             {"story_id": proj_id, "role": "model", "content": full_response_text, "created_at": now_timestamp}
                         ]).execute()
+                        
+                        # 2. Học Luật Mới (Agentic)
+                        new_rule = extract_rule_raw(prompt, full_response_text)
+                        if new_rule:
+                            st.session_state['pending_new_rule'] = new_rule
+                            st.rerun()
+                    
+                    elif not enable_history:
+                        st.caption("👻 Chế độ ẩn danh: Không lưu lịch sử & Không học luật.")
+
+                except Exception as e: st.error(f"Lỗi generate: {e}")
                         
                         # --- D. BACKGROUND RULE MINING ---
                         # Kiểm tra xem hội thoại vừa rồi có sinh ra rule mới không
@@ -778,4 +821,5 @@ with tab3:
                 time.sleep(1)
                 st.rerun()
             except Exception as e: st.error(f"Lỗi: {e}")
+
 
