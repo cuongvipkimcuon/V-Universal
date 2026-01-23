@@ -22,6 +22,7 @@ st.markdown("""
     .stTabs [data-baseweb="tab"] { height: 50px; background-color: #f0f2f6; border-radius: 5px; }
     .stTabs [aria-selected="true"] { background-color: #ff4b4b; color: white; }
     div[data-testid="stExpander"] { background-color: #f8f9fa; border-radius: 10px; border: 1px solid #ddd; }
+    .stToast { background-color: #333; color: white; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -130,9 +131,7 @@ with st.sidebar:
 def clean_json_text(text):
     """Làm sạch markdown (```json ... ```) trước khi parse"""
     if not text: return "{}"
-    # Xóa markdown code block
     text = text.replace("```json", "").replace("```", "").strip()
-    # Xóa các ký tự lạ đầu/cuối nếu có
     start = text.find("{")
     end = text.rfind("}") + 1
     if start != -1 and end != 0:
@@ -162,18 +161,18 @@ def crystallize_session(chat_history, persona_role):
     crystallize_prompt = f"""
     Bạn là Thư Ký Ghi Chép ({persona_role}).
     Nhiệm vụ: Đọc đoạn hội thoại sau và LỌC BỎ RÁC.
-    Chỉ giữ lại và TÓM TẮT các thông tin giá trị.
+    Chỉ giữ lại và TÓM TẮT các thông tin giá trị (Fact, Idea, Decision).
     CHAT LOG: {chat_text}
     OUTPUT: Trả về tóm tắt súc tích (50-100 từ). Nếu rác, trả về "NO_INFO".
     """
     try:
-        model = genai.GenerativeModel("gemini-2.5-flash")
+        model = genai.GenerativeModel("gemini-1.5-flash")
         res = model.generate_content(crystallize_prompt)
         return res.text.strip()
     except: return "Lỗi AI Filter."
 
-# --- B. SEARCH LOGIC (RAW & WRAPPER) ---
-def smart_search_hybrid_raw(query_text, project_id, top_k=15):
+# --- B. SEARCH LOGIC (HYBRID) ---
+def smart_search_hybrid_raw(query_text, project_id, top_k=10):
     """Hàm gốc trả về List Object (Có ID, dùng cho Rule Check)"""
     try:
         query_vec = get_embedding(query_text)
@@ -182,15 +181,15 @@ def smart_search_hybrid_raw(query_text, project_id, top_k=15):
         response = supabase.rpc("hybrid_search", {
             "query_text": query_text, 
             "query_embedding": query_vec,
-            "match_threshold": 0.3, # Threshold thấp để vét cạn
+            "match_threshold": 0.3, 
             "match_count": top_k, 
             "story_id_input": project_id
         }).execute()
         return response.data if response.data else []
     except: return []
 
-def smart_search_hybrid(query_text, project_id, top_k=15):
-    """Hàm wrapper trả về String (Dùng cho Context Prompt)"""
+def smart_search_hybrid(query_text, project_id, top_k=10):
+    """Wrapper trả về String Context"""
     raw_data = smart_search_hybrid_raw(query_text, project_id, top_k)
     results = []
     if raw_data:
@@ -198,9 +197,9 @@ def smart_search_hybrid(query_text, project_id, top_k=15):
             results.append(f"- [{item['entity_name']}]: {item['description']}")
     return "\n".join(results) if results else ""
 
-# --- C. [MODULE 1] ROUTER V2 & LOADER ---
+# --- C. [AGENT MODULE] ROUTER & LOADER (NEW) ---
 def ai_router_pro_v2(user_prompt, chat_history_text):
-    """Router V2: Phân tích Intent và Viết lại câu hỏi (Đã Fix lỗi JSON)"""
+    """Router V2: Phân tích Intent và Target Files"""
     router_prompt = f"""
     Đóng vai Project Coordinator. Phân tích User Input và Lịch sử Chat.
     
@@ -210,30 +209,23 @@ def ai_router_pro_v2(user_prompt, chat_history_text):
     USER INPUT: "{user_prompt}"
     
     PHÂN LOẠI INTENT:
-    1. "read_full_content": Khi user muốn "Sửa", "Refactor", "Review", "So sánh", "Viết tiếp", "Kiểm tra", "Check" -> Cần đọc NGUYÊN VĂN FILE.
-    2. "search_bible": Khi user hỏi thông tin chung, quy định, cốt truyện tóm tắt -> Tra cứu Bible.
-    3. "chat_casual": Chào hỏi, chém gió.
+    1. "read_full_content": Khi user muốn "Sửa", "Refactor", "Review", "So sánh", "Viết tiếp", "Kiểm tra code/văn" -> Cần đọc NGUYÊN VĂN FILE.
+    2. "search_bible": Khi user hỏi thông tin chung, quy định, cốt truyện tóm tắt, tra cứu khái niệm -> Tra cứu Bible (Vector).
+    3. "chat_casual": Chào hỏi, chém gió không cần context.
     
     OUTPUT JSON ONLY:
     {{
         "intent": "read_full_content" | "search_bible" | "chat_casual",
         "target_files": ["tên file 1", "tên file 2", "tên chương..."], 
         "reason": "Lý do ngắn gọn",
-        "rewritten_query": "Viết lại câu hỏi cho rõ nghĩa (thay thế 'nó' bằng tên thực thể)"
+        "rewritten_query": "Viết lại câu hỏi cho rõ nghĩa (thay thế 'nó', 'file này' bằng tên thực thể)"
     }}
     """
     try:
-        model = genai.GenerativeModel("gemini-2.5-flash")
+        model = genai.GenerativeModel("gemini-2.0-flash")
         res = model.generate_content(router_prompt, generation_config={"response_mime_type": "application/json"})
-        
-        # [FIX QUAN TRỌNG] Dọn dẹp text trước khi loads
-        cleaned_text = clean_json_text(res.text)
-        
-        return json.loads(cleaned_text)
-    except Exception as e: 
-        # In lỗi ra terminal để debug nếu cần
-        print(f"⚠️ Router Error: {e}")
-        # Trả về mặc định để app không crash
+        return json.loads(clean_json_text(res.text))
+    except Exception: 
         return {"intent": "chat_casual", "target_files": [], "rewritten_query": user_prompt}
 
 def load_full_content(file_names, project_id):
@@ -261,11 +253,12 @@ def load_full_content(file_names, project_id):
 
     return full_text, loaded_sources
 
-# --- D. [MODULE 2] RULE MINING ---
+# --- D. [AGENT MODULE] RULE MINING (NEW) ---
 def get_mandatory_rules(project_id):
     """Lấy tất cả các luật (RULE) bắt buộc"""
     try:
-        res = supabase.table("story_bible").select("description").eq("story_id", project_id).ilike("entity_name", "[RULE]%").execute()
+        # Tìm các entity bắt đầu bằng [RULE]
+        res = supabase.table("story_bible").select("description").eq("story_id", project_id).ilike("entity_name", "%[RULE]%").execute()
         if res.data:
             rules_text = "\n".join([f"- {r['description']}" for r in res.data])
             return f"\n🔥 --- QUY TẮC BẮT BUỘC (MANDATORY RULES) ---\n{rules_text}\n"
@@ -275,21 +268,24 @@ def get_mandatory_rules(project_id):
 def extract_rule_raw(user_prompt, ai_response):
     """Trích xuất luật thô từ hội thoại"""
     prompt = f"""
-    Dựa vào:
-    - User: "{user_prompt}"
-    - AI: "{ai_response}"
-    Hãy rút ra 1 QUY TẮC (RULE) về phong cách/format mà User thích.
-    Output text only (Ngắn gọn, mệnh lệnh thức). VD: "Khi code Python -> Chỉ dùng JSON."
+    Dựa vào hội thoại này, User có đang đưa ra một QUY TẮC (Instruction/Preference) mới không?
+    User: "{user_prompt}"
+    AI: "{ai_response}"
+    
+    Nếu CÓ (VD: "Đừng dùng list, dùng table", "Code phải có comment", "Nhân vật A lạnh lùng hơn"), hãy trích xuất.
+    Nếu KHÔNG (chỉ là chat bình thường), trả về "NO_RULE".
+    
+    Output Text Only.
     """
     try:
-        model = genai.GenerativeModel("gemini-2.5-flash")
+        model = genai.GenerativeModel("gemini-1.5-flash")
         res = model.generate_content(prompt)
-        return res.text.strip()
+        text = res.text.strip()
+        return text if "NO_RULE" not in text else None
     except: return None
 
 def analyze_rule_conflict(new_rule_content, project_id):
-    """Check xung đột luật"""
-    # Dùng hàm smart_search_hybrid (trả về string) để AI đọc
+    """Check xung đột luật với DB"""
     similar_rules_str = smart_search_hybrid(new_rule_content, project_id, top_k=3)
     
     if not similar_rules_str:
@@ -300,41 +296,24 @@ def analyze_rule_conflict(new_rule_content, project_id):
     Luật Cũ trong DB: "{similar_rules_str}"
     
     Hãy so sánh mối quan hệ:
-    - CONFLICT: Mâu thuẫn trực tiếp.
+    - CONFLICT: Mâu thuẫn trực tiếp (VD: Cũ bảo A, Mới bảo không A).
     - MERGE: Cùng chủ đề nhưng Mới chi tiết hơn/bổ sung.
     - NEW: Khác chủ đề.
     
     OUTPUT JSON:
     {{
         "status": "CONFLICT" | "MERGE" | "NEW",
-        "existing_rule_summary": "Tóm tắt luật cũ",
+        "existing_rule_summary": "Tóm tắt luật cũ ngắn gọn",
         "reason": "Lý do",
-        "merged_content": "Nội dung gộp (nếu MERGE). Nếu CONFLICT để null."
+        "merged_content": "Nội dung gộp hoàn chỉnh (nếu MERGE). Nếu CONFLICT/NEW để null."
     }}
     """
-    # --- TRONG HÀM analyze_rule_conflict ---
     try:
-        model = genai.GenerativeModel("gemini-2.5-flash")
+        model = genai.GenerativeModel("gemini-2.0-flash")
         res = model.generate_content(judge_prompt, generation_config={"response_mime_type": "application/json"})
-        
-        # === FIX: GỌI HÀM CLEAN TRƯỚC KHI LOADS ===
-        cleaned = clean_json_text(res.text) 
-        return json.loads(cleaned)
-        # ==========================================
-        
+        return json.loads(clean_json_text(res.text))
     except:
         return {"status": "NEW", "reason": "AI Judge Error", "suggested_content": new_rule_content}
-
-def save_rule_to_db(content, project_id, overwrite=False):
-    """Lưu luật vào DB"""
-    vec = get_embedding(content)
-    supabase.table("story_bible").insert({
-        "story_id": project_id,
-        "entity_name": f"[RULE] {datetime.now().strftime('%Y%m%d_%H%M%S')}",
-        "description": content,
-        "embedding": vec,
-        "source_chapter": 0
-    }).execute()
 
 # ==========================================
 # 📱 5. GIAO DIỆN CHÍNH
@@ -373,11 +352,9 @@ st.title(f"{persona['icon']} {selected_proj_name}")
 
 tab1, tab2, tab3 = st.tabs(["✍️ Workstation", "💬 Smart Chat With V", "📚 Project Bible"])
 
-# === TAB 1: WORKSTATION (FULL TITLE & META) ===
+# === TAB 1: WORKSTATION (GIỮ NGUYÊN) ===
 with tab1:
-    # 1. LOAD DATA
     files = supabase.table("chapters").select("chapter_number, title").eq("story_id", proj_id).order("chapter_number").execute()
-    
     f_opts = {}
     for f in files.data:
         display_name = f"File {f['chapter_number']}"
@@ -403,7 +380,6 @@ with tab1:
 
     st.divider()
 
-    # 2. UI EDIT
     col_edit, col_tool = st.columns([2, 1])
     with col_edit:
         chap_title = st.text_input("🔖 Tên File", value=db_title, placeholder="VD: Sự khởi đầu...")
@@ -420,13 +396,13 @@ with tab1:
 
     with col_tool:
         st.write("### 🤖 Trợ lý AI")
-        # REVIEW
         if st.button("🚀 Review Mới", type="primary"):
             if not input_text: st.warning("Trống!")
             else:
                 with st.status("Đang đọc..."):
                     context = smart_search_hybrid(input_text[:500], proj_id)
-                    final_prompt = f"TITLE: {chap_title}\nCONTEXT: {context}\nCONTENT: {input_text}\nTASK: {persona['review_prompt']}"
+                    rules = get_mandatory_rules(proj_id) # Chèn Rule
+                    final_prompt = f"RULES: {rules}\nTITLE: {chap_title}\nCONTEXT: {context}\nCONTENT: {input_text}\nTASK: {persona['review_prompt']}"
                     res = generate_content_with_fallback(final_prompt, system_instruction=persona['core_instruction'], stream=False)
                     st.session_state['review_res'] = res.text
                     st.rerun()
@@ -440,7 +416,6 @@ with tab1:
                     st.toast("Saved Review!")
 
         st.divider()
-        # EXTRACT META
         if st.button("📥 Trích xuất Bible"):
             with st.spinner("Phân tích..."):
                 meta_desc = "Mô tả ngắn gọn MỤC ĐÍCH, DIỄN BIẾN CHÍNH và KẾT QUẢ của File này."
@@ -461,7 +436,7 @@ with tab1:
         if 'extract_json' in st.session_state:
             with st.expander("Preview", expanded=True):
                 try:
-                    clean = st.session_state['extract_json'].replace("```json", "").replace("```", "").strip()
+                    clean = clean_json_text(st.session_state['extract_json'])
                     data = json.loads(clean)
                     st.dataframe(pd.DataFrame(data)[['entity_name', 'type', 'description']], hide_index=True)
                     if st.button("💾 Save to Bible"):
@@ -476,15 +451,13 @@ with tab1:
                         del st.session_state['extract_json']
                 except Exception as e: st.error(f"Lỗi Format: {e}")
 
-# === TAB 2: SMART CHAT (FINAL FIX RAW OUTPUT) ===
+# === TAB 2: SMART CHAT (SỬA LOGIC AGENTIC) ===
 with tab2:
     col_left, col_right = st.columns([3, 1])
     
-    # --- CỘT PHẢI: QUẢN LÝ KÝ ỨC ---
+    # --- CỘT PHẢI: KÝ ỨC ---
     with col_right:
         st.write("### 🧠 Ký ức")
-        use_bible = st.toggle("Dùng Bible Context", value=True)
-        
         if 'chat_cutoff' not in st.session_state: st.session_state['chat_cutoff'] = "1970-01-01" 
         
         if st.button("🧹 Clear Screen"):
@@ -496,6 +469,7 @@ with tab2:
              st.rerun()
         st.divider()
 
+        # Crystallize logic (Giữ nguyên)
         with st.expander("💎 Kết tinh Chat"):
             st.caption("Lưu ý chính vào Bible.")
             crys_option = st.radio("Phạm vi:", ["20 tin gần nhất", "Toàn bộ phiên"])
@@ -526,113 +500,161 @@ with tab2:
                     del st.session_state['crys_summary']
                     st.rerun()
 
-    # --- CỘT TRÁI: CHAT UI ---
+    # --- CỘT TRÁI: CHAT UI & LOGIC AGENT ---
     with col_left:
-        # 1. LOAD & HIỂN THỊ LỊCH SỬ
+        # 1. LOAD HISTORY
         try:
             msgs_data = supabase.table("chat_history").select("*").eq("story_id", proj_id).order("created_at", desc=True).limit(50).execute().data
             msgs = msgs_data[::-1] if msgs_data else []
             visible_msgs = [m for m in msgs if m['created_at'] > st.session_state['chat_cutoff']]
             
-            for i, m in enumerate(visible_msgs):
+            for m in visible_msgs:
                 with st.chat_message(m['role']):
                     st.markdown(m['content'])
-                    if m['role'] == 'model' and i > 0:
-                        if st.button("❤️ Dạy V học", key=f"like_{m['id']}"): pass 
-
         except Exception as e: st.error(f"Lỗi load history: {e}")
 
         # 2. XỬ LÝ CHAT MỚI
-        if prompt := st.chat_input("Hỏi V..."):
+        if prompt := st.chat_input("Hỏi V (Agentic Mode)..."):
             with st.chat_message("user"): st.markdown(prompt)
             
             with st.spinner("Thinking..."):
                 now_timestamp = datetime.utcnow().isoformat()
                 
-                # --- A. PREP & ROUTER ---
-                route = ai_router_pro_v2(prompt)
-                target_chap = route.get('target_chapter')
+                # --- A. ROUTING ---
+                # Lấy lịch sử chat để Router hiểu ngữ cảnh
+                recent_history_text = "\n".join([f"{m['role']}: {m['content']}" for m in visible_msgs[-5:]])
+                router_out = ai_router_pro_v2(prompt, recent_history_text)
+                
+                intent = router_out.get('intent', 'chat_casual')
+                targets = router_out.get('target_files', [])
+                rewritten_query = router_out.get('rewritten_query', prompt)
                 
                 ctx = ""
-                note = []
+                debug_notes = [f"Intent: {intent}"]
                 
-                # --- B. LOAD CONTEXT ---
-                if target_chap:
-                    c_res = supabase.table("chapters").select("content").eq("story_id", proj_id).eq("chapter_number", target_chap).execute()
-                    if c_res.data: 
-                        ctx += f"\n--- RAW CHAP {target_chap} ---\n{c_res.data[0]['content']}\n"
-                        note.append(f"Read Chap {target_chap}")
+                # --- B. CONTEXT BUILDER ---
+                # B1: Mandatory Rules (Luôn luôn lấy)
+                mandatory_rules = get_mandatory_rules(proj_id)
+                if mandatory_rules:
+                    ctx += f"{mandatory_rules}\n"
+                    debug_notes.append("Rules Loaded")
                 
-                if use_bible:
-                    bible_res = smart_search_hybrid(prompt, proj_id)
-                    if bible_res: 
-                        ctx += f"\n--- BIBLE & MEMORY ---\n{bible_res}\n"
-                        note.append("Vector")
-
-                valid_msgs = [m for m in msgs if m['created_at'] > st.session_state['chat_cutoff']]
-                recent = "\n".join([f"{m['role']}: {m['content']}" for m in valid_msgs[-10:]])
-                ctx += f"\n--- RECENT ---\n{recent}"
-
-                final_prompt = f"CONTEXT:\n{ctx}\n\nUSER: {prompt}"
+                # B2: Content Loading (Dựa theo Intent)
+                if intent == "read_full_content" and targets:
+                    full_text, source_names = load_full_content(targets, proj_id)
+                    ctx += f"\n--- TARGET CONTENT ---\n{full_text}\n"
+                    debug_notes.append(f"Reading: {', '.join(source_names)}")
+                    
+                elif intent == "search_bible":
+                    bible_res = smart_search_hybrid(rewritten_query, proj_id)
+                    ctx += f"\n--- KNOWLEDGE BASE ---\n{bible_res}\n"
+                    debug_notes.append("Vector Search")
                 
-                # --- C. GENERATE VỚI SAFE PARSER ---
+                # B3: Chat History
+                ctx += f"\n--- RECENT CHAT ---\n{recent_history_text}"
+
+                # --- C. GENERATION ---
+                final_prompt = f"CONTEXT:\n{ctx}\n\nUSER QUERY: {prompt}"
                 
-                # [FIX]: Hàm bóc tách nội dung thông minh
-                def safe_stream_parser(response):
-                    # Case 1: Nếu response là Object tĩnh (đã xong) -> Lấy .text luôn
-                    # (Tránh việc loop qua object sẽ ra candidate JSON rác)
-                    if hasattr(response, 'text'):
-                        try:
-                            if response.text: yield response.text
-                        except ValueError:
-                             yield "⚠️ *Nội dung bị chặn do vi phạm quy tắc an toàn của Google.*"
-                        except Exception:
-                             pass
-                        return
-
-                    # Case 2: Nếu là Stream thực sự -> Loop từng chunk
-                    try:
-                        for chunk in response:
-                            if hasattr(chunk, 'text'):
-                                yield chunk.text
-                    except Exception as e:
-                        # Fallback cuối cùng nếu mọi thứ vỡ nát
-                        yield ""
-
                 try:
                     res_stream = generate_content_with_fallback(final_prompt, system_instruction=persona['core_instruction'], stream=True)
                     
                     with st.chat_message("assistant"):
-                        if note: st.caption(f"📚 {', '.join(note)}")
+                        if debug_notes: st.caption(f"🧠 {', '.join(debug_notes)}")
                         
-                        # Sử dụng safe_stream_parser
-                        full_res = st.write_stream(safe_stream_parser(res_stream))
+                        full_response_text = ""
+                        placeholder = st.empty()
                         
-                        if not isinstance(full_res, str): full_res = str(full_res)
+                        for chunk in res_stream:
+                            if hasattr(chunk, 'text') and chunk.text:
+                                full_response_text += chunk.text
+                                placeholder.markdown(full_response_text + "▌")
+                        placeholder.markdown(full_response_text)
                     
-                    if full_res: # Chỉ lưu nếu có nội dung
+                    # Save Log
+                    if full_response_text:
                         supabase.table("chat_history").insert([
                             {"story_id": proj_id, "role": "user", "content": prompt, "created_at": now_timestamp},
-                            {"story_id": proj_id, "role": "model", "content": full_res, "created_at": now_timestamp}
+                            {"story_id": proj_id, "role": "model", "content": full_response_text, "created_at": now_timestamp}
                         ]).execute()
+                        
+                        # --- D. BACKGROUND RULE MINING ---
+                        # Kiểm tra xem hội thoại vừa rồi có sinh ra rule mới không
+                        new_rule = extract_rule_raw(prompt, full_response_text)
+                        if new_rule:
+                            st.session_state['pending_new_rule'] = new_rule
+                            st.rerun() # Rerun để hiện UI xử lý rule
 
                 except Exception as e: st.error(f"Lỗi generate: {e}")
-# === TAB 3: BIBLE (CẬP NHẬT: THÊM/SỬA/SEARCH/MERGE) ===
+
+    # --- UI XỬ LÝ RULE MỚI (NỔI LÊN DƯỚI INPUT) ---
+    if 'pending_new_rule' in st.session_state:
+        rule_content = st.session_state['pending_new_rule']
+        with st.expander("🧐 V phát hiện một Quy Tắc mới!", expanded=True):
+            st.write(f"**Nội dung:** {rule_content}")
+            
+            # Analyze Conflict
+            if 'rule_analysis' not in st.session_state:
+                with st.spinner("Đang kiểm tra trùng lặp..."):
+                    st.session_state['rule_analysis'] = analyze_rule_conflict(rule_content, proj_id)
+            
+            analysis = st.session_state['rule_analysis']
+            st.info(f"Đánh giá AI: **{analysis['status']}** - {analysis['reason']}")
+            
+            if analysis['status'] == "CONFLICT":
+                st.warning(f"⚠️ Xung đột với: {analysis['existing_rule_summary']}")
+            elif analysis['status'] == "MERGE":
+                st.info(f"💡 Gợi ý gộp: {analysis['merged_content']}")
+            
+            c1, c2, c3 = st.columns(3)
+            if c1.button("✅ Lưu/Gộp Rule này"):
+                final_content = analysis.get('merged_content') if analysis['status'] == "MERGE" else rule_content
+                vec = get_embedding(final_content)
+                supabase.table("story_bible").insert({
+                    "story_id": proj_id,
+                    "entity_name": f"[RULE] {datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                    "description": final_content,
+                    "embedding": vec, "source_chapter": 0
+                }).execute()
+                st.toast("Đã học thuộc quy tắc mới!")
+                del st.session_state['pending_new_rule']
+                del st.session_state['rule_analysis']
+                st.rerun()
+                
+            if c2.button("✏️ Sửa rồi Lưu"):
+                st.session_state['edit_rule_manual'] = rule_content
+                
+            if c3.button("❌ Bỏ qua"):
+                del st.session_state['pending_new_rule']
+                del st.session_state['rule_analysis']
+                st.rerun()
+
+        if 'edit_rule_manual' in st.session_state:
+             edited = st.text_input("Sửa lại rule:", value=st.session_state['edit_rule_manual'])
+             if st.button("Lưu bản sửa"):
+                vec = get_embedding(edited)
+                supabase.table("story_bible").insert({
+                    "story_id": proj_id, "entity_name": f"[RULE] Manual",
+                    "description": edited, "embedding": vec, "source_chapter": 0
+                }).execute()
+                del st.session_state['pending_new_rule']
+                del st.session_state['rule_analysis']
+                del st.session_state['edit_rule_manual']
+                st.rerun()
+
+# === TAB 3: BIBLE (GIỮ NGUYÊN LOGIC) ===
 with tab3:
     st.subheader("📚 Project Bible Manager")
     
-    # 1. THANH TÌM KIẾM
     col_search, col_ref = st.columns([4, 1])
     with col_search:
-        search_kw = st.text_input("🔍 Tìm kiếm trong Bible", placeholder="Nhập từ khóa để lọc danh sách bên dưới...")
+        search_kw = st.text_input("🔍 Tìm kiếm trong Bible", placeholder="Nhập từ khóa...")
     with col_ref:
         if st.button("🔄 Refresh", use_container_width=True): st.rerun()
 
-    # 2. LOAD DATA & FILTER
     bible_query = supabase.table("story_bible").select("*").eq("story_id", proj_id).order("created_at", desc=True).execute()
     bible_data = bible_query.data if bible_query.data else []
 
-    # Filter logic
     filtered_bible = []
     if search_kw:
         kw = search_kw.lower()
@@ -640,10 +662,8 @@ with tab3:
     else:
         filtered_bible = bible_data
 
-    # Map ID -> Item
     opts = {f"{b['entity_name']}": b for b in filtered_bible}
 
-    # 3. KHU VỰC THÊM MỚI
     with st.expander("➕ Thêm Bible thủ công", expanded=False):
         with st.form("add_bible_form"):
             new_name = st.text_input("Tên mục (Entity Name)")
@@ -657,30 +677,24 @@ with tab3:
                         if vec:
                             supabase.table("story_bible").insert({
                                 "story_id": proj_id,
-                                "entity_name": new_name,
-                                "description": new_desc,
-                                "embedding": vec,
-                                "source_chapter": 0 # 0 = Manual
+                                "entity_name": new_name, "description": new_desc,
+                                "embedding": vec, "source_chapter": 0
                             }).execute()
                             st.success("Đã thêm thành công!")
                             time.sleep(1)
                             st.rerun()
-                        else:
-                            st.error("Lỗi tạo Embedding.")
+                        else: st.error("Lỗi tạo Embedding.")
 
     st.divider()
 
-    # 4. DANH SÁCH & THAO TÁC
     if filtered_bible:
         selections = st.multiselect(
             f"Chọn mục để thao tác (Đang hiển thị {len(filtered_bible)} mục):", 
-            list(opts.keys()),
-            key="bible_selector"
+            list(opts.keys()), key="bible_selector"
         )
         
         col_actions = st.columns([1, 1, 2])
         
-        # NÚT XÓA
         with col_actions[0]:
             if st.button("🔥 Xóa Mục Chọn", use_container_width=True, disabled=len(selections)==0):
                 ids = [opts[k]['id'] for k in selections]
@@ -689,7 +703,6 @@ with tab3:
                 time.sleep(0.5)
                 st.rerun()
 
-        # NÚT GỘP (MERGE)
         with col_actions[1]:
             if st.button("🧬 Gộp (AI Merge)", use_container_width=True, disabled=len(selections)<2):
                 items = [opts[k] for k in selections]
@@ -703,23 +716,19 @@ with tab3:
                         
                         if merged_text and merged_text.strip():
                             vec = get_embedding(merged_text)
-                            if vec:
-                                # Insert cái mới
+                            if vec: 
                                 supabase.table("story_bible").insert({
                                     "story_id": proj_id, "entity_name": items[0]['entity_name'],
                                     "description": merged_text, "embedding": vec, "source_chapter": items[0]['source_chapter']
                                 }).execute()
-                                # Xóa cái cũ
                                 ids = [i['id'] for i in items]
                                 supabase.table("story_bible").delete().in_("id", ids).execute()
                                 st.success("Gộp xong!")
                                 time.sleep(0.5)
                                 st.rerun()
                             else: st.error("Lỗi Embedding.")
-                        else: st.error("AI trả về rỗng.")
                 except Exception as e: st.error(f"Lỗi: {e}")
 
-        # KHU VỰC SỬA (EDIT)
         if len(selections) == 1:
             st.info("🛠️ Chế độ chỉnh sửa")
             item_to_edit = opts[selections[0]]
@@ -732,45 +741,27 @@ with tab3:
                         vec = get_embedding(f"{edit_name}: {edit_desc}")
                         if vec:
                             supabase.table("story_bible").update({
-                                "entity_name": edit_name,
-                                "description": edit_desc,
-                                "embedding": vec
+                                "entity_name": edit_name, "description": edit_desc, "embedding": vec
                             }).eq("id", item_to_edit['id']).execute()
                             st.success("Đã cập nhật!")
                             time.sleep(1)
                             st.rerun()
-                        else:
-                            st.error("Lỗi vector hóa.")
+                        else: st.error("Lỗi vector hóa.")
 
         st.divider()
         st.dataframe(
             pd.DataFrame(filtered_bible)[['entity_name', 'description', 'created_at']], 
-            use_container_width=True,
-            hide_index=True
+            use_container_width=True, hide_index=True
         )
     else:
         st.info("Không tìm thấy dữ liệu phù hợp.")
     
     st.divider()
-    with st.expander("💀 Danger Zone (Xóa tất cả)"):
-        st.warning("⚠️ CẢNH BÁO: Hành động này sẽ xóa sạch toàn bộ Bible của dự án này. Bạn sẽ cần trích xuất lại từ đầu.")
-        col_dang1, col_dang2 = st.columns([3, 1])
-        with col_dang2:
-            if st.button("💣 Xóa sạch Bible & Reset", type="primary", use_container_width=True):
-                try:
-                    supabase.table("story_bible").delete().eq("story_id", proj_id).execute()
-                    st.success("Đã dọn sạch sẽ!")
-                    time.sleep(1)
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Lỗi khi xóa: {e}")
-
-
-
-
-
-
-
-
-
-
+    with st.expander("💀 Danger Zone"):
+        if st.button("💣 Xóa sạch Bible & Reset", type="primary", use_container_width=True):
+            try:
+                supabase.table("story_bible").delete().eq("story_id", proj_id).execute()
+                st.success("Đã dọn sạch sẽ!")
+                time.sleep(1)
+                st.rerun()
+            except Exception as e: st.error(f"Lỗi: {e}")
