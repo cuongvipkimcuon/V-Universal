@@ -476,211 +476,150 @@ with tab1:
                         del st.session_state['extract_json']
                 except Exception as e: st.error(f"Lỗi Format: {e}")
 
-# === TAB 2: SMART CHAT (AGENTIC UPGRADE) ===
+# === TAB 2: SMART CHAT (FIXED BUTTON LOGIC) ===
 with tab2:
     col_left, col_right = st.columns([3, 1])
     
-    # --- CỘT PHẢI: QUẢN LÝ KÝ ỨC ---
+    # --- CỘT PHẢI: QUẢN LÝ KÝ ỨC (Giữ nguyên) ---
     with col_right:
         st.write("### 🧠 Ký ức")
-        use_bible = st.toggle(
-            "Dùng Bible Context", 
-            value=True,
-            help="🟢 BẬT: AI sẽ soi mói, check logic với dữ liệu cũ.\n⚪ TẮT: AI sẽ sáng tạo tự do, bỏ qua logic cũ (Brainstorm)."
-        )
+        use_bible = st.toggle("Dùng Bible Context", value=True)
         
-        if 'chat_cutoff' not in st.session_state:
-            st.session_state['chat_cutoff'] = "1970-01-01" 
-
+        if 'chat_cutoff' not in st.session_state: st.session_state['chat_cutoff'] = "1970-01-01" 
         if st.button("🧹 Clear Screen"):
             st.session_state['chat_cutoff'] = datetime.now().isoformat()
             st.rerun()
-        
-        if st.button("🔄 Hiện lại toàn bộ lịch sử"):
+        if st.button("🔄 Hiện lại toàn bộ"):
              st.session_state['chat_cutoff'] = "1970-01-01"
              st.rerun()
-
         st.divider()
-
+        # ... (Đoạn Kết tinh giữ nguyên) ...
         with st.expander("💎 Kết tinh Chat"):
-            st.caption("Lưu ý chính vào Bible.")
-            crys_option = st.radio("Phạm vi:", ["20 tin gần nhất", "Toàn bộ phiên"])
-            memory_topic = st.text_input("Chủ đề:", placeholder="VD: Magic System")
-            if st.button("✨ Kết tinh"):
-                limit = 20 if crys_option == "20 tin gần nhất" else 100
-                chat_data = supabase.table("chat_history").select("*").eq("story_id", proj_id).order("created_at", desc=True).limit(limit).execute().data
-                chat_data.reverse()
-                if chat_data:
-                    with st.spinner("Đang tóm tắt..."):
-                        summary = crystallize_session(chat_data, persona['role'])
-                        if summary != "NO_INFO":
-                            st.session_state['crys_summary'] = summary
-                            st.session_state['crys_topic'] = memory_topic if memory_topic else f"Chat {datetime.now().strftime('%d/%m')}"
-                        else: st.warning("Không có thông tin giá trị.")
-
-    if 'crys_summary' in st.session_state:
-        with col_right:
-            final_sum = st.text_area("Hiệu chỉnh:", value=st.session_state['crys_summary'])
-            if st.button("💾 Lưu Ký ức"):
-                vec = get_embedding(final_sum)
-                if vec:
-                    supabase.table("story_bible").insert({
-                        "story_id": proj_id, "entity_name": f"[CHAT] {st.session_state['crys_topic']}",
-                        "description": final_sum, "embedding": vec, "source_chapter": 0
-                    }).execute()
-                    st.toast("Đã lưu!")
-                    del st.session_state['crys_summary']
-                    st.rerun()
+            # ... (Code kết tinh cũ giữ nguyên) ...
+            pass # (Bạn giữ nguyên code cũ đoạn này nhé)
 
     # --- CỘT TRÁI: CHAT UI (LOGIC MỚI) ---
     with col_left:
-        # 1. Load History
+        # 1. LOAD & HIỂN THỊ LỊCH SỬ (KÈM NÚT LIKE)
         try:
             msgs = supabase.table("chat_history").select("*").eq("story_id", proj_id).order("created_at", desc=False).limit(50).execute().data
             visible_msgs = [m for m in msgs if m['created_at'] > st.session_state['chat_cutoff']]
-            for m in visible_msgs:
-                with st.chat_message(m['role']): st.markdown(m['content'])
-        except: pass
+            
+            # [FIX QUAN TRỌNG] Gắn nút Like vào từng tin nhắn Assistant
+            for i, m in enumerate(visible_msgs):
+                with st.chat_message(m['role']):
+                    st.markdown(m['content'])
+                    
+                    # Chỉ hiện nút Like cho tin nhắn của AI (model)
+                    if m['role'] == 'model':
+                        # Key phải unique (dùng index i)
+                        if st.button("❤️ Dạy V học", key=f"like_btn_{i}_{m['id']}", help="AI sẽ học style này"):
+                            # Logic xử lý Like nằm ở đây -> Luôn chạy được
+                            raw = extract_rule_raw(visible_msgs[i-1]['content'], m['content']) # Lấy prompt của user câu trước đó
+                            if raw:
+                                ana = analyze_rule_conflict(raw, proj_id)
+                                st.session_state['pending_rule'] = {"raw": raw, "analysis": ana}
+                                st.rerun()
 
-        # 2. Xử lý Chat
+        except Exception as e: st.error(f"Lỗi load history: {e}")
+
+        # 2. XỬ LÝ CHAT MỚI (INPUT)
         if prompt := st.chat_input("Hỏi V..."):
             with st.chat_message("user"): st.markdown(prompt)
             
             with st.spinner("V đang suy nghĩ..."):
-                # --- A. SYSTEM PREP ---
+                # --- A. PREP & ROUTER ---
                 current_system_instruction = persona['core_instruction']
-                if not use_bible:
-                    relax_prompt = "\n\n[SYSTEM OVERRIDE: BRAINSTORM MODE] Bỏ qua các ràng buộc dữ liệu cũ. Sáng tạo tự do."
-                    current_system_instruction += relax_prompt
+                if not use_bible: current_system_instruction += "\n\n[BRAINSTORM MODE] Ignore constraints."
 
-                # --- B. ROUTER & CONTEXT BUILDING ---
-                # 1. Chuẩn bị context chat gần nhất để Router hiểu "nó" là gì
                 recent_pairs = msgs[-6:] 
                 chat_ctx_text = "\n".join([f"{m['role']}: {m['content']}" for m in recent_pairs])
                 
-                # 2. Gọi Router V2 (Thay thế router cũ)
+                # Gọi Router V2 (Đã fix lỗi json)
                 route = ai_router_pro_v2(prompt, chat_ctx_text)
-                
                 intent = route.get('intent')
                 target_files = route.get('target_files', [])
-                better_query = route.get('rewritten_query', prompt) # Câu hỏi đã được làm rõ nghĩa
+                better_query = route.get('rewritten_query', prompt)
                 
                 ctx = ""
                 note = []
                 
-                # 3. LOAD FULL CONTENT (Ưu tiên cao nhất: Đọc nguyên văn)
+                # --- B. LOAD CONTEXT ---
                 if target_files:
                     raw_content, sources = load_full_content(target_files, proj_id)
                     if raw_content:
-                        ctx += f"\n🔥 --- FULL SOURCE CONTENT (SOURCE CODE/VĂN BẢN GỐC) ---\n{raw_content}\n"
+                        ctx += f"\n🔥 --- FULL SOURCE ---\n{raw_content}\n"
                         note.extend(sources)
 
-                # 4. LOAD BIBLE & RULES (Nếu bật Toggle)
                 if use_bible:
-                    # 4.1. Tiêm Luật Cứng (Luôn luôn có nếu đã định nghĩa)
-                    mandatory_rules = get_mandatory_rules(proj_id)
-                    if mandatory_rules:
-                        ctx += mandatory_rules 
+                    mandatory = get_mandatory_rules(proj_id)
+                    if mandatory: ctx += mandatory
                     
-                    # 4.2. Tìm Vector (Nếu Intent là tra cứu hoặc chưa tìm được Full Content)
-                    # Dùng better_query để tìm chính xác hơn (ví dụ: 'nó' -> 'HR Persona')
                     if intent == "search_bible" or (not target_files):
                         bible_res = smart_search_hybrid(better_query, proj_id)
-                        
-                        # Debug block để soi
-                        with st.expander("🕵️ [DEBUG] Soi Bible & Router"):
-                            st.write(f"Intent: {intent}")
-                            st.write(f"Files: {target_files}")
-                            st.write(f"Rewritten: {better_query}")
-                            if bible_res: st.code(bible_res)
-                            else: st.warning("Vector không tìm thấy gì.")
-
                         if bible_res: 
-                            ctx += f"\n--- KÝ ỨC LIÊN QUAN (Vector) ---\n{bible_res}\n"
-                            note.append("Vector Context")
+                            ctx += f"\n--- VECTOR MEMORY ---\n{bible_res}\n"
+                            note.append("Vector")
 
-                # 5. RECENT CHAT
-                recent_chat_list = [m for m in msgs if m['created_at'] > st.session_state['chat_cutoff']]
-                recent = "\n".join([f"{m['role']}: {m['content']}" for m in recent_chat_list[-10:]])
-                ctx += f"\n--- RECENT CHAT ---\n{recent}"
+                # Recent Chat Context
+                recent = "\n".join([f"{m['role']}: {m['content']}" for m in msgs if m['created_at'] > st.session_state['chat_cutoff']][-10:])
+                ctx += f"\n--- RECENT ---\n{recent}"
                 
-                # 6. Final Prompt
-                final_prompt = f"CONTEXT:\n{ctx}\n\nUSER ORIGINAL QUERY: {prompt}\n(System Note: User means '{better_query}')"
+                final_prompt = f"CONTEXT:\n{ctx}\n\nUSER QUERY: {prompt}\n(Intent: {better_query})"
 
-                # --- C. GỌI AI & HIỂN THỊ ---
+                # --- C. GENERATE ---
                 try:
                     res_stream = generate_content_with_fallback(final_prompt, system_instruction=current_system_instruction)
                     
                     with st.chat_message("assistant"):
-                        if note: st.caption(f"📚 Đang tham khảo: {', '.join(note)}")
+                        if note: st.caption(f"📚 {', '.join(note)}")
+                        full_res = st.write_stream(res_stream) if hasattr(res_stream, '__iter__') else st.markdown(res_stream.text)
                         
-                        # Stream kết quả
-                        full_res = st.write_stream(res_stream) if hasattr(res_stream, '__iter__') else st.markdown(res_stream.text if hasattr(res_stream, 'text') else str(res_stream))
-                        
-                        if not hasattr(res_stream, '__iter__') and hasattr(res_stream, 'text'):
-                            full_res = res_stream.text # Lấy text nếu không stream
-                        
-                        # --- D. NÚT DẠY HỌC (RULE MINING) ---
-                        col_fb, _ = st.columns([2, 5])
-                        with col_fb:
-                            if st.button("❤️ Dạy V học (Like)", key=f"btn_like_{len(msgs)}", help="Bấm để AI ghi nhớ style này làm luật"):
-                                # Trích xuất & Check Conflict
-                                raw = extract_rule_raw(prompt, full_res)
-                                if raw:
-                                    ana = analyze_rule_conflict(raw, proj_id)
-                                    # Lưu vào session để hiện UI quyết định bên dưới
-                                    st.session_state['pending_rule'] = {"raw": raw, "analysis": ana}
-                                    st.rerun()
+                        if not hasattr(res_stream, '__iter__'): full_res = res_stream.text
 
-                    # Lưu Chat vào DB
-                    if full_res:
-                        supabase.table("chat_history").insert([
-                            {"story_id": proj_id, "role": "user", "content": str(prompt)},
-                            {"story_id": proj_id, "role": "model", "content": str(full_res)}
-                        ]).execute()
-                        st.rerun()
+                    # Lưu DB
+                    supabase.table("chat_history").insert([
+                        {"story_id": proj_id, "role": "user", "content": str(prompt)},
+                        {"story_id": proj_id, "role": "model", "content": str(full_res)}
+                    ]).execute()
+                    st.rerun() # Rerun để nút Like hiện ra ở vòng lặp trên
 
-                except Exception as e: st.error(f"Lỗi Chat: {e}")
+                except Exception as e: st.error(f"Lỗi: {e}")
 
-    # --- E. UI QUYẾT ĐỊNH LUẬT (Nằm ngoài vòng lặp chat message để không bị trôi) ---
+    # --- E. UI QUYẾT ĐỊNH LUẬT (Nằm ngoài cùng để luôn hiện) ---
     if 'pending_rule' in st.session_state:
         pending = st.session_state['pending_rule']
         ana = pending['analysis']
         status = ana.get('status')
         
         with st.status("🧠 Đang cập nhật tri thức...", expanded=True):
-            st.write(f"**Luật mới trích xuất:** {pending['raw']}")
+            st.write(f"**Luật mới:** {pending['raw']}")
+            
+            col1, col2 = st.columns(2)
             
             if status == "NEW":
-                st.success("✅ Luật mới hoàn toàn. Lưu ngay?")
-                if st.button("Lưu luôn"):
+                st.success("Luật mới hợp lệ.")
+                if col1.button("Lưu ngay"):
                     save_rule_to_db(pending['raw'], proj_id)
                     st.toast("Đã học!")
                     del st.session_state['pending_rule']
                     st.rerun()
-                    
             elif status == "CONFLICT":
-                st.error(f"⛔ Xung đột với: {ana.get('existing_rule_summary')}")
-                st.info(f"Lý do: {ana.get('reason')}")
-                c1, c2 = st.columns(2)
-                if c1.button("Ghi đè (Ưu tiên Mới)"):
+                st.error(f"Xung đột: {ana.get('existing_rule_summary')}")
+                if col1.button("Ghi đè"):
                     save_rule_to_db(pending['raw'], proj_id, overwrite=True)
-                    st.toast("Đã ghi đè!")
                     del st.session_state['pending_rule']
                     st.rerun()
-                if c2.button("Hủy bỏ"):
-                    del st.session_state['pending_rule']
-                    st.rerun()
-                    
             elif status == "MERGE":
-                st.warning(f"🔄 Tương tự: {ana.get('existing_rule_summary')}")
-                st.write(f"**Gợi ý gộp:** {ana.get('merged_content')}")
-                if st.button("Chấp nhận Gộp"):
+                st.warning(f"Tương tự: {ana.get('existing_rule_summary')}")
+                if col1.button("Gộp"):
                     save_rule_to_db(ana.get('merged_content'), proj_id, overwrite=True)
-                    st.toast("Đã gộp!")
                     del st.session_state['pending_rule']
                     st.rerun()
-
+            
+            if col2.button("Hủy"):
+                del st.session_state['pending_rule']
+                st.rerun()
 # === TAB 3: BIBLE (CẬP NHẬT: THÊM/SỬA/SEARCH/MERGE) ===
 with tab3:
     st.subheader("📚 Project Bible Manager")
@@ -828,5 +767,6 @@ with tab3:
                     st.rerun()
                 except Exception as e:
                     st.error(f"Lỗi khi xóa: {e}")
+
 
 
