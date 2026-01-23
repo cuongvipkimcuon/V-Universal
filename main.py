@@ -813,8 +813,20 @@ with tab3:
                 
                 try:
                     with st.spinner("AI đang gộp..."):
-                        res = generate_content_with_fallback(prompt_merge, system_instruction="Merge Expert", stream=False)
-                        merged_text = res.text
+                        with st.spinner("AI đang gộp..."):
+                            res = generate_content_with_fallback(prompt_merge, system_instruction="Merge Expert", stream=False)
+        
+                    # KIỂM TRA AN TOÀN TRƯỚC KHI LẤY TEXT
+                            if res and hasattr(res, 'text'):
+                                try:
+                                    merged_text = res.text
+                                except ValueError:
+                                    # Trường hợp res tồn tại nhưng bị chặn bởi Safety Filter sau khi xử lý
+                                    st.error("Nội dung này bị bộ lọc an toàn của AI chặn lại.")
+                                    st.stop()
+                            else:
+                                st.error("AI không trả về nội dung hợp lệ.")
+                                st.stop()
                         
                         if merged_text and merged_text.strip():
                             vec = get_embedding(merged_text)
@@ -867,6 +879,7 @@ with tab3:
                 time.sleep(1)
                 st.rerun()
             except Exception as e: st.error(f"Lỗi: {e}")
+
 
 
 
