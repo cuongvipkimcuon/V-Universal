@@ -126,22 +126,21 @@ def check_login_status():
 
 check_login_status()
 
-# --- SIDEBAR & LOGIC ĐĂNG XUẤT ĐÃ SỬA ---
+# --- SIDEBAR (ĐOẠN CODE ĐÃ SỬA LỖI DUPLICATE KEY) ---
 with st.sidebar:
     if 'user' in st.session_state:
         st.info(f"👤 {st.session_state.user.email}")
         
         if st.button("🚪 Đăng xuất", use_container_width=True):
-            # 1. Xóa Cookie
-            cookie_manager.delete("supabase_access_token")
-            cookie_manager.delete("supabase_refresh_token")
+            # [FIX LỖI HERE] Thêm key="..." khác nhau cho mỗi dòng
+            cookie_manager.delete("supabase_access_token", key="logout_access_token")
+            cookie_manager.delete("supabase_refresh_token", key="logout_refresh_token")
             
             # 2. Sign out Supabase
             try: supabase.auth.sign_out()
             except: pass
             
-            # 3. Xóa Session State (QUAN TRỌNG: KHÔNG XÓA TOÀN BỘ)
-            # Chỉ xóa những key do mình tạo ra, giữ lại key của các thư viện
+            # 3. Xóa Session State (Chỉ xóa key user)
             keys_to_remove = ['user', 'cookie_check_done']
             for key in keys_to_remove:
                 if key in st.session_state:
@@ -149,7 +148,7 @@ with st.sidebar:
             
             # 4. Thông báo & Rerun
             st.warning("Đang đăng xuất...")
-            time.sleep(1) # Chờ 1s là đủ
+            time.sleep(1) 
             st.rerun()
 
 # ==========================================
@@ -854,6 +853,7 @@ with tab3:
                 time.sleep(1)
                 st.rerun()
             except Exception as e: st.error(f"Lỗi: {e}")
+
 
 
 
