@@ -483,6 +483,12 @@ with tab2:
         if st.button("🔄 Hiện lại toàn bộ"):
              st.session_state['chat_cutoff'] = "1970-01-01"
              st.rerun()
+        # === [FIX] THÊM NÚT NÀY ĐỂ KHÔNG BỊ LỖI NameError ===
+        enable_history = st.toggle(
+            "💾 Lưu lịch sử Chat", 
+            value=True, 
+            help="Tắt đi để chat ẩn danh (Không lưu DB, AI không học)"
+        )
         # === THÊM CÁI NÀY ===
         strict_mode = st.toggle(
             "🚫 Chế độ Nghiêm túc (Strict)", 
@@ -814,6 +820,7 @@ with tab3:
                 time.sleep(1)
                 st.rerun()
             except Exception as e: st.error(f"Lỗi: {e}")
+
 
 
 
