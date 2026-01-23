@@ -126,6 +126,19 @@ with st.sidebar:
 # ==========================================
 
 # --- A. HELPER FUNCTIONS ---
+
+def clean_json_text(text):
+    """Làm sạch markdown (```json ... ```) trước khi parse"""
+    if not text: return "{}"
+    # Xóa markdown code block
+    text = text.replace("```json", "").replace("```", "").strip()
+    # Xóa các ký tự lạ đầu/cuối nếu có
+    start = text.find("{")
+    end = text.rfind("}") + 1
+    if start != -1 and end != 0:
+        return text[start:end]
+    return text
+    
 def get_embedding(text):
     if not text or not isinstance(text, str) or not text.strip():
         return None 
@@ -169,7 +182,7 @@ def smart_search_hybrid_raw(query_text, project_id, top_k=15):
         response = supabase.rpc("hybrid_search", {
             "query_text": query_text, 
             "query_embedding": query_vec,
-            "match_threshold": 0.01, # Threshold thấp để vét cạn
+            "match_threshold": 0.3, # Threshold thấp để vét cạn
             "match_count": top_k, 
             "story_id_input": project_id
         }).execute()
@@ -187,7 +200,7 @@ def smart_search_hybrid(query_text, project_id, top_k=15):
 
 # --- C. [MODULE 1] ROUTER V2 & LOADER ---
 def ai_router_pro_v2(user_prompt, chat_history_text):
-    """Router V2: Phân tích Intent và Viết lại câu hỏi"""
+    """Router V2: Phân tích Intent và Viết lại câu hỏi (Đã Fix lỗi JSON)"""
     router_prompt = f"""
     Đóng vai Project Coordinator. Phân tích User Input và Lịch sử Chat.
     
@@ -212,8 +225,15 @@ def ai_router_pro_v2(user_prompt, chat_history_text):
     try:
         model = genai.GenerativeModel("gemini-2.5-flash")
         res = model.generate_content(router_prompt, generation_config={"response_mime_type": "application/json"})
-        return json.loads(res.text)
-    except: 
+        
+        # [FIX QUAN TRỌNG] Dọn dẹp text trước khi loads
+        cleaned_text = clean_json_text(res.text)
+        
+        return json.loads(cleaned_text)
+    except Exception as e: 
+        # In lỗi ra terminal để debug nếu cần
+        print(f"⚠️ Router Error: {e}")
+        # Trả về mặc định để app không crash
         return {"intent": "chat_casual", "target_files": [], "rewritten_query": user_prompt}
 
 def load_full_content(file_names, project_id):
@@ -802,3 +822,4 @@ with tab3:
                     st.rerun()
                 except Exception as e:
                     st.error(f"Lỗi khi xóa: {e}")
+
