@@ -476,7 +476,7 @@ with tab1:
                         del st.session_state['extract_json']
                 except Exception as e: st.error(f"Lỗi Format: {e}")
 
-# === TAB 2: SMART CHAT (FINAL PERFECT VERSION) ===
+# === TAB 2: SMART CHAT (FIXED VERSION) ===
 with tab2:
     col_left, col_right = st.columns([3, 1])
     
@@ -524,12 +524,15 @@ with tab2:
                     del st.session_state['crys_summary']
                     st.rerun()
 
-    # --- CỘT TRÁI: CHAT UI (LOGIC MỚI) ---
+    # --- CỘT TRÁI: CHAT UI (LOGIC ĐÃ SỬA) ---
     with col_left:
         # 1. LOAD & HIỂN THỊ LỊCH SỬ
         try:
-            # Lấy data raw
-            msgs = supabase.table("chat_history").select("*").eq("story_id", proj_id).order("created_at", desc=False).limit(50).execute().data
+            # [FIX 1]: Lấy 50 tin MỚI NHẤT (desc=True) thay vì cũ nhất
+            msgs_data = supabase.table("chat_history").select("*").eq("story_id", proj_id).order("created_at", desc=True).limit(50).execute().data
+            
+            # Đảo ngược lại để hiển thị từ trên xuống dưới (Cũ -> Mới)
+            msgs = msgs_data[::-1] if msgs_data else []
             
             # Lọc theo thời gian (Clear screen logic)
             visible_msgs = [m for m in msgs if m['created_at'] > st.session_state['chat_cutoff']]
@@ -538,14 +541,10 @@ with tab2:
                 with st.chat_message(m['role']):
                     st.markdown(m['content'])
                     
-                    # [FIX LỖI RÂU ÔNG NỌ]: Chỉ hiện nút Like nếu là Model VÀ không phải tin đầu tiên (i > 0)
+                    # Nút Like (Logic cũ)
                     if m['role'] == 'model' and i > 0:
-                        # Kiểm tra chắc chắn tin trước đó là của User
                         prev_msg = visible_msgs[i-1]
-                        
                         if st.button("❤️ Dạy V học", key=f"like_btn_{i}_{m['id']}", help="AI sẽ học style này"):
-                            # Logic xử lý Like
-                            # Bây giờ visible_msgs[i-1] chắc chắn là tin liền trước
                             raw = extract_rule_raw(prev_msg['content'], m['content'])
                             if raw:
                                 ana = analyze_rule_conflict(raw, proj_id)
@@ -563,12 +562,10 @@ with tab2:
                 current_system_instruction = persona['core_instruction']
                 if not use_bible: current_system_instruction += "\n\n[BRAINSTORM MODE] Ignore constraints."
 
-                # [FIX LỖI ĐỌC TRỘM]: Lọc tin nhắn SAU cutoff rồi mới cắt lấy 6 tin cuối
                 valid_history_for_context = [m for m in msgs if m['created_at'] > st.session_state['chat_cutoff']]
                 recent_pairs = valid_history_for_context[-6:] 
                 chat_ctx_text = "\n".join([f"{m['role']}: {m['content']}" for m in recent_pairs])
                 
-                # Gọi Router V2
                 route = ai_router_pro_v2(prompt, chat_ctx_text)
                 intent = route.get('intent')
                 target_files = route.get('target_files', [])
@@ -589,14 +586,11 @@ with tab2:
                     if mandatory: ctx += mandatory
                     
                     if intent == "search_bible" or (not target_files):
-                        # Nâng ngưỡng search lên 0.5 để tránh rác như đã bàn
-                        # (Giả sử bạn đã update hàm smart_search_hybrid_raw lên 0.5)
                         bible_res = smart_search_hybrid(better_query, proj_id)
                         if bible_res: 
                             ctx += f"\n--- VECTOR MEMORY ---\n{bible_res}\n"
                             note.append("Vector")
 
-                # Recent Chat Context (Lấy 10 tin từ lịch sử ĐÃ LỌC)
                 recent = "\n".join([f"{m['role']}: {m['content']}" for m in valid_history_for_context[-10:]])
                 ctx += f"\n--- RECENT ---\n{recent}"
                 
@@ -608,16 +602,22 @@ with tab2:
                     
                     with st.chat_message("assistant"):
                         if note: st.caption(f"📚 {', '.join(note)}")
-                        full_res = st.write_stream(res_stream) if hasattr(res_stream, '__iter__') else st.markdown(res_stream.text)
+                        # Stream nội dung ra màn hình
+                        full_res = st.write_stream(res_stream) 
                         
-                        if not hasattr(res_stream, '__iter__'): full_res = res_stream.text
+                        # [QUAN TRỌNG] Nếu stream bị lỗi generator, convert sang text thường
+                        if not isinstance(full_res, str): 
+                             full_res = str(full_res)
 
                     # Lưu DB
                     supabase.table("chat_history").insert([
                         {"story_id": proj_id, "role": "user", "content": str(prompt)},
                         {"story_id": proj_id, "role": "model", "content": str(full_res)}
                     ]).execute()
-                    st.rerun() 
+                    
+                    # [FIX 2]: BỎ LỆNH st.rerun() Ở ĐÂY!
+                    # Để tin nhắn vừa chat không bị load lại (tránh chớp màn hình)
+                    # Lần chat tiếp theo nó sẽ tự hiện trong lịch sử.
 
                 except Exception as e: st.error(f"Lỗi: {e}")
 
@@ -802,6 +802,7 @@ with tab3:
                     st.rerun()
                 except Exception as e:
                     st.error(f"Lỗi khi xóa: {e}")
+
 
 
 
