@@ -35,7 +35,7 @@ SAFE_CONFIG = {
 }
 MODEL_PRIORITY = ["gemini-3-flash-preview", "gemini-2.5-flash", "gemini-2.0-flash"]
 
-# --- 2. KHỞI TẠO KẾT NỐI (AN TOÀN) ---
+# --- 2. KHỞI TẠO KẾT NỐI ---
 def init_services():
     try:
         SUPABASE_URL = st.secrets["supabase"]["SUPABASE_URL"]
@@ -54,38 +54,41 @@ if not supabase:
     st.error("❌ Lỗi kết nối! Kiểm tra lại file secrets.toml")
     st.stop()
 
-# --- 3. COOKIE MANAGER & LOGIN ---
-# [QUAN TRỌNG] Thêm key để component không bị reset lung tung
+# --- 3. COOKIE MANAGER (ĐẶT Ở ĐẦU) ---
+# Chỉ khởi tạo 1 lần duy nhất với key cố định
 cookie_manager = stx.CookieManager(key="v_brainer_cookies")
 
 def check_login_status():
-    # 1. Nếu đã có User trong Session rồi thì bỏ qua check cookie cho nhanh
+    # 1. Nếu đã có User -> Bỏ qua
     if 'user' in st.session_state:
         return
 
-    # 2. Kiểm tra Cookie (Chỉ làm 1 lần khi mới vào)
+    # 2. Kiểm tra Cookie
     if 'cookie_check_done' not in st.session_state:
-        with st.spinner("⏳ Đang kết nối vệ tinh..."):
-            time.sleep(1) # Chờ component load
+        # Không dùng st.spinner ở đây để tránh xung đột UI khi component render
+        time.sleep(0.5) 
+        try:
+            access_token = cookie_manager.get("supabase_access_token")
+            refresh_token = cookie_manager.get("supabase_refresh_token")
+            
+            if access_token and refresh_token:
+                session = supabase.auth.set_session(access_token, refresh_token)
+                if session:
+                    st.session_state.user = session.user
+                    st.toast("👋 Mừng ông giáo trở lại!", icon="🍪")
+                    time.sleep(0.5)
+                    st.rerun()
+        except Exception:
+            # Xóa cookie lỗi nhẹ nhàng
             try:
-                access_token = cookie_manager.get("supabase_access_token")
-                refresh_token = cookie_manager.get("supabase_refresh_token")
-                
-                if access_token and refresh_token:
-                    session = supabase.auth.set_session(access_token, refresh_token)
-                    if session:
-                        st.session_state.user = session.user
-                        st.toast("👋 Mừng ông giáo trở lại!", icon="🍪")
-                        time.sleep(0.5)
-                        st.rerun()
-            except Exception as e:
-                # Nếu lỗi cookie cũ -> Xóa luôn để tránh lỗi đỏ
                 cookie_manager.delete("supabase_access_token")
                 cookie_manager.delete("supabase_refresh_token")
-            
-            st.session_state['cookie_check_done'] = True
+            except:
+                pass
+        
+        st.session_state['cookie_check_done'] = True
 
-    # 3. Hiện Form Đăng Nhập (Nếu chưa có User)
+    # 3. Form Đăng Nhập
     if 'user' not in st.session_state:
         st.title("🔐 Đăng nhập V-Brainer")
         col_main, _ = st.columns([1, 1])
@@ -104,9 +107,8 @@ def check_login_status():
                     cookie_manager.set("supabase_access_token", res.session.access_token)
                     cookie_manager.set("supabase_refresh_token", res.session.refresh_token)
                     
-                    st.success("Thành công! Đang chuyển hướng...")
-                    # [FIX LỖI ĐỎ] Chờ lâu hơn để trình duyệt kịp lưu
-                    time.sleep(3) 
+                    st.success("Thành công! Đang vào...")
+                    time.sleep(1.5) # Giảm thời gian chờ xuống 1.5s là đủ
                     st.rerun()
                 except Exception as e:
                     st.error(f"Lỗi: {e}")
@@ -115,23 +117,22 @@ def check_login_status():
                 try:
                     res = supabase.auth.sign_up({"email": email, "password": password})
                     if res.user:
-                        st.success("Đăng ký thành công! Hãy đăng nhập.")
+                        st.success("Đăng ký thành công! Hãy kiểm tra Email.")
                     else:
                         st.warning("Vui lòng kiểm tra email xác nhận.")
                 except Exception as e:
                     st.error(f"Lỗi: {e}")
-        st.stop() # Dừng lại, không chạy code phía dưới nếu chưa login
+        st.stop()
 
 check_login_status()
 
-# --- SIDEBAR (LOGIC ĐĂNG XUẤT ĐÃ FIX) ---
+# --- SIDEBAR & LOGIC ĐĂNG XUẤT ĐÃ SỬA ---
 with st.sidebar:
     if 'user' in st.session_state:
         st.info(f"👤 {st.session_state.user.email}")
         
-        # [FIX ĐĂNG XUẤT]
         if st.button("🚪 Đăng xuất", use_container_width=True):
-            # 1. Xóa Cookie trước
+            # 1. Xóa Cookie
             cookie_manager.delete("supabase_access_token")
             cookie_manager.delete("supabase_refresh_token")
             
@@ -139,15 +140,16 @@ with st.sidebar:
             try: supabase.auth.sign_out()
             except: pass
             
-            # 3. Xóa Session State
-            for key in list(st.session_state.keys()):
-                del st.session_state[key]
+            # 3. Xóa Session State (QUAN TRỌNG: KHÔNG XÓA TOÀN BỘ)
+            # Chỉ xóa những key do mình tạo ra, giữ lại key của các thư viện
+            keys_to_remove = ['user', 'cookie_check_done']
+            for key in keys_to_remove:
+                if key in st.session_state:
+                    del st.session_state[key]
             
-            # 4. Thông báo & Chờ
-            st.warning("Đang dọn dẹp ký ức...")
-            
-            # [QUAN TRỌNG] Chờ 2 giây để trình duyệt xóa Cookie xong hẳn mới Rerun
-            time.sleep(3) 
+            # 4. Thông báo & Rerun
+            st.warning("Đang đăng xuất...")
+            time.sleep(1) # Chờ 1s là đủ
             st.rerun()
 
 # ==========================================
@@ -852,6 +854,7 @@ with tab3:
                 time.sleep(1)
                 st.rerun()
             except Exception as e: st.error(f"Lỗi: {e}")
+
 
 
 
