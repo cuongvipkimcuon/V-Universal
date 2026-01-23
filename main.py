@@ -366,7 +366,7 @@ with st.sidebar:
 
 st.title(f"{persona['icon']} {selected_proj_name}")
 
-tab1, tab2, tab3 = st.tabs(["✍️ Workstation", "💬 Smart Chat With V", "📚 Project Bible"])
+tab1, tab2, tab3 = st.tabs(["✍️ Workstation", "💬 V Chat", "📚 Project Bible"])
 
 # === TAB 1: WORKSTATION (GIỮ NGUYÊN) ===
 with tab1:
@@ -537,7 +537,11 @@ with tab2:
             visible_msgs = [m for m in msgs if m['created_at'] > st.session_state['chat_cutoff']]
             
             for m in visible_msgs:
-                with st.chat_message(m['role']):
+                # === SỬA DÒNG NÀY ===
+                # Nếu là 'model' thì lấy icon của Persona hiện tại (VD: 💻), user thì để mặc định
+                role_icon = persona['icon'] if m['role'] == 'model' else None
+                
+                with st.chat_message(m['role'], avatar=role_icon):
                     st.markdown(m['content'])
         except Exception as e: st.error(f"Lỗi load history: {e}")
 
@@ -820,6 +824,7 @@ with tab3:
                 time.sleep(1)
                 st.rerun()
             except Exception as e: st.error(f"Lỗi: {e}")
+
 
 
 
