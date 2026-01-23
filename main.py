@@ -634,14 +634,7 @@ with tab2:
 
                 except Exception as e: st.error(f"Lỗi generate: {e}")
                         
-                        # --- D. BACKGROUND RULE MINING ---
-                        # Kiểm tra xem hội thoại vừa rồi có sinh ra rule mới không
-                        new_rule = extract_rule_raw(prompt, full_response_text)
-                        if new_rule:
-                            st.session_state['pending_new_rule'] = new_rule
-                            st.rerun() # Rerun để hiện UI xử lý rule
-
-                except Exception as e: st.error(f"Lỗi generate: {e}")
+                    
 
     # --- UI XỬ LÝ RULE MỚI (NỔI LÊN DƯỚI INPUT) ---
     if 'pending_new_rule' in st.session_state:
@@ -821,5 +814,6 @@ with tab3:
                 time.sleep(1)
                 st.rerun()
             except Exception as e: st.error(f"Lỗi: {e}")
+
 
 
