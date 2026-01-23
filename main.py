@@ -639,6 +639,10 @@ with tab2:
                     1. CHỈ trả lời dựa trên thông tin trong CONTEXT.
                     2. Tuyệt đối KHÔNG dùng kiến thức bên ngoài (training data) để bịa đặt.
                     3. Nếu không có thông tin, trả lời: "Dữ liệu dự án không có thông tin này."
+                    4. Dù bạn có tính cách thế nào, bạn BẮT BUỘC phải đọc phần [CONTEXT] hoặc [KNOWLEDGE BASE] nếu có.
+                    5. Nếu User hỏi về "lịch sử", "đã nói gì", "check bible", hãy ưu tiên trích xuất thông tin từ [CONTEXT] trả lời chính xác.
+                    6. KHÔNG ĐƯỢC từ chối trả lời dữ liệu thực tế chỉ vì tính cách nhân vật.
+                    7. "Bible" mà User nhắc đến là Database của dự án, không phải nghĩa bóng.
                     """
 
                 try:
@@ -863,6 +867,7 @@ with tab3:
                 time.sleep(1)
                 st.rerun()
             except Exception as e: st.error(f"Lỗi: {e}")
+
 
 
 
