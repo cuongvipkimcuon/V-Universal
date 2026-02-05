@@ -445,31 +445,36 @@ class SessionManager:
     def check_login(self):
         """Kiểm tra và quản lý đăng nhập"""
         self.initialize_session()
-        
-        # Kiểm tra session state trước
+
+        # 1. FIX LOGOUT: Nếu đang trong trạng thái logout, return False ngay lập tức
+        if st.session_state.get('logging_out'):
+            return False
+
+        # Kiểm tra session state (User đã login trong phiên này)
         if 'user' in st.session_state and st.session_state.user:
             return True
-            
+
         # Lấy cookie
         access_token = self.cookie_manager.get("supabase_access_token")
         refresh_token = self.cookie_manager.get("supabase_refresh_token")
 
-        # Thêm logic xử lý cookie
+        # 2. FIX F5 NHÁY: Chỉ check login nếu có đủ token
         if access_token and refresh_token:
             try:
+                # Thêm spinner để nếu đang load thì người dùng thấy "Checking..." thay vì Form đăng nhập
+                # (Tùy chọn, nhưng giúp trải nghiệm mượt hơn)
                 services = init_services()
                 if services:
                     session = services['supabase'].auth.set_session(access_token, refresh_token)
                     if session and session.user:
                         st.session_state.user = session.user
-                        # Không cần st.toast ở đây để đỡ giật
-                        st.rerun() # Reload ngay lập tức
+                        st.rerun()
             except Exception as e:
-                # Nếu cookie lỗi (hết hạn), xóa luôn để tránh vòng lặp
+                # Nếu token lỗi thì xóa đi
                 self.cookie_manager.delete("supabase_access_token")
                 self.cookie_manager.delete("supabase_refresh_token")
                 return False
-            
+                
         return False
     
     def render_login_form(self):
@@ -1412,6 +1417,8 @@ def render_sidebar(session_manager):
             # Logout button
             st.markdown("---")
             if st.button("🚪 Logout", use_container_width=True, type="secondary"):
+                # 1. BẬT CỜ LOGOUT: Báo hiệu cho check_login biết đừng auto-login lại
+                st.session_state['logging_out'] = True
                 try:
                     session_manager.cookie_manager.delete("supabase_access_token")
                     session_manager.cookie_manager.delete("supabase_refresh_token")
@@ -2730,11 +2737,32 @@ def render_settings_tab():
 def main():
     """Hàm chính của ứng dụng"""
     
-    # Initialize session manager
     session_manager = SessionManager()
     
+    # --- LOGIC MỚI ĐỂ XỬ LÝ F5 VÀ LOGOUT ---
+    
+    # Nếu đang logout, xóa cờ và hiện form đăng nhập luôn
+    if st.session_state.get('logging_out'):
+        # Xóa cờ để lần sau đăng nhập lại bình thường
+        if 'logging_out' in st.session_state:
+            del st.session_state['logging_out']
+        session_manager.render_login_form()
+        return
+
     # Check login
-    if not session_manager.check_login():
+    is_logged_in = session_manager.check_login()
+    
+    # Nếu chưa login, hiển thị form
+    if not is_logged_in:
+        # Mẹo: CookieManager mất khoảng 0.5s để load sau khi F5. 
+        # Nếu muốn chặn nháy form hoàn toàn, bạn có thể uncomment dòng dưới, 
+        # nhưng nó sẽ làm app chậm hơn xíu.
+        # time.sleep(0.2) 
+        
+        # Check lại lần nữa cho chắc sau khi chờ
+        # if session_manager.cookie_manager.get("supabase_access_token"):
+        #     st.rerun()
+            
         session_manager.render_login_form()
         return
     
@@ -2811,6 +2839,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
