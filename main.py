@@ -24,6 +24,28 @@ st.set_page_config(
 # CSS tùy chỉnh nâng cao với màu sắc hiện đại
 st.markdown("""
 <style>
+    /* Sửa màu chữ Tab thành màu trắng và in đậm */
+    button[data-baseweb="tab"] {
+        color: white !important;
+        font-weight: 600 !important;
+        background-color: #262730 !important; /* Màu nền tối nhẹ cho tab chưa chọn */
+        border: 1px solid #444 !important;
+        margin-right: 4px !important;
+    }
+
+    /* Sửa màu Tab đang chọn (Active) cho nổi bật */
+    button[data-baseweb="tab"][aria-selected="true"] {
+        background-color: #FF4B4B !important; /* Màu đỏ chủ đạo của Streamlit hoặc màu bạn thích */
+        color: white !important;
+        border-color: #FF4B4B !important;
+    }
+    
+    /* Ẩn cái thanh trang trí nhỏ xíu mặc định của Streamlit đi cho đỡ rối */
+    div[data-baseweb="tab-highlight"] {
+        display: none !important;
+    }
+</style>
+<style>
     /* Global Styles */
     .main .block-container {
         padding-top: 1rem;
@@ -1329,12 +1351,12 @@ def render_sidebar(session_manager):
                 persona = PersonaSystem.PERSONAS.get(proj_type, PersonaSystem.PERSONAS["Writer"])
                 st.info(f"{persona['icon']} **{proj_type} Mode**")
                 
-            else:
+            st.markdown("---") # Thêm dòng kẻ cho dễ nhìn
                 # Create new project
-                if st.button("Create New Project", type="primary"):
-                    st.session_state['show_new_project'] = True
+            if st.button("Create New Project", type="primary"):
+                st.session_state['show_new_project'] = True
                 
-                if st.session_state.get('show_new_project'):
+            if st.session_state.get('show_new_project'):
                     with st.form("new_project_form"):
                         title = st.text_input("Project Name")
                         category = st.selectbox(
@@ -2842,6 +2864,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
