@@ -2114,103 +2114,145 @@ def render_workstation_tab(project_id, persona):
                 else:
                     st.info("Chưa có nhận xét nào.")
 
-    # --- 4. EXTRACT BIBLE (CƠ CHẾ 'SAFE PARSING') ---
+    # --- 4. EXTRACT BIBLE (PHIÊN BẢN CHUNKING & AUTO-FIX) ---
     if st.session_state.get('extract_bible_mode') and content:
         st.markdown("---")
         with st.container():
-            st.subheader("📚 Extract to Bible")
-            with st.spinner("Đang trích xuất dữ liệu..."):
-                ext_prompt = f"""
-                TITLE: {file_title}
-                CONTENT: {content}
-                TASK: {persona.get('extractor_prompt', 'Extract entities')}
-                
-                IMPORTANT FORMATTING RULES:
-                1. Return a JSON Object with a key "items".
-                2. Inside "items", provide a list of objects.
-                3. DO NOT use double quotes (") inside the description text. Use single quotes (') instead.
-                4. Example: {{ "items": [ {{ "entity_name": "Hero", "type": "Char", "description": "He said 'Hello' to her." }} ] }}
-                """
-                try:
+            st.subheader("📚 Extract to Bible (Smart Mode)")
+            
+            # Thanh tiến trình
+            progress_text = "Đang phân tích dữ liệu..."
+            my_bar = st.progress(0, text=progress_text)
+
+            # Hàm cắt nhỏ văn bản (Chunking) để tránh tràn Token
+            def chunk_text(text, chunk_size=10000): # ~2500-3000 words mỗi lần gửi
+                return [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
+
+            chunks = chunk_text(content)
+            total_chunks = len(chunks)
+            all_extracted_items = []
+
+            try:
+                for i, chunk_content in enumerate(chunks):
+                    # Update thanh tiến trình
+                    my_bar.progress(int((i / total_chunks) * 90), text=f"Đang xử lý phần {i+1}/{total_chunks}...")
+
+                    ext_prompt = f"""
+                    CONTEXT: This is part {i+1} of {total_chunks} of a story chapter.
+                    CONTENT: {chunk_content}
+                    TASK: {persona.get('extractor_prompt', 'Extract entities (Characters, Locations, Items, Jutsus/Skills)')}
+                    
+                    CRITICAL OUTPUT RULES:
+                    1. Output ONLY a valid JSON Array. Example: [ {{"entity_name": "Naruto", "type": "Char", "description": "User of Rasengan"}} ]
+                    2. Keep descriptions concise (under 30 words).
+                    3. Do not output markdown code blocks (```json). Just the raw JSON string.
+                    """
+                    
                     response = AIService.call_openrouter(
                         messages=[{"role": "user", "content": ext_prompt}],
                         model=st.session_state.get('selected_model', Config.DEFAULT_MODEL),
                         temperature=0.3,
-                        max_tokens=2000,
-                        response_format={"type": "json_object"}
+                        max_tokens=4096, # Tăng max token lên cao nhất có thể
+                        # Bỏ response_format json_object nếu model không hỗ trợ native, để text thường cho dễ cứu
                     )
-                    
+
                     if response and response.choices:
-                        raw_text = response.choices[0].message.content # FIX: Truy cập đúng index [0]
+                        raw_text = response.choices[0].message.content.strip()
+                        
+                        # --- CƠ CHẾ TỰ VÁ LỖI JSON (AUTO-REPAIR) ---
+                        # Nếu bị cắt giữa chừng, nó thường thiếu đóng ngoặc
+                        if raw_text.startswith("[") and not raw_text.endswith("]"):
+                            # Tìm dấu đóng ngoặc nhọn cuối cùng và đóng mảng lại
+                            last_brace = raw_text.rfind("}")
+                            if last_brace != -1:
+                                raw_text = raw_text[:last_brace+1] + "]"
+                            else:
+                                raw_text += "]" # Vá thô thiển
+                        
                         clean_json = AIService.clean_json_text(raw_text)
                         
-                        data = []
                         try:
-                            # Cách 1: Thử parse JSON chuẩn
-                            parsed = json.loads(clean_json)
-                            if isinstance(parsed, dict):
-                                data = parsed.get("items", [])
-                            elif isinstance(parsed, list):
-                                data = parsed
+                            # Parse JSON
+                            parsed_data = json.loads(clean_json)
+                            # Chuẩn hóa dữ liệu về dạng List
+                            if isinstance(parsed_data, dict):
+                                # Nếu AI lỡ trả về dict {"items": [...]}, lấy ruột ra
+                                parsed_data = parsed_data.get("items", []) or parsed_data.get("entities", [])
+                            
+                            if isinstance(parsed_data, list):
+                                all_extracted_items.extend(parsed_data)
                                 
                         except json.JSONDecodeError:
-                            # Cách 2: Data Rescue (Cứu hộ dữ liệu) bằng Regex
-                            st.warning("⚠️ AI trả về JSON lỗi, đang cố gắng khôi phục dữ liệu...")
-                            
-                            # Regex tìm pattern. Lưu ý: pattern này tìm 3 group ()
+                            # Fallback: Dùng Regex vét cạn nếu JSON nát quá
                             pattern = r'"entity_name"\s*:\s*"(.*?)"\s*,\s*"type"\s*:\s*"(.*?)"\s*,\s*"description"\s*:\s*"(.*?)"'
                             matches = re.findall(pattern, clean_json, re.DOTALL)
-                            
                             for m in matches:
-                                # FIX: m là tuple (group1, group2, group3)
-                                data.append({
-                                    "entity_name": m[0], # group 1
-                                    "type": m[1],        # group 2
-                                    "description": m[2].replace('\n', ' ').strip() # group 3
+                                all_extracted_items.append({
+                                    "entity_name": m[0],
+                                    "type": m[1],
+                                    "description": m[2].replace('\n', ' ').strip()
                                 })
-                                
-                        if not data:
-                            st.error("❌ Không thể đọc được dữ liệu từ AI. Hãy thử lại.")
-                            with st.expander("Raw Output (Debug)"):
-                                st.text(raw_text)
-                        
-                        else:
-                            with st.expander("Xem trước (Preview)", expanded=True):
-                                st.dataframe(pd.DataFrame(data)[['entity_name', 'type', 'description']], use_container_width=True)
-                                c_save, c_cancel = st.columns(2)
-                                
-                                if c_save.button("💾 Lưu vào Bible", type="primary"):
-                                    count = 0
-                                    for item in data:
-                                        desc = item.get('description', '')
-                                        if desc:
-                                            vec = AIService.get_embedding(desc)
-                                            if vec:
-                                                supabase.table("story_bible").insert({
-                                                    "story_id": project_id,
-                                                    "entity_name": item.get('entity_name', 'Unknown'),
-                                                    "description": desc,
-                                                    "embedding": vec,
-                                                    "source_chapter": chap_num
-                                                }).execute()
-                                                count += 1
-                                    
-                                    st.success(f"Đã lưu {count} mục!")
-                                    st.session_state['extract_bible_mode'] = False
-                                    time.sleep(1)
-                                    st.rerun()
-                                    
-                                if c_cancel.button("Hủy bỏ"):
-                                    st.session_state['extract_bible_mode'] = False
-                                    st.rerun()
-                    else:
-                        st.error("Không nhận được phản hồi từ AI.")
+                
+                # Hoàn thành
+                my_bar.progress(100, text="Hoàn tất!")
+                time.sleep(0.5)
+                my_bar.empty()
 
-                except Exception as e:
-                    st.error(f"Lỗi hệ thống: {e}")
-                    if st.button("Đóng"):
-                        st.session_state['extract_bible_mode'] = False
+                if not all_extracted_items:
+                    st.warning("⚠️ Không trích xuất được dữ liệu nào rõ ràng.")
+                    if st.button("Thử lại", key="retry_ext"):
                         st.rerun()
+                else:
+                    # Lọc trùng lặp (Deduplicate) theo tên entity
+                    unique_items = {v['entity_name']: v for v in all_extracted_items}.values()
+                    df_preview = pd.DataFrame(unique_items)
+
+                    with st.expander(f"✅ Kết quả: Tìm thấy {len(unique_items)} thực thể", expanded=True):
+                        # Cột hiển thị và nút bấm
+                        c_table, c_actions = st.columns([3, 1])
+                        
+                        with c_table:
+                             if 'entity_name' in df_preview.columns and 'type' in df_preview.columns:
+                                st.dataframe(df_preview[['entity_name', 'type', 'description']], use_container_width=True, height=300)
+                             else:
+                                st.dataframe(df_preview, use_container_width=True)
+
+                        with c_actions:
+                            st.write("Hành động:")
+                            if st.button("💾 Lưu tất cả", type="primary", use_container_width=True):
+                                count = 0
+                                progress_save = st.progress(0, text="Đang lưu vào DB...")
+                                total_save = len(unique_items)
+                                
+                                for idx, item in enumerate(unique_items):
+                                    desc = item.get('description', '')
+                                    if desc:
+                                        vec = AIService.get_embedding(desc)
+                                        if vec:
+                                            supabase.table("story_bible").insert({
+                                                "story_id": project_id,
+                                                "entity_name": item.get('entity_name', 'Unknown'),
+                                                "description": desc,
+                                                "embedding": vec,
+                                                "source_chapter": chap_num
+                                            }).execute()
+                                            count += 1
+                                    progress_save.progress(int((idx + 1) / total_save * 100))
+                                
+                                st.success(f"Đã lưu {count} mục vào Bible!")
+                                st.session_state['extract_bible_mode'] = False
+                                time.sleep(1)
+                                st.rerun()
+                            
+                            if st.button("Hủy bỏ", use_container_width=True):
+                                st.session_state['extract_bible_mode'] = False
+                                st.rerun()
+
+            except Exception as e:
+                st.error(f"Lỗi hệ thống: {e}")
+                if st.button("Đóng"):
+                    st.session_state['extract_bible_mode'] = False
+                    st.rerun()
 def render_bible_tab(project_id, persona):
     """Tab Bible - Knowledge base với prefix mở rộng"""
     st.header("📚 Project Bible")
@@ -2875,6 +2917,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
