@@ -300,7 +300,7 @@ class Config:
             "google/gemini-3-pro-preview"
         ],
         "⚡ Fast & Balanced": [
-            "openai/gpt-5.2",
+            
             "anthropic/claude-haiku-4.5",
             "google/gemini-3-flash-preview",
             "mistralai/devstral-2512"
@@ -323,7 +323,7 @@ class Config:
     # Model Costs (USD per 1M tokens)
     MODEL_COSTS = {
         # OpenAI
-        "openai/gpt-5.2-pro": {"input": 21.00, "output": 168.00},
+        
         "openai/gpt-5.2": {"input": 1.75, "output": 14.00},
         # Anthropic
         "anthropic/claude-opus-4.5": {"input": 5.00, "output": 25.00},
@@ -2924,6 +2924,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
