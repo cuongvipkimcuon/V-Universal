@@ -1263,7 +1263,7 @@ class CostManager:
 # ==========================================
 # 🎯 12. MAIN APPLICATION COMPONENTS
 # ==========================================
-def render_sidebar():
+def render_sidebar(session_manager):
     """Render sidebar với thông tin user và project"""
     with st.sidebar:
         # Header
@@ -1408,7 +1408,7 @@ def render_sidebar():
             # Logout button
             st.markdown("---")
             if st.button("🚪 Logout", use_container_width=True, type="secondary"):
-                session_manager = SessionManager()
+                # session_manager = SessionManager()
                 session_manager.cookie_manager.delete("supabase_access_token")
                 session_manager.cookie_manager.delete("supabase_refresh_token")
                 
@@ -2745,7 +2745,7 @@ def main():
         st.stop()
     
     # Render sidebar
-    project_id, persona = render_sidebar()
+    project_id, persona = render_sidebar(session_manager)
     
     # Main content header
     col1, col2 = st.columns([3, 1])
@@ -2807,6 +2807,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
