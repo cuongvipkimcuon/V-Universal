@@ -450,21 +450,25 @@ class SessionManager:
         if 'user' in st.session_state and st.session_state.user:
             return True
             
-        # Kiểm tra cookie
-        try:
-            access_token = self.cookie_manager.get("supabase_access_token")
-            refresh_token = self.cookie_manager.get("supabase_refresh_token")
-            
-            if access_token and refresh_token:
+        # Lấy cookie
+        access_token = self.cookie_manager.get("supabase_access_token")
+        refresh_token = self.cookie_manager.get("supabase_refresh_token")
+
+        # Thêm logic xử lý cookie
+        if access_token and refresh_token:
+            try:
                 services = init_services()
                 if services:
                     session = services['supabase'].auth.set_session(access_token, refresh_token)
-                    if session:
+                    if session and session.user:
                         st.session_state.user = session.user
-                        st.toast("👋 Welcome back!", icon="🎉")
-                        st.rerun()
-        except:
-            pass
+                        # Không cần st.toast ở đây để đỡ giật
+                        st.rerun() # Reload ngay lập tức
+            except Exception as e:
+                # Nếu cookie lỗi (hết hạn), xóa luôn để tránh vòng lặp
+                self.cookie_manager.delete("supabase_access_token")
+                self.cookie_manager.delete("supabase_refresh_token")
+                return False
             
         return False
     
@@ -1408,12 +1412,12 @@ def render_sidebar(session_manager):
             # Logout button
             st.markdown("---")
             if st.button("🚪 Logout", use_container_width=True, type="secondary"):
-                # session_manager = SessionManager()
-                session_manager.cookie_manager.delete("supabase_access_token")
-                session_manager.cookie_manager.delete("supabase_refresh_token")
-                
-                for key in list(st.session_state.keys()):
-                    del st.session_state[key]
+                try:
+                    session_manager.cookie_manager.delete("supabase_access_token")
+                    session_manager.cookie_manager.delete("supabase_refresh_token")
+                except:
+                    pass
+                st.session_state.clear()
                 
                 st.success("Logged out successfully!")
                 time.sleep(1)
@@ -2807,6 +2811,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
