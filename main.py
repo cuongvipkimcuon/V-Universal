@@ -1294,172 +1294,141 @@ def render_sidebar(session_manager):
     """Render sidebar với thông tin user và project"""
     with st.sidebar:
         # Header
-        st.markdown("<h3 style='text-align: center;'>🚀 V-Universe AI Pro</h3>", unsafe_allow_html=True)
-        
+        st.markdown("🚀 V-Universe AI Pro", unsafe_allow_html=True)
         if 'user' in st.session_state and st.session_state.user:
             user_email = st.session_state.user.email
-            st.markdown(f"<p style='text-align: center;'><strong>👤 {user_email.split('@')[0]}</strong></p>", unsafe_allow_html=True)
+            st.markdown(f"_{user_email.split('@')}_", unsafe_allow_html=True) # [1]
             
             # User stats
             budget = CostManager.get_user_budget(st.session_state.user.id)
-            
             col1, col2 = st.columns(2)
             with col1:
-                st.metric(
-                    "💰 Credits",
-                    f"${budget.get('remaining_credits', 0):.2f}",
-                    delta=f"-${budget.get('used_credits', 0):.2f}"
-                )
+                st.metric("💰 Credits", f"${budget.get('remaining_credits', 0):.2f}")
             with col2:
                 usage_percent = (budget.get('used_credits', 0) / budget.get('total_credits', 100)) * 100
-                st.metric(
-                    "Usage",
-                    f"{usage_percent:.1f}%"
-                )
-            
+                st.metric("Usage", f"{usage_percent:.1f}%")
             st.markdown("---")
-            
-            # Project selection
-            st.subheader("📂 Projects")
-            
-            services = init_services()
-            supabase = services['supabase']
-            
-            projects = supabase.table("stories") \
-                .select("*") \
-                .eq("user_id", st.session_state.user.id) \
-                .execute()
-            
-            if projects.data:
-                proj_map = {p['title']: p for p in projects.data}
-                selected_proj_name = st.selectbox(
-                    "Select Project",
-                    list(proj_map.keys()),
-                    key="project_selector"
-                )
-                
-                current_proj = proj_map[selected_proj_name]
-                proj_id = current_proj['id']
-                proj_type = current_proj.get('category', 'Writer')
-                
-                # Store in session state
-                st.session_state['current_project'] = current_proj
-                st.session_state['project_id'] = proj_id
-                st.session_state['persona'] = proj_type
-                
-                # Persona info
-                persona = PersonaSystem.PERSONAS.get(proj_type, PersonaSystem.PERSONAS["Writer"])
-                st.info(f"{persona['icon']} **{proj_type} Mode**")
-                
-            st.markdown("---") # Thêm dòng kẻ cho dễ nhìn
-                # Create new project
-            if st.button("Create New Project", type="primary"):
-                st.session_state['show_new_project'] = True
-                
-            if st.session_state.get('show_new_project'):
-                    with st.form("new_project_form"):
-                        title = st.text_input("Project Name")
-                        category = st.selectbox(
-                            "Category",
-                            list(PersonaSystem.PERSONAS.keys())
-                        )
-                        
-                        if st.form_submit_button("Create"):
-                            if title:
-                                supabase.table("stories").insert({
-                                    "title": title,
-                                    "category": category,
-                                    "user_id": st.session_state.user.id
-                                }).execute()
-                                st.success("Project created!")
-                                st.rerun()
-                    st.stop()
-                
-                proj_id = None
-                persona = PersonaSystem.PERSONAS["Writer"]
-            
-            # AI Settings Section
-            st.markdown("---")
-            st.subheader("🤖 AI Settings")
-            
-            # Model selection
-            model_category = st.selectbox(
-                "Model Category",
-                list(Config.AVAILABLE_MODELS.keys()),
-                index=1,
-                key="model_category"
-            )
-            
-            available_models = Config.AVAILABLE_MODELS[model_category]
-            selected_model = st.selectbox(
-                "Select Model",
-                available_models,
-                index=0,
-                key="model_selector"
-            )
-            
-            st.session_state['selected_model'] = selected_model
-            
-            # Advanced settings
-            with st.expander("Advanced Settings"):
-                st.session_state['temperature'] = st.slider(
-                    "Temperature",
-                    min_value=0.0,
-                    max_value=1.0,
-                    value=persona.get('temperature', 0.7),
-                    step=0.1
-                )
-                
-                st.session_state['context_size'] = st.select_slider(
-                    "Context Size",
-                    options=["low", "medium", "high", "max"],
-                    value="medium"
-                )
-            
-            st.markdown("---")
-            
-            # Quick Actions
-            st.subheader("⚡ Quick Actions")
-            
-            if st.button("🔄 Refresh Session", use_container_width=True):
-                st.rerun()
-            
-            if st.button("📊 Dashboard", use_container_width=True):
-                st.session_state['active_tab'] = "Dashboard"
-                st.rerun()
-            
-            if st.button("⚙️ Settings", use_container_width=True):
-                st.session_state['active_tab'] = "Settings"
-                st.rerun()
-            
-            # Logout button
-            st.markdown("---")
-            if st.button("🚪 Logout", use_container_width=True, type="secondary"):
-                # 1. Bật cờ logout
-                st.session_state['logging_out'] = True
-        
-                # 2. Xóa Cookie (Giữ nguyên)
-                try:
-                    session_manager.cookie_manager.delete("supabase_access_token")
-                    session_manager.cookie_manager.delete("supabase_refresh_token")
-                except:
-                    pass
 
-                # 3. SỬA ĐOẠN NÀY: Thay vì st.session_state.clear(), hãy dùng vòng lặp
-                # Xóa tất cả session state TRỪ biến 'logging_out'
-                for key in list(st.session_state.keys()):
-                    if key != 'logging_out':  # <--- GIỮ LẠI CÁI NÀY
-                        del st.session_state[key]
-        
-                st.success("Logged out successfully!")
-                time.sleep(1)
-                st.rerun()
+        # Project selection
+        st.subheader("📂 Projects")
+        services = init_services()
+        supabase = services['supabase']
+
+        projects = supabase.table("stories") \
+            .select("*") \
+            .eq("user_id", st.session_state.user.id) \
+            .execute() # [2]
+
+        # 1. KHỞI TẠO GIÁ TRỊ MẶC ĐỊNH (Tránh lỗi UnboundLocalError)
+        proj_id = None
+        persona = PersonaSystem.PERSONAS["Writer"] 
+
+        # 2. LOGIC CHỌN DỰ ÁN (Nếu có dự án)
+        if projects.data:
+            proj_map = {p['title']: p for p in projects.data}
+            selected_proj_name = st.selectbox(
+                "Select Project",
+                list(proj_map.keys()),
+                key="project_selector"
+            )
             
-            return proj_id, persona
+            current_proj = proj_map[selected_proj_name]
+            proj_id = current_proj['id']
+            proj_type = current_proj.get('category', 'Writer')
+            
+            # Store in session state
+            st.session_state['current_project'] = current_proj
+            st.session_state['project_id'] = proj_id
+            st.session_state['persona'] = proj_type
+            
+            # Persona info
+            persona = PersonaSystem.PERSONAS.get(proj_type, PersonaSystem.PERSONAS["Writer"])
+            st.info(f"{persona['icon']} **{proj_type} Mode**") # [3]
+
+        # 3. NÚT TẠO DỰ ÁN (Đưa ra ngoài if/else để luôn hiển thị)
+        st.markdown("---")
+        if st.button("Create New Project", type="primary"):
+            st.session_state['show_new_project'] = True
+
+        if st.session_state.get('show_new_project'):
+            with st.form("new_project_form"):
+                title = st.text_input("Project Name")
+                category = st.selectbox("Category", list(PersonaSystem.PERSONAS.keys()))
+                
+                if st.form_submit_button("Create"):
+                    if title:
+                        supabase.table("stories").insert({
+                            "title": title,
+                            "category": category,
+                            "user_id": st.session_state.user.id
+                        }).execute()
+                        st.success("Project created!")
+                        # Tắt form sau khi tạo
+                        st.session_state['show_new_project'] = False 
+                        st.rerun()
+
+        # 4. AI Settings Section
+        st.markdown("---")
+        st.subheader("🤖 AI Settings")
         
-        else:
-            st.warning("Please login")
-            st.stop()
+        # Model selection
+        model_category = st.selectbox(
+            "Model Category",
+            list(Config.AVAILABLE_MODELS.keys()),
+            index=1,
+            key="model_category"
+        )
+        
+        available_models = Config.AVAILABLE_MODELS[model_category]
+        selected_model = st.selectbox(
+            "Select Model",
+            available_models,
+            index=0,
+            key="model_selector"
+        ) # [4]
+        st.session_state['selected_model'] = selected_model
+
+        # Advanced settings
+        with st.expander("Advanced Settings"):
+            st.session_state['temperature'] = st.slider(
+                "Temperature",
+                min_value=0.0, max_value=1.0,
+                value=persona.get('temperature', 0.7),
+                step=0.1
+            )
+            st.session_state['context_size'] = st.select_slider(
+                "Context Size",
+                options=["low", "medium", "high", "max"],
+                value="medium"
+            ) # [4], [5]
+
+        st.markdown("---")
+
+        # Quick Actions
+        st.subheader("⚡ Quick Actions")
+        if st.button("🔄 Refresh Session", use_container_width=True):
+            st.rerun()
+        
+        # Logout logic
+        st.markdown("---")
+        if st.button("🚪 Logout", use_container_width=True, type="secondary"):
+            st.session_state['logging_out'] = True
+            try:
+                session_manager.cookie_manager.delete("supabase_access_token")
+                session_manager.cookie_manager.delete("supabase_refresh_token")
+            except:
+                pass
+            
+            for key in list(st.session_state.keys()):
+                if key != 'logging_out':
+                    del st.session_state[key]
+            
+            st.success("Logged out successfully!")
+            time.sleep(1)
+            st.rerun()
+
+        return proj_id, persona
+
 
 def render_dashboard_tab(project_id):
     """Tab Dashboard - Quản lý project tổng quan"""
@@ -2864,6 +2833,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
