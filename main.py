@@ -1926,9 +1926,14 @@ INSTRUCTIONS:
                 del st.session_state['edit_rule_manual']
                 st.rerun()
 
+import streamlit as st
+import time
+import json
+import pandas as pd
+
 def render_workstation_tab(project_id, persona):
     """
-    Tab Workstation - Phiên bản 'Clean UI' (ĐÃ FIX LỖI COLUMN VALUE ERROR)
+    Tab Workstation - Phiên bản 'Clean UI' (ĐÃ FIX TOÀN BỘ LỖI)
     """
     # Header nhỏ gọn
     st.subheader("✍️ Writing Workstation")
@@ -1937,12 +1942,14 @@ def render_workstation_tab(project_id, persona):
         st.info("📁 Vui lòng chọn Project ở thanh bên trái.")
         return
 
+    # Giả định init_services đã được import hoặc định nghĩa ở ngoài
     services = init_services()
     supabase = services['supabase']
 
     # --- 1. THANH CÔNG CỤ (Toolbar) ---
-    # SỬA LỖI TẠI ĐÂY: Tạo 4 cột. Cột 1 (File) rộng gấp 3 lần các nút bấm.
-    c1, c2, c3, c4 = st.columns([1, 3,1,1]) 
+    # FIX LỖI 1: Khai báo 4 biến thì phải tạo đủ 4 cột (hoặc list có 4 phần tử)
+    # Tỉ lệ 3:1:1:1 để ô chọn file rộng nhất
+    c1, c2, c3, c4 = st.columns([3, 1, 1, 1]) 
     
     with c1:
         # Load danh sách file
@@ -1953,7 +1960,10 @@ def render_workstation_tab(project_id, persona):
             .execute()
 
         file_options = {}
-        for f in files.data:
+        # Kiểm tra files.data có tồn tại không để tránh lỗi
+        file_list = files.data if files.data else []
+        
+        for f in file_list:
             display_name = f"📄 #{f['chapter_number']}: {f['title']}" if f['title'] else f"📄 #{f['chapter_number']}"
             file_options[display_name] = f['chapter_number']
 
@@ -1963,11 +1973,15 @@ def render_workstation_tab(project_id, persona):
             label_visibility="collapsed" # Ẩn nhãn cho gọn
         )
 
+    # Khởi tạo biến mặc định
+    db_content = ""
+    db_review = ""
+    db_title = ""
+    chap_num = 0
+
     # Logic Load dữ liệu an toàn
     if selected_file == "+ New File":
-        chap_num = len(files.data) + 1
-        db_content = ""
-        db_review = ""
+        chap_num = len(file_list) + 1
         db_title = f"Chapter {chap_num}"
     else:
         chap_num = file_options[selected_file]
@@ -1978,20 +1992,20 @@ def render_workstation_tab(project_id, persona):
                 .eq("chapter_number", chap_num) \
                 .execute()
             
-            if res.data:
-                row = res.data if isinstance(res.data, list) else res.data
+            # FIX LỖI 2: Kiểm tra list và lấy phần tử đầu tiên [0]
+            if res.data and len(res.data) > 0:
+                row = res.data[0] # Lấy object đầu tiên trong list
                 db_content = row.get('content') or ""
                 db_title = row.get('title') or f"Chapter {chap_num}"
                 db_review = row.get('review_content') or ""
             else:
+                # Trường hợp không tìm thấy dữ liệu
                 db_content = ""
                 db_title = f"Chapter {chap_num}"
                 db_review = ""
         except Exception as e:
             st.error(f"Lỗi load: {e}")
-            db_content = ""
             db_title = f"Chapter {chap_num}"
-            db_review = ""
 
     # Các nút bấm nằm ngang hàng với chọn file
     with c2:
@@ -2042,7 +2056,7 @@ def render_workstation_tab(project_id, persona):
     has_review = bool(db_review) or st.session_state.get('trigger_ai_review')
     
     if has_review:
-        col_editor, col_review = st.columns([3, 4]) # Tỷ lệ 2:1 nếu có review
+        col_editor, col_review = st.columns([3, 2]) # Tỷ lệ 3:2 nếu có review
     else:
         col_editor = st.container() # Chiếm full nếu không có review
     
@@ -2086,18 +2100,20 @@ def render_workstation_tab(project_id, persona):
                         )
                         
                         # 4. Lưu kết quả vào DB ngay lập tức
-                        new_review = response.choices.message.content
-                        supabase.table("chapters").update({
-                            "review_content": new_review
-                        }).eq("story_id", project_id).eq("chapter_number", chap_num).execute()
-                        
-                        db_review = new_review
-                        st.session_state['trigger_ai_review'] = False
-                        st.toast("Review hoàn tất!", icon="🤖")
-                        st.rerun() 
+                        if response and response.choices:
+                            new_review = response.choices[0].message.content
+                            supabase.table("chapters").update({
+                                "review_content": new_review
+                            }).eq("story_id", project_id).eq("chapter_number", chap_num).execute()
+                            
+                            db_review = new_review
+                            st.session_state['trigger_ai_review'] = False
+                            st.toast("Review hoàn tất!", icon="🤖")
+                            st.rerun() 
                         
                     except Exception as e:
                         st.error(f"Lỗi Review: {e}")
+                        st.session_state['trigger_ai_review'] = False
 
             # Hiển thị kết quả
             with st.expander("🤖 AI Editor Notes", expanded=True):
@@ -2127,32 +2143,34 @@ def render_workstation_tab(project_id, persona):
                         model=st.session_state.get('selected_model', Config.DEFAULT_MODEL),
                         temperature=0.3
                     )
-                    clean_json = AIService.clean_json_text(response.choices.message.content)
-                    data = json.loads(clean_json)
                     
-                    with st.expander("Xem trước (Preview)", expanded=True):
-                        st.dataframe(pd.DataFrame(data)[['entity_name', 'type', 'description']], use_container_width=True)
-                        c_save, c_cancel = st.columns(2)
+                    if response and response.choices:
+                        clean_json = AIService.clean_json_text(response.choices[0].message.content)
+                        data = json.loads(clean_json)
                         
-                        if c_save.button("💾 Lưu vào Bible", type="primary"):
-                            for item in data:
-                                vec = AIService.get_embedding(item.get('description'))
-                                if vec:
-                                    supabase.table("story_bible").insert({
-                                        "story_id": project_id,
-                                        "entity_name": item['entity_name'],
-                                        "description": item['description'],
-                                        "embedding": vec,
-                                        "source_chapter": chap_num
-                                    }).execute()
-                            st.success("Đã lưu!")
-                            st.session_state['extract_bible_mode'] = False
-                            time.sleep(1)
-                            st.rerun()
+                        with st.expander("Xem trước (Preview)", expanded=True):
+                            st.dataframe(pd.DataFrame(data)[['entity_name', 'type', 'description']], use_container_width=True)
+                            c_save, c_cancel = st.columns(2)
                             
-                        if c_cancel.button("Hủy bỏ"):
-                            st.session_state['extract_bible_mode'] = False
-                            st.rerun()
+                            if c_save.button("💾 Lưu vào Bible", type="primary"):
+                                for item in data:
+                                    vec = AIService.get_embedding(item.get('description'))
+                                    if vec:
+                                        supabase.table("story_bible").insert({
+                                            "story_id": project_id,
+                                            "entity_name": item['entity_name'],
+                                            "description": item['description'],
+                                            "embedding": vec,
+                                            "source_chapter": chap_num
+                                        }).execute()
+                                st.success("Đã lưu!")
+                                st.session_state['extract_bible_mode'] = False
+                                time.sleep(1)
+                                st.rerun()
+                                
+                            if c_cancel.button("Hủy bỏ"):
+                                st.session_state['extract_bible_mode'] = False
+                                st.rerun()
                 except Exception as e:
                     st.error(f"Lỗi trích xuất: {e}")
                     if st.button("Đóng"):
@@ -2822,6 +2840,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
