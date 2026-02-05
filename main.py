@@ -294,7 +294,6 @@ class Config:
     # Available Models (Đầy đủ các model phổ biến)
     AVAILABLE_MODELS = {
         "🚀 High Performance": [
-            "openai/gpt-5.2-pro",
             "anthropic/claude-opus-4.5",
             "anthropic/claude-sonnet-4.5",
             "google/gemini-3-pro-preview"
@@ -2924,6 +2923,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
