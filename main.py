@@ -1854,11 +1854,15 @@ INSTRUCTIONS:
             st.write(f"**Content:** {rule_content}")
             
             # Analyze Conflict
-            if 'rule_analysis' not in st.session_state:
+            if st.session_state.get('rule_analysis') is None:
                 with st.spinner("Checking for conflicts..."):
                     st.session_state['rule_analysis'] = RuleMiningSystem.analyze_rule_conflict(rule_content, project_id)
             
             analysis = st.session_state['rule_analysis']
+            if analysis:
+                st.info(f"AI Assessment: **{analysis.get('status', 'UNKNOWN')}** - {analysis.get('reason', 'N/A')}")
+            else:
+                st.error("Could not analyze rule conflict.")
             st.info(f"AI Assessment: **{analysis['status']}** - {analysis['reason']}")
             
             if analysis['status'] == "CONFLICT":
@@ -2803,5 +2807,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
