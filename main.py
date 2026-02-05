@@ -531,7 +531,7 @@ class SessionManager:
                                     )
                                     
                                     st.success("✅ Login successful!")
-                                    time.sleep(1)
+                                    time.sleep(1.5)
                                     st.rerun()
                                 except Exception as e:
                                     st.error(f"Login failed: {str(e)}")
@@ -2757,7 +2757,7 @@ def main():
         # Mẹo: CookieManager mất khoảng 0.5s để load sau khi F5. 
         # Nếu muốn chặn nháy form hoàn toàn, bạn có thể uncomment dòng dưới, 
         # nhưng nó sẽ làm app chậm hơn xíu.
-        # time.sleep(0.2) 
+        time.sleep(1) 
         
         # Check lại lần nữa cho chắc sau khi chờ
         # if session_manager.cookie_manager.get("supabase_access_token"):
@@ -2839,6 +2839,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
