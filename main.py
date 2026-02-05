@@ -333,8 +333,8 @@ class Config:
     }
     
     # Default settings
-    DEFAULT_MODEL = "openai/gpt-3.5-turbo"
-    EMBEDDING_MODEL = "nomic-ai/nomic-embed-text-v1.5"
+    DEFAULT_MODEL = "anthropic/claude-3.5-haiku"
+    EMBEDDING_MODEL = "qwen/qwen3-embedding-8b"
     ROUTER_MODEL = "deepseek/deepseek-chat"
     
     # Bible prefixes (người dùng có thể tạo thêm)
@@ -2789,3 +2789,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
