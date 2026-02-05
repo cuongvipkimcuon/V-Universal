@@ -272,64 +272,56 @@ class Config:
     # Available Models (Đầy đủ các model phổ biến)
     AVAILABLE_MODELS = {
         "🚀 High Performance": [
-            "openai/gpt-4-turbo-preview",
-            "openai/gpt-4",
-            "anthropic/claude-3-opus",
-            "anthropic/claude-3-sonnet",
-            "google/gemini-pro-1.5"
+            "openai/gpt-5.2-pro",
+            "anthropic/claude-opus-4.5",
+            "anthropic/claude-sonnet-4.5",
+            "google/gemini-3-pro-preview"
         ],
         "⚡ Fast & Balanced": [
-            "openai/gpt-3.5-turbo",
-            "openai/gpt-3.5-turbo-16k",
-            "anthropic/claude-3-haiku",
-            "google/gemini-flash-1.5",
-            "mistralai/mixtral-8x7b-instruct"
+            "openai/gpt-5.2",
+            "anthropic/claude-haiku-4.5",
+            "google/gemini-3-flash-preview",
+            "mistralai/devstral-2512"
         ],
         "💰 Cost Effective": [
-            "deepseek/deepseek-chat",
-            "meta-llama/llama-3.1-8b-instruct",
-            "qwen/qwen-2.5-7b-instruct",
-            "microsoft/phi-3-medium-128k-instruct",
-            "google/gemini-flash-1.5-8b"
+            "deepseek/deepseek-v3.2",
+            "qwen/qwen3-vl-32b-instruct",
+            "meta-llama/llama-4-maverick",
+            "google/gemini-2.5-flash",
+            "anthropic/claude-3.5-haiku"
         ],
         "🔬 Specialized": [
-            "cohere/command-r-plus",
-            "perplexity/llama-3-sonar-small-128k-chat",
-            "nousresearch/nous-hermes-2-mixtral-8x7b-dpo",
-            "cognitivecomputations/dolphin-mixtral-8x7b"
+            "cohere/command-a",
+            "perplexity/sonar",
+            "nousresearch/hermes-4-405b",
+            "meta-llama/llama-3.2-11b-vision-instruct"
         ]
     }
     
     # Model Costs (USD per 1M tokens)
     MODEL_COSTS = {
         # OpenAI
-        "openai/gpt-4-turbo-preview": {"input": 10.00, "output": 30.00},
-        "openai/gpt-4": {"input": 30.00, "output": 60.00},
-        "openai/gpt-3.5-turbo": {"input": 0.50, "output": 1.50},
-        "openai/gpt-3.5-turbo-16k": {"input": 1.50, "output": 2.00},
-        
+        "openai/gpt-5.2-pro": {"input": 21.00, "output": 168.00},
+        "openai/gpt-5.2": {"input": 1.75, "output": 14.00},
         # Anthropic
-        "anthropic/claude-3-opus": {"input": 15.00, "output": 75.00},
-        "anthropic/claude-3-sonnet": {"input": 3.00, "output": 15.00},
-        "anthropic/claude-3-haiku": {"input": 0.25, "output": 1.25},
-        
+        "anthropic/claude-opus-4.5": {"input": 5.00, "output": 25.00},
+        "anthropic/claude-sonnet-4.5": {"input": 3.00, "output": 15.00},
+        "anthropic/claude-haiku-4.5": {"input": 1.00, "output": 5.00},
+        "anthropic/claude-3.5-haiku": {"input": 0.80, "output": 4.00},
         # Google
-        "google/gemini-pro-1.5": {"input": 1.25, "output": 2.50},
-        "google/gemini-flash-1.5": {"input": 0.075, "output": 0.30},
-        "google/gemini-flash-1.5-8b": {"input": 0.045, "output": 0.18},
-        
+        "google/gemini-3-pro-preview": {"input": 2.00, "output": 12.00},
+        "google/gemini-3-flash-preview": {"input": 0.5, "output": 3.00},
+        "google/gemini-2.5-flash": {"input": 0.3, "output": 2.50},
         # Open Source
-        "deepseek/deepseek-chat": {"input": 0.14, "output": 0.28},
-        "meta-llama/llama-3.1-8b-instruct": {"input": 0.18, "output": 0.18},
-        "mistralai/mixtral-8x7b-instruct": {"input": 0.24, "output": 0.24},
-        "qwen/qwen-2.5-7b-instruct": {"input": 0.12, "output": 0.12},
-        "microsoft/phi-3-medium-128k-instruct": {"input": 0.10, "output": 0.10},
-        
-        # Others
-        "cohere/command-r-plus": {"input": 3.00, "output": 15.00},
-        "perplexity/llama-3-sonar-small-128k-chat": {"input": 0.20, "output": 0.20},
-        "nousresearch/nous-hermes-2-mixtral-8x7b-dpo": {"input": 0.30, "output": 0.30},
-        "cognitivecomputations/dolphin-mixtral-8x7b": {"input": 0.25, "output": 0.25}
+        "deepseek/deepseek-v3.2": {"input": 0.25, "output": 0.38},
+        "qwen/qwen3-vl-32b-instruct": {"input": 0.50, "output": 1.50},
+        "mistralai/devstral-2512": {"input": 0.05, "output": 0.22},
+        "meta-llama/llama-4-maverick": {"input": 0.15, "output": 0.60},
+        "cohere/command-a": {"input": 2.50, "output": 10.00},
+        "perplexity/sonar": {"input": 1.00, "output": 1.00},
+        "nousresearch/hermes-4-405b": {"input": 1.00, "output": 3.00},
+        "meta-llama/llama-3.2-11b-vision-instruct": {"input": 0.049, "output": 0.049},
+    
     }
     
     # Default settings
@@ -355,10 +347,10 @@ class Config:
     # Cache settings
     CACHE_TTL_HOURS = 24
     MAX_CONTEXT_TOKENS = {
-        "low": 4000,
-        "medium": 8000,
-        "high": 16000,
-        "max": 32000
+        "low": 15000,
+        "medium": 30000,
+        "high": 60000,
+        "max": 120000
     }
     
     @classmethod
@@ -2850,6 +2842,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
