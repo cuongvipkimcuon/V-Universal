@@ -1928,12 +1928,10 @@ INSTRUCTIONS:
 
 def render_workstation_tab(project_id, persona):
     """
-    Tab Workstation - Phiên bản 'Clean UI': Review Read-only & Gọn gàng
+    Tab Workstation - Phiên bản 'Clean UI' (Đã sửa lỗi ValueError columns)
     """
-    # Header nhỏ gọn hơn
-    col_header, col_stats_top = st.columns([3, 4])
-    with col_header:
-        st.subheader("✍️ Writing Workstation")
+    # Header nhỏ gọn
+    st.subheader("✍️ Writing Workstation")
     
     if not project_id:
         st.info("📁 Vui lòng chọn Project ở thanh bên trái.")
@@ -1943,8 +1941,8 @@ def render_workstation_tab(project_id, persona):
     supabase = services['supabase']
 
     # --- 1. THANH CÔNG CỤ (Toolbar) ---
-    # Gộp chọn file và nút bấm lên cùng 1 hàng để tiết kiệm chỗ
-    c1, c2, c3, c4 = st.columns([4, 5])
+    # SỬA LỖI TẠI ĐÂY: Khai báo đúng 4 cột với tỷ lệ [3, 4]
+    c1, c2, c3, c4 = st.columns([3, 4])
     
     with c1:
         # Load danh sách file
@@ -1965,7 +1963,7 @@ def render_workstation_tab(project_id, persona):
             label_visibility="collapsed" # Ẩn nhãn cho gọn
         )
 
-    # Logic Load dữ liệu (An toàn với .get)
+    # Logic Load dữ liệu an toàn
     if selected_file == "+ New File":
         chap_num = len(files.data) + 1
         db_content = ""
@@ -2008,10 +2006,11 @@ def render_workstation_tab(project_id, persona):
                         "chapter_number": chap_num,
                         "title": current_title,
                         "content": current_content,
-                        # Giữ nguyên review cũ nếu có, không cần gửi lên nếu không đổi
                     }, on_conflict="story_id, chapter_number").execute()
                     
                     st.toast("✅ Đã lưu thành công!", icon="💾")
+                    # Cập nhật session để tránh bị load lại nội dung cũ
+                    st.session_state.current_file_content = current_content
                     time.sleep(0.5)
                     st.rerun()
                 except Exception as e:
@@ -2040,13 +2039,12 @@ def render_workstation_tab(project_id, persona):
     )
 
     # Chia cột: Editor (Rộng) - Review Result (Hẹp & Ẩn được)
-    # Nếu không có review thì Editor chiếm hết, nếu có thì chia 7:3
     has_review = bool(db_review) or st.session_state.get('trigger_ai_review')
     
     if has_review:
-        col_editor, col_review = st.columns([4, 5])
+        col_editor, col_review = st.columns([4, 5]) # Tỷ lệ 2:1 nếu có review
     else:
-        col_editor = st.container() # Chiếm full chiều ngang
+        col_editor = st.container() # Chiếm full nếu không có review
     
     with col_editor:
         content = st.text_area(
@@ -2057,7 +2055,6 @@ def render_workstation_tab(project_id, persona):
             label_visibility="collapsed",
             placeholder="Viết nội dung của bạn tại đây..."
         )
-        # Footer thống kê nhỏ
         if content:
             st.caption(f"📝 {len(content.split())} từ | {len(content)} ký tự")
 
@@ -2094,24 +2091,25 @@ def render_workstation_tab(project_id, persona):
                             "review_content": new_review
                         }).eq("story_id", project_id).eq("chapter_number", chap_num).execute()
                         
-                        db_review = new_review # Cập nhật biến hiển thị
+                        db_review = new_review
                         st.session_state['trigger_ai_review'] = False
                         st.toast("Review hoàn tất!", icon="🤖")
+                        st.rerun() # Rerun để hiển thị kết quả ngay
                         
                     except Exception as e:
                         st.error(f"Lỗi Review: {e}")
 
-            # Hiển thị kết quả (Read-only)
+            # Hiển thị kết quả
             with st.expander("🤖 AI Editor Notes", expanded=True):
                 if db_review:
-                    st.markdown(db_review) # Chỉ hiển thị, không cho sửa
-                    if st.button("🗑️ Xóa Review", key="del_rev"):
+                    st.markdown(db_review)
+                    if st.button("🗑️ Xóa Review", key="del_rev", use_container_width=True):
                          supabase.table("chapters").update({"review_content": ""}).eq("story_id", project_id).eq("chapter_number", chap_num).execute()
                          st.rerun()
                 else:
                     st.info("Chưa có nhận xét nào.")
 
-    # --- 4. TÍNH NĂNG EXTRACT BIBLE (Hiện bên dưới Editor khi được bật) ---
+    # --- 4. TÍNH NĂNG EXTRACT BIBLE ---
     if st.session_state.get('extract_bible_mode') and content:
         st.markdown("---")
         with st.container():
@@ -2124,7 +2122,6 @@ def render_workstation_tab(project_id, persona):
                 Return JSON array only.
                 """
                 try:
-                    # Gọi AI (đoạn này giữ nguyên logic cũ)
                     response = AIService.call_openrouter(
                         messages=[{"role": "user", "content": ext_prompt}],
                         model=st.session_state.get('selected_model', Config.DEFAULT_MODEL),
@@ -2825,6 +2822,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
