@@ -1928,22 +1928,26 @@ INSTRUCTIONS:
 
 def render_workstation_tab(project_id, persona):
     """
-    Tab Workstation - Phiên bản Fix lỗi hiển thị, Load data và lưu trữ Review
+    Tab Workstation - Phiên bản 'Clean UI': Review Read-only & Gọn gàng
     """
-    st.header("✍️ Writing Workstation")
-
+    # Header nhỏ gọn hơn
+    col_header, col_stats_top = st.columns([3, 4])
+    with col_header:
+        st.subheader("✍️ Writing Workstation")
+    
     if not project_id:
-        st.info("📁 Vui lòng chọn hoặc tạo Project bên thanh trái trước.")
+        st.info("📁 Vui lòng chọn Project ở thanh bên trái.")
         return
 
     services = init_services()
     supabase = services['supabase']
 
-    # --- 1. LOAD DANH SÁCH FILE VÀ DỮ LIỆU ---
-    col1, col2 = st.columns([1, 2])
-
-    with col1:
-        # Lấy danh sách chương
+    # --- 1. THANH CÔNG CỤ (Toolbar) ---
+    # Gộp chọn file và nút bấm lên cùng 1 hàng để tiết kiệm chỗ
+    c1, c2, c3, c4 = st.columns([4, 5])
+    
+    with c1:
+        # Load danh sách file
         files = supabase.table("chapters") \
             .select("chapter_number, title") \
             .eq("story_id", project_id) \
@@ -1952,63 +1956,51 @@ def render_workstation_tab(project_id, persona):
 
         file_options = {}
         for f in files.data:
-            display_name = f"📄 #{f['chapter_number']}"
-            if f['title']:
-                display_name += f": {f['title']}"
+            display_name = f"📄 #{f['chapter_number']}: {f['title']}" if f['title'] else f"📄 #{f['chapter_number']}"
             file_options[display_name] = f['chapter_number']
 
         selected_file = st.selectbox(
             "Select File",
-            ["+ New File"] + list(file_options.keys())
+            ["+ New File"] + list(file_options.keys()),
+            label_visibility="collapsed" # Ẩn nhãn cho gọn
         )
 
-        # Xử lý logic load dữ liệu (FIX LỖI MÀN HÌNH TRẮNG)
-        if selected_file == "+ New File":
-            chap_num = len(files.data) + 1
-            db_content = ""
-            db_review = "" # Review trống cho file mới
-            db_title = f"Chapter {chap_num}"
-        else:
-            chap_num = file_options[selected_file]
-            try:
-                # Load cả content VÀ review_content từ DB
-                res = supabase.table("chapters") \
-                    .select("content, title, review_content") \
-                    .eq("story_id", project_id) \
-                    .eq("chapter_number", chap_num) \
-                    .execute()
-                
-                if res.data:
-                    # Dùng .get() để tránh lỗi nếu cột chưa có dữ liệu
-                    db_content = res.data.get('content') or "" 
-                    db_title = res.data.get('title') or f"Chapter {chap_num}"
-                    db_review = res.data.get('review_content') or "" 
-                else:
-                    db_content = ""
-                    db_title = f"Chapter {chap_num}"
-                    db_review = ""
-            except Exception as e:
-                st.error(f"Lỗi load dữ liệu: {e}")
+    # Logic Load dữ liệu (An toàn với .get)
+    if selected_file == "+ New File":
+        chap_num = len(files.data) + 1
+        db_content = ""
+        db_review = ""
+        db_title = f"Chapter {chap_num}"
+    else:
+        chap_num = file_options[selected_file]
+        try:
+            res = supabase.table("chapters") \
+                .select("content, title, review_content") \
+                .eq("story_id", project_id) \
+                .eq("chapter_number", chap_num) \
+                .execute()
+            
+            if res.data:
+                row = res.data # Lấy dòng đầu tiên
+                db_content = row.get('content') or ""
+                db_title = row.get('title') or f"Chapter {chap_num}"
+                db_review = row.get('review_content') or ""
+            else:
                 db_content = ""
-                db_review = ""
                 db_title = f"Chapter {chap_num}"
+                db_review = ""
+        except Exception as e:
+            st.error(f"Lỗi load: {e}")
+            db_content = ""
+            db_title = f"Chapter {chap_num}"
+            db_review = ""
 
-    # --- 2. THANH CÔNG CỤ BÊN PHẢI ---
-    with col2:
-        st.markdown("### 🔧 Tools")
-
-        # Nút gọi AI Review
-        if st.button("🚀 AI Review", use_container_width=True, type="primary"):
-            st.session_state['trigger_ai_review'] = True
-            st.rerun()
-
-        # Nút Lưu (Lưu cả Content lẫn Review)
-        if st.button("💾 Save All", use_container_width=True):
-            # Lấy dữ liệu trực tiếp từ widget
+    # Các nút bấm nằm ngang hàng với chọn file
+    with c2:
+        if st.button("💾 Save", use_container_width=True):
             current_content = st.session_state.get(f"file_content_{chap_num}", "")
-            current_review = st.session_state.get(f"review_content_{chap_num}", "") # Lấy review đang sửa
             current_title = st.session_state.get(f"file_title_{chap_num}", db_title)
-
+            
             if current_content:
                 try:
                     supabase.table("chapters").upsert({
@@ -2016,146 +2008,159 @@ def render_workstation_tab(project_id, persona):
                         "chapter_number": chap_num,
                         "title": current_title,
                         "content": current_content,
-                        "review_content": current_review # Lưu luôn review
+                        # Giữ nguyên review cũ nếu có, không cần gửi lên nếu không đổi
                     }, on_conflict="story_id, chapter_number").execute()
                     
-                    st.success("✅ Đã lưu tất cả!")
+                    st.toast("✅ Đã lưu thành công!", icon="💾")
                     time.sleep(0.5)
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Lỗi khi lưu: {e}")
-            else:
-                st.warning("⚠️ Nội dung trống!")
+                    st.error(f"Lỗi lưu: {e}")
 
-        # Nút Extract Bible
-        if st.button("📥 Extract to Bible", use_container_width=True):
+    with c3:
+        if st.button("🚀 Review", use_container_width=True, type="primary"):
+            st.session_state['trigger_ai_review'] = True
+            st.rerun()
+
+    with c4:
+        if st.button("📥 Extract", use_container_width=True):
             st.session_state['extract_bible_mode'] = True
             st.rerun()
 
-    # --- 3. KHUNG SOẠN THẢO CHÍNH (EDITOR) ---
+    # --- 2. KHUNG SOẠN THẢO (EDITOR) ---
     st.markdown("---")
     
     # Tiêu đề file
     file_title = st.text_input(
-        "File Title",
+        "Tiêu đề chương:",
         value=db_title,
         key=f"file_title_{chap_num}",
-        placeholder="Đặt tên chương..."
+        label_visibility="collapsed",
+        placeholder="Nhập tên chương..."
     )
 
-    # Chia cột: 70% Viết truyện - 30% Xem Review (Style chuyên nghiệp)
-    col_edit, col_review_area = st.columns([1, 3])
-
-    with col_edit:
-        st.subheader("📝 Main Content")
-        # FIX LỖI "TEO LẠI": Tăng height lên 600
+    # Chia cột: Editor (Rộng) - Review Result (Hẹp & Ẩn được)
+    # Nếu không có review thì Editor chiếm hết, nếu có thì chia 7:3
+    has_review = bool(db_review) or st.session_state.get('trigger_ai_review')
+    
+    if has_review:
+        col_editor, col_review = st.columns([4, 5])
+    else:
+        col_editor = st.container() # Chiếm full chiều ngang
+    
+    with col_editor:
         content = st.text_area(
-            "Viết nội dung tại đây...",
+            "Nội dung chính",
             value=db_content,
-            height=600, 
+            height=650, # Tăng chiều cao tối đa
             key=f"file_content_{chap_num}",
-            placeholder="Bắt đầu viết..."
+            label_visibility="collapsed",
+            placeholder="Viết nội dung của bạn tại đây..."
         )
-        # Thống kê nhanh
+        # Footer thống kê nhỏ
         if content:
-            words = len(content.split())
-            st.caption(f"📊 {words} words • {len(content)} chars")
+            st.caption(f"📝 {len(content.split())} từ | {len(content)} ký tự")
 
-    # --- 4. KHUNG REVIEW (CƠ CHẾ MỚI: LƯU & SỬA ĐƯỢC) ---
-    with col_review_area:
-        st.subheader("🤖 AI / Editor Notes")
-        
-        # Logic chạy AI Review
-        if st.session_state.get('trigger_ai_review'):
-            with st.spinner("AI đang đọc và nhận xét..."):
-                try:
-                    # Lấy context thông minh
-                    context = HybridSearch.smart_search_hybrid(content[:500], project_id)
-                    rules = ContextManager.get_mandatory_rules(project_id)
-                    
-                    review_prompt = f"""
-                    RULES: {rules}
-                    TITLE: {file_title}
-                    CONTEXT: {context}
-                    CONTENT: {content}
-                    TASK: {persona.get('review_prompt', 'Review this content')}
-                    IMPORTANT: Trả về kết quả dưới dạng Markdown dễ đọc.
-                    """
-                    
-                    response = AIService.call_openrouter(
-                        messages=[{"role": "user", "content": review_prompt}],
-                        model=st.session_state.get('selected_model', Config.DEFAULT_MODEL),
-                        temperature=0.5,
-                        max_tokens=1500
-                    )
-                    
-                    # Cập nhật kết quả vào biến tạm để hiển thị ngay
-                    db_review = response.choices.message.content
-                    st.session_state['trigger_ai_review'] = False # Tắt cờ trigger
-                    st.success("Review xong! Hãy bấm Save để lưu lại.")
-                except Exception as e:
-                    st.error(f"Lỗi Review: {e}")
+    # --- 3. KHUNG HIỂN THỊ REVIEW (READ-ONLY) ---
+    if has_review:
+        with col_review:
+            # Xử lý Logic AI Review
+            if st.session_state.get('trigger_ai_review'):
+                with st.spinner("AI đang đọc & đối chiếu Bible..."):
+                    try:
+                        # 1. Tìm kiếm ngữ cảnh trong Bible
+                        context = HybridSearch.smart_search_hybrid(content[:1000], project_id)
+                        rules = ContextManager.get_mandatory_rules(project_id)
+                        
+                        # 2. Tạo prompt
+                        review_prompt = f"""
+                        RULES: {rules}
+                        CONTEXT FROM BIBLE: {context}
+                        CONTENT TO REVIEW: {content}
+                        TASK: {persona.get('review_prompt', 'Review this content')}
+                        FORMAT: Trả về Markdown đẹp mắt (Bullet points, Bold key issues). Không chào hỏi dài dòng.
+                        """
+                        
+                        # 3. Gọi AI
+                        response = AIService.call_openrouter(
+                            messages=[{"role": "user", "content": review_prompt}],
+                            model=st.session_state.get('selected_model', Config.DEFAULT_MODEL),
+                            temperature=0.5
+                        )
+                        
+                        # 4. Lưu kết quả vào DB ngay lập tức
+                        new_review = response.choices.message.content
+                        supabase.table("chapters").update({
+                            "review_content": new_review
+                        }).eq("story_id", project_id).eq("chapter_number", chap_num).execute()
+                        
+                        db_review = new_review # Cập nhật biến hiển thị
+                        st.session_state['trigger_ai_review'] = False
+                        st.toast("Review hoàn tất!", icon="🤖")
+                        
+                    except Exception as e:
+                        st.error(f"Lỗi Review: {e}")
 
-        # Hiển thị khung Review (Cho phép sửa luôn)
-        review_content = st.text_area(
-            "Ghi chú / Nhận xét (Có thể sửa)",
-            value=db_review,
-            height=600, # Chiều cao bằng với khung bên kia cho đẹp
-            key=f"review_content_{chap_num}", # Key riêng để lưu state
-            placeholder="Chưa có bài review nào. Bấm 'AI Review' để tạo."
-        )
+            # Hiển thị kết quả (Read-only)
+            with st.expander("🤖 AI Editor Notes", expanded=True):
+                if db_review:
+                    st.markdown(db_review) # Chỉ hiển thị, không cho sửa
+                    if st.button("🗑️ Xóa Review", key="del_rev"):
+                         supabase.table("chapters").update({"review_content": ""}).eq("story_id", project_id).eq("chapter_number", chap_num).execute()
+                         st.rerun()
+                else:
+                    st.info("Chưa có nhận xét nào.")
 
-    # --- 5. TÍNH NĂNG EXTRACT BIBLE (Giữ nguyên logic đã fix) ---
+    # --- 4. TÍNH NĂNG EXTRACT BIBLE (Hiện bên dưới Editor khi được bật) ---
     if st.session_state.get('extract_bible_mode') and content:
         st.markdown("---")
-        st.subheader("📚 Extract to Bible")
-        
-        with st.spinner("Đang trích xuất dữ liệu..."):
-            # ... (Giữ nguyên phần code Extract cũ của bạn ở đây) ...
-            # Để code gọn, tôi tóm tắt phần này, bạn giữ nguyên logic cũ nhé.
-            # Nếu cần tôi viết lại cả đoạn này thì bảo tôi.
-            
-            ext_prompt = f"""
-            TITLE: {file_title}
-            CONTENT: {content}
-            TASK: {persona.get('extractor_prompt', 'Extract entities')}
-            Return JSON array only.
-            """
-            
-            try:
-                response = AIService.call_openrouter(
-                    messages=[{"role": "user", "content": ext_prompt}],
-                    model=st.session_state.get('selected_model', Config.DEFAULT_MODEL),
-                    temperature=0.3
-                )
-                
-                data = json.loads(AIService.clean_json_text(response.choices.message.content))
-                
-                with st.expander("Xem trước trích xuất", expanded=True):
-                    st.dataframe(pd.DataFrame(data)[['entity_name', 'type', 'description']], use_container_width=True)
+        with st.container():
+            st.subheader("📚 Extract to Bible")
+            with st.spinner("Đang trích xuất dữ liệu..."):
+                ext_prompt = f"""
+                TITLE: {file_title}
+                CONTENT: {content}
+                TASK: {persona.get('extractor_prompt', 'Extract entities')}
+                Return JSON array only.
+                """
+                try:
+                    # Gọi AI (đoạn này giữ nguyên logic cũ)
+                    response = AIService.call_openrouter(
+                        messages=[{"role": "user", "content": ext_prompt}],
+                        model=st.session_state.get('selected_model', Config.DEFAULT_MODEL),
+                        temperature=0.3
+                    )
+                    clean_json = AIService.clean_json_text(response.choices.message.content)
+                    data = json.loads(clean_json)
                     
-                    if st.button("💾 Xác nhận lưu vào Bible"):
-                        for item in data:
-                            vec = AIService.get_embedding(item.get('description'))
-                            if vec:
-                                supabase.table("story_bible").insert({
-                                    "story_id": project_id,
-                                    "entity_name": item['entity_name'],
-                                    "description": item['description'],
-                                    "embedding": vec,
-                                    "source_chapter": chap_num
-                                }).execute()
-                        st.success("Đã lưu vào Bible!")
+                    with st.expander("Xem trước (Preview)", expanded=True):
+                        st.dataframe(pd.DataFrame(data)[['entity_name', 'type', 'description']], use_container_width=True)
+                        c_save, c_cancel = st.columns(2)
+                        
+                        if c_save.button("💾 Lưu vào Bible", type="primary"):
+                            for item in data:
+                                vec = AIService.get_embedding(item.get('description'))
+                                if vec:
+                                    supabase.table("story_bible").insert({
+                                        "story_id": project_id,
+                                        "entity_name": item['entity_name'],
+                                        "description": item['description'],
+                                        "embedding": vec,
+                                        "source_chapter": chap_num
+                                    }).execute()
+                            st.success("Đã lưu!")
+                            st.session_state['extract_bible_mode'] = False
+                            time.sleep(1)
+                            st.rerun()
+                            
+                        if c_cancel.button("Hủy bỏ"):
+                            st.session_state['extract_bible_mode'] = False
+                            st.rerun()
+                except Exception as e:
+                    st.error(f"Lỗi trích xuất: {e}")
+                    if st.button("Đóng"):
                         st.session_state['extract_bible_mode'] = False
-                        time.sleep(1)
                         st.rerun()
-
-            except Exception as e:
-                st.error(f"Lỗi trích xuất: {e}")
-                if st.button("Hủy"): 
-                    st.session_state['extract_bible_mode'] = False
-                    st.rerun()
-
 def render_bible_tab(project_id, persona):
     """Tab Bible - Knowledge base với prefix mở rộng"""
     st.header("📚 Project Bible")
@@ -2820,6 +2825,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
