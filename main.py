@@ -1942,7 +1942,7 @@ def render_workstation_tab(project_id, persona):
 
     # --- 1. THANH CÔNG CỤ (Toolbar) ---
     # SỬA LỖI TẠI ĐÂY: Tạo 4 cột. Cột 1 (File) rộng gấp 3 lần các nút bấm.
-    c1, c2, c3, c4 = st.columns([1, 3]) 
+    c1, c2, c3, c4 = st.columns([1, 3,1,1]) 
     
     with c1:
         # Load danh sách file
@@ -2822,6 +2822,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
