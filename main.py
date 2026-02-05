@@ -2565,7 +2565,7 @@ def render_cost_tab():
     
     model_costs.sort(key=lambda x: float(x['Avg Cost'].replace('$', '').replace('/M', '')))
     
-    df = pd.DataFrame(model_costs[:10])
+    df = pd.DataFrame(model_costs)
     st.dataframe(df, use_container_width=True, hide_index=True)
     
     # Usage history
@@ -2842,6 +2842,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
