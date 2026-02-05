@@ -1075,24 +1075,32 @@ class RuleMiningSystem:
     def extract_rule_raw(user_prompt: str, ai_response: str) -> Optional[str]:
         """Trích xuất luật thô từ hội thoại"""
         prompt = f"""
-        You are "Rule Extractor". Task: Detect User Preferences through conversation.
-        
-        CONVERSATION:
-        - User: "{user_prompt}"
-        - AI: (Previous response...)
-        
-        ANALYZE IF USER IS:
-        1. Complaining about length/style (e.g., "too long", "just code", "don't explain").
-        2. Giving mandatory format (e.g., "code only", "use JSON").
-        3. Correcting AI (e.g., "wrong", "should do this").
-        
-        IF YES, extract into 1 CONCISE RULE (imperative mood).
-        Example:
-        - Input: "Too long, just code" -> Rule: "When user asks for code -> Provide only Code Block, no lengthy explanations."
-        
-        IF NOT (just continuation, additional questions, thanks), return "NO_RULE".
-        
-        Output Text Only.
+        You are "Rule Scout". Task: Aggressively detect ANY User Preference, Style, or Instruction.
+
+CONVERSATION:
+- User: "{user_prompt}"
+- AI: (Previous response...)
+
+YOUR GOAL:
+Detect if the user is implying HOW they want the AI to behave, write, or format code/text.
+
+CRITERIA (High Sensitivity):
+1. Format requests: "json only", "markdown", "list", "no code".
+2. Style adjustments: "shorter", "more detailed", "professional tone", "don't talk much".
+3. Implicit preferences: "can you...", "please...", "I prefer...", "better if...".
+4. Corrections: "wrong", "not like that", "change this".
+
+INSTRUCTION:
+- Even if the user is polite or asking a question ("Can you write this in Python?"), treat it as a rule ("Always use Python").
+- It is BETTER to extract a false positive rule than to miss a real one.
+- When in doubt, EXTRACT THE RULE.
+
+OUTPUT FORMAT:
+- If a potential rule/preference is detected, output 1 concise sentence starting with a verb (Imperative mood).
+- Example: "Always provide code in Python" or "Keep responses under 50 words".
+- ONLY return "NO_RULE" if the user is strictly saying hello ("hi") or acknowledging ("ok thanks") with absolutely no other content.
+
+Output Text Only.
         """
         
         messages = [
@@ -2923,6 +2931,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
