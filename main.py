@@ -1041,7 +1041,7 @@ class ContextManager:
         return "\n".join(context_parts), sources, total_tokens
 
 # ==========================================
-# 🧬 10. RULE MINING SYSTEM
+# 🧬 10. RULE MINING SYSTEM (FIXED)
 # ==========================================
 class RuleMiningSystem:
     """Hệ thống khai thác và quản lý luật từ chat"""
@@ -1095,13 +1095,15 @@ class RuleMiningSystem:
     
     @staticmethod
     def analyze_rule_conflict(new_rule_content: str, project_id: str) -> Dict:
-        """Check rule conflict with DB"""
+        """Check rule conflict with DB - Safe Version"""
         similar_rules_str = HybridSearch.smart_search_hybrid(new_rule_content, project_id, top_k=3)
         
         if not similar_rules_str:
             return {
                 "status": "NEW",
                 "reason": "No conflicts found",
+                "existing_rule_summary": "None",
+                "merged_content": None,
                 "suggested_content": new_rule_content
             }
         
@@ -1139,12 +1141,25 @@ class RuleMiningSystem:
             content = response.choices[0].message.content
             content = AIService.clean_json_text(content)
             
-            return json.loads(content)
+            result = json.loads(content)
+            
+            # --- SAFE RETURN WITH DEFAULTS ---
+            return {
+                "status": result.get("status", "NEW"),
+                "reason": result.get("reason", "No reason provided by AI"),
+                "existing_rule_summary": result.get("existing_rule_summary", "N/A"),
+                "merged_content": result.get("merged_content", None),
+                "suggested_content": new_rule_content
+            }
+            
         except Exception as e:
             print(f"Rule analysis error: {e}")
+            # Return safe fallback structure so UI doesn't crash
             return {
                 "status": "NEW",
-                "reason": f"AI Judge Error: {e}",
+                "reason": f"AI Judge Error: {str(e)}",
+                "existing_rule_summary": "Error analyzing",
+                "merged_content": None,
                 "suggested_content": new_rule_content
             }
     
@@ -1178,7 +1193,6 @@ class RuleMiningSystem:
         except Exception as e:
             print(f"Crystallize error: {e}")
             return f"AI Error: {e}"
-
 # ==========================================
 # 💰 11. COST MANAGEMENT
 # ==========================================
@@ -2789,4 +2803,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
