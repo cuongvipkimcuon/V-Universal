@@ -1703,9 +1703,9 @@ def render_chat_tab(project_id, persona):
         st.write("### 🕰️ Context Depth")
         history_depth = st.slider(
             "Chat History Limit",
-            min_value=1,
+            min_value=0,
             max_value=30, 
-            value=10,
+            value=5,
             step=1,
             help="Số lượng tin nhắn cũ gửi kèm. Càng cao càng nhớ dai nhưng tốn tiền hơn."
         )
@@ -3121,6 +3121,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
