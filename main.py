@@ -2254,8 +2254,8 @@ def render_workstation_tab(project_id, persona):
                             response = AIService.call_openrouter(
                                 messages=[{"role": "user", "content": ext_prompt}],
                                 model=st.session_state.get('selected_model', Config.DEFAULT_MODEL),
-                                temperature=0.3, # Tăng nhẹ để AI sáng tạo Type
-                                max_tokens=16000,
+                                temperature=0.0, # Tăng nhẹ để AI sáng tạo Type
+                                max_tokens=64000,
                                 response_format={"type": "json_object"} 
                             )
     
@@ -3085,6 +3085,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
