@@ -2213,7 +2213,7 @@ def render_workstation_tab(project_id, persona):
                     my_bar = st.progress(0, text=progress_text)
     
                     # Hàm cắt nhỏ văn bản để tránh quá tải token
-                    def chunk_text(text, chunk_size=8000): # Giảm size chút cho an toàn
+                    def chunk_text(text, chunk_size=4000): # Giảm size chút cho an toàn
                         return [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
     
                     chunks = chunk_text(content)
@@ -2238,13 +2238,16 @@ def render_workstation_tab(project_id, persona):
                                (Ví dụ: "Thần Khí", "Môn Phái", "Huyết Kế", "Nhân vật phụ", "Quái thú"...) -> Đừng gò bó!
                             4. "description": Tóm tắt ngắn gọn vai trò/đặc điểm (dưới 50 từ).
                             
-                            VÍ DỤ MẪU:
-                            {{
-                                "items": [
-                                    {{ "entity_name": "Lâm Phong", "type": "Nhân vật chính", "description": "Thiếu niên xuyên không..." }},
-                                    {{ "entity_name": "Hỏa Long Đao", "type": "Thần binh", "description": "Thanh đao rèn từ lửa rồng..." }}
-                                ]
-                            }}
+                            ⚠️ QUAN TRỌNG: 
+                                - Nếu không tìm thấy thực thể nào, hãy trả về danh sách rỗng: {{ "items": [] }}
+                                - TUYỆT ĐỐI KHÔNG COPY VÍ DỤ MẪU BÊN DƯỚI VÀO KẾT QUẢ.
+            
+                            VÍ DỤ CẤU TRÚC (CHỈ ĐỂ THAM KHẢO FORMAT, KHÔNG ĐƯỢC CHÉP):
+                        {{
+                            "items": [
+                                {{ "entity_name": "Tên_Thực_Thể_Tìm_Thấy", "type": "Loại_Của_Nó", "description": "Mô_tả_ngắn_gọn..." }}
+                                    ]
+                        }}
                             """
                             
                             # Gọi AI với response_format json_object (An toàn hơn)
@@ -3082,6 +3085,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
