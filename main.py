@@ -1661,7 +1661,70 @@ def render_dashboard_tab(project_id):
             st.info("No prefix data available")
     else:
         st.info("No bible entries yet")
+    # --- BỔ SUNG: PROJECT SETTINGS (RENAME & DELETE) ---
+    st.markdown("---")
+    st.header("⚙️ Project Settings")
 
+    col_rename, col_danger = st.columns([6])
+
+    # 1. TÍNH NĂNG ĐỔI TÊN (RENAME)
+    with col_rename:
+        st.subheader("✏️ Rename Project")
+        current_name = st.session_state.current_project.get('title', 'Untitled')
+        new_name = st.text_input("New Project Name", value=current_name)
+        
+        if st.button("Update Name", use_container_width=True):
+            if new_name and new_name != current_name:
+                try:
+                    supabase.table("stories").update({
+                        "title": new_name
+                    }).eq("id", project_id).execute()
+                    
+                    # Cập nhật Session State để hiển thị ngay
+                    st.session_state.current_project['title'] = new_name
+                    st.success("Project renamed successfully!")
+                    time.sleep(1)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error renaming: {e}")
+
+    # 2. TÍNH NĂNG XÓA DỰ ÁN (DELETE)
+    with col_danger:
+        st.subheader("💀 Danger Zone")
+        st.warning("Delete this project and ALL associated data (Chapters, Bible, Chat).")
+        
+        # Logic xác nhận 2 bước để tránh xóa nhầm
+        if not st.session_state.get('confirm_delete_project'):
+            if st.button("💣 Delete Project", type="primary", use_container_width=True):
+                st.session_state['confirm_delete_project'] = True
+                st.rerun()
+        else:
+            st.error("⚠️ Are you sure? This cannot be undone!")
+            c1, c2 = st.columns(2)
+            
+            with c1:
+                if st.button("❌ Cancel", use_container_width=True):
+                    st.session_state['confirm_delete_project'] = False
+                    st.rerun()
+            
+            with c2:
+                if st.button("✅ YES, DELETE", type="primary", use_container_width=True):
+                    try:
+                        # Xóa Project (Giả định Supabase đã set ON DELETE CASCADE cho các bảng con)
+                        # Nếu chưa set Cascade trong DB, bạn phải xóa tay các bảng con trước
+                        supabase.table("stories").delete().eq("id", project_id).execute()
+                        
+                        st.success("Project deleted!")
+                        
+                        # Reset Session để quay về màn hình chọn
+                        st.session_state['current_project'] = None
+                        st.session_state['project_id'] = None
+                        st.session_state['confirm_delete_project'] = False
+                        
+                        time.sleep(1.5)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error deleting: {e}")
 def render_chat_tab(project_id, persona):
     """Tab Chat - AI Conversation với tính năng nâng cao"""
     st.header("💬 Smart AI Chat")
@@ -3140,6 +3203,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
