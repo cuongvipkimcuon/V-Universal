@@ -3,6 +3,7 @@ import streamlit as st
 
 from config import Config, init_services
 from persona import PersonaSystem, PERSONAS
+from utils.cache_helpers import invalidate_cache_and_rerun
 
 
 def render_prefix_setup():
@@ -25,16 +26,32 @@ def render_prefix_setup():
             st.text_input("Prefix key", value=row.get("prefix_key", ""), key=f"pk_{row.get('id')}", disabled=True)
             st.text_area("Mô tả", value=row.get("description", ""), key=f"desc_{row.get('id')}", height=80)
             st.number_input("Thứ tự", value=int(row.get("sort_order") or 0), key=f"ord_{row.get('id')}", min_value=0)
-            if st.button("Cập nhật", key=f"upd_{row.get('id')}"):
-                try:
-                    supabase.table("bible_prefix_config").update({
-                        "description": st.session_state.get(f"desc_{row.get('id')}", row.get("description")),
-                        "sort_order": st.session_state.get(f"ord_{row.get('id')}", row.get("sort_order")),
-                    }).eq("id", row["id"]).execute()
-                    st.success("Đã cập nhật.")
-                    st.rerun()
-                except Exception as ex:
-                    st.error(str(ex))
+            col_upd, col_del = st.columns(2)
+            with col_upd:
+                if st.button("💾 Cập nhật", key=f"upd_{row.get('id')}"):
+                    try:
+                        supabase.table("bible_prefix_config").update(
+                            {
+                                "description": st.session_state.get(
+                                    f"desc_{row.get('id')}", row.get("description")
+                                ),
+                                "sort_order": st.session_state.get(
+                                    f"ord_{row.get('id')}", row.get("sort_order")
+                                ),
+                            }
+                        ).eq("id", row["id"]).execute()
+                        st.success("Đã cập nhật.")
+                        invalidate_cache_and_rerun()
+                    except Exception as ex:
+                        st.error(str(ex))
+            with col_del:
+                if st.button("🗑️ Xóa tiền tố này", key=f"del_{row.get('id')}"):
+                    try:
+                        supabase.table("bible_prefix_config").delete().eq("id", row["id"]).execute()
+                        st.success("Đã xóa tiền tố.")
+                        invalidate_cache_and_rerun()
+                    except Exception as ex:
+                        st.error(str(ex))
     st.markdown("---")
     st.subheader("Thêm tiền tố mới")
     with st.form("add_prefix"):
@@ -80,29 +97,75 @@ def render_persona_setup():
         return
     for row in rows:
         with st.expander(f"{row.get('icon', '')} {row.get('key', '')} — {row.get('role', '')[:40]}..."):
-            st.text_input("Key", value=row.get("key", ""), key=f"pkey_{row.get('id')}", disabled=row.get("is_builtin"))
+            st.text_input(
+                "Key",
+                value=row.get("key", ""),
+                key=f"pkey_{row.get('id')}",
+                disabled=row.get("is_builtin"),
+            )
             st.text_input("Icon", value=row.get("icon", ""), key=f"picon_{row.get('id')}")
             st.text_input("Role", value=row.get("role", ""), key=f"prole_{row.get('id')}")
-            st.number_input("Temperature", value=float(row.get("temperature") or 0.7), key=f"ptemp_{row.get('id')}", min_value=0.0, max_value=1.0, step=0.1)
-            st.number_input("Max tokens", value=int(row.get("max_tokens") or 5000), key=f"ptok_{row.get('id')}", min_value=500)
-            st.text_area("Core instruction", value=row.get("core_instruction", ""), key=f"pinst_{row.get('id')}", height=120)
-            st.text_area("Review prompt", value=row.get("review_prompt", ""), key=f"prev_{row.get('id')}", height=80)
-            st.text_area("Extractor prompt", value=row.get("extractor_prompt", ""), key=f"pext_{row.get('id')}", height=80)
-            if st.button("Cập nhật", key=f"pupd_{row.get('id')}"):
-                try:
-                    supabase.table("personas").update({
-                        "icon": st.session_state.get(f"picon_{row.get('id')}"),
-                        "role": st.session_state.get(f"prole_{row.get('id')}"),
-                        "temperature": st.session_state.get(f"ptemp_{row.get('id')}"),
-                        "max_tokens": st.session_state.get(f"ptok_{row.get('id')}"),
-                        "core_instruction": st.session_state.get(f"pinst_{row.get('id')}"),
-                        "review_prompt": st.session_state.get(f"prev_{row.get('id')}"),
-                        "extractor_prompt": st.session_state.get(f"pext_{row.get('id')}"),
-                    }).eq("id", row["id"]).execute()
-                    st.success("Đã cập nhật.")
-                    st.rerun()
-                except Exception as ex:
-                    st.error(str(ex))
+            st.number_input(
+                "Temperature",
+                value=float(row.get("temperature") or 0.7),
+                key=f"ptemp_{row.get('id')}",
+                min_value=0.0,
+                max_value=1.0,
+                step=0.1,
+            )
+            st.number_input(
+                "Max tokens",
+                value=int(row.get("max_tokens") or 5000),
+                key=f"ptok_{row.get('id')}",
+                min_value=500,
+            )
+            st.text_area(
+                "Core instruction",
+                value=row.get("core_instruction", ""),
+                key=f"pinst_{row.get('id')}",
+                height=120,
+            )
+            st.text_area(
+                "Review prompt",
+                value=row.get("review_prompt", ""),
+                key=f"prev_{row.get('id')}",
+                height=80,
+            )
+            st.text_area(
+                "Extractor prompt",
+                value=row.get("extractor_prompt", ""),
+                key=f"pext_{row.get('id')}",
+                height=80,
+            )
+            col_pupd, col_pdel = st.columns(2)
+            with col_pupd:
+                if st.button("💾 Cập nhật", key=f"pupd_{row.get('id')}"):
+                    try:
+                        supabase.table("personas").update(
+                            {
+                                "icon": st.session_state.get(f"picon_{row.get('id')}"),
+                                "role": st.session_state.get(f"prole_{row.get('id')}"),
+                                "temperature": st.session_state.get(f"ptemp_{row.get('id')}"),
+                                "max_tokens": st.session_state.get(f"ptok_{row.get('id')}"),
+                                "core_instruction": st.session_state.get(f"pinst_{row.get('id')}"),
+                                "review_prompt": st.session_state.get(f"prev_{row.get('id')}"),
+                                "extractor_prompt": st.session_state.get(f"pext_{row.get('id')}"),
+                            }
+                        ).eq("id", row["id"]).execute()
+                        st.success("Đã cập nhật.")
+                        invalidate_cache_and_rerun()
+                    except Exception as ex:
+                        st.error(str(ex))
+            with col_pdel:
+                # Chỉ cho phép xóa persona do user tạo (không phải builtin)
+                if not row.get("is_builtin"):
+                    if st.button("🗑️ Xóa persona này", key=f"pdel_{row.get('id')}"):
+                        try:
+                            supabase.table("personas").delete().eq("id", row["id"]).execute()
+                            st.success("Đã xóa persona.")
+                            invalidate_cache_and_rerun()
+                        except Exception as ex:
+                            st.error(str(ex))
     st.markdown("---")
     st.subheader("Tạo persona mới")
     with st.form("add_persona"):
