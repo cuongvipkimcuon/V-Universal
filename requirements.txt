@@ -8,3 +8,6 @@ pyarrow
 openai
 requests
 python-dotenv
+python-docx
+pypdf
+openpyxl

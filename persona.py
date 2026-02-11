@@ -1,7 +1,37 @@
 # FILE: persona.py
 # ==============================================================================
-# 🎭 CẤU HÌNH PERSONA (V-UNIVERSE) - OPTIMIZED VERSION
+# 🎭 CẤU HÌNH PERSONA (V-UNIVERSE) - Load từ DB (bảng personas), fallback file
 # ==============================================================================
+
+
+def _load_personas_from_db():
+    """Lấy tất cả persona từ bảng personas. Lỗi hoặc chưa có bảng -> None."""
+    try:
+        from config import init_services
+        services = init_services()
+        if not services:
+            return None
+        r = services["supabase"].table("personas").select("key, icon, role, temperature, max_tokens, core_instruction, review_prompt, extractor_prompt").execute()
+        if not r.data:
+            return None
+        out = {}
+        for row in r.data:
+            k = row.get("key")
+            if not k:
+                continue
+            out[k] = {
+                "icon": row.get("icon") or "✍️",
+                "role": row.get("role") or "",
+                "temperature": float(row.get("temperature") or 0.7),
+                "max_tokens": int(row.get("max_tokens") or 5000),
+                "core_instruction": row.get("core_instruction") or "",
+                "review_prompt": row.get("review_prompt") or "",
+                "extractor_prompt": row.get("extractor_prompt") or "",
+            }
+        return out if out else None
+    except Exception:
+        return None
+
 
 PERSONAS = {
     "Writer": {
@@ -140,4 +170,29 @@ OUTPUT JSON ARRAY ONLY:
 """
     }
 }
+
+
+class PersonaSystem:
+    """Hệ thống persona: ưu tiên load từ bảng personas (Supabase), fallback file."""
+
+    PERSONAS = PERSONAS  # fallback khi DB chưa có
+
+    @classmethod
+    def get_personas_dict(cls) -> dict:
+        """Danh sách persona: từ DB nếu có, không thì từ file."""
+        db = _load_personas_from_db()
+        if db:
+            return db
+        return cls.PERSONAS
+
+    @classmethod
+    def get_persona(cls, persona_type: str) -> dict:
+        """Lấy cấu hình persona (từ DB hoặc file)."""
+        d = cls.get_personas_dict()
+        return d.get(persona_type, d.get("Writer", cls.PERSONAS["Writer"]))
+
+    @classmethod
+    def get_available_personas(cls) -> list:
+        """Danh sách persona có sẵn (từ DB hoặc file)."""
+        return list(cls.get_personas_dict().keys())
 
