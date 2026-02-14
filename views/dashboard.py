@@ -1,12 +1,46 @@
 import re
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import streamlit as st
 
 from config import init_services
 from utils.cache_helpers import get_dashboard_metrics_cached
+
+
+def _clean_crystallize_for_user(supabase, story_id, user_id):
+    """Khi xóa hết chat: xóa Bible [CHAT] đã crystallize của user, xóa log crystallize, reset counter."""
+    try:
+        # Lấy các bible_entry_id do user này crystallize (log có thể lưu UUID hoặc BIGINT tùy schema)
+        r = supabase.table("chat_crystallize_log").select("bible_entry_id").eq(
+            "story_id", story_id
+        ).eq("user_id", user_id).execute()
+        ids_to_delete = []
+        if r.data:
+            for row in r.data:
+                bid = row.get("bible_entry_id")
+                if bid is not None:
+                    ids_to_delete.append(bid)
+        for bid in ids_to_delete:
+            try:
+                supabase.table("story_bible").delete().eq("id", bid).eq(
+                    "story_id", story_id
+                ).execute()
+            except Exception:
+                pass
+        supabase.table("chat_crystallize_log").delete().eq(
+            "story_id", story_id
+        ).eq("user_id", user_id).execute()
+        now = datetime.now(timezone.utc).isoformat()
+        supabase.table("chat_crystallize_state").upsert({
+            "story_id": story_id,
+            "user_id": user_id,
+            "messages_since_crystallize": 0,
+            "updated_at": now,
+        }, on_conflict="story_id,user_id").execute()
+    except Exception as e:
+        print(f"_clean_crystallize_for_user error: {e}")
 
 
 def render_dashboard_tab(project_id):
@@ -61,24 +95,26 @@ def render_dashboard_tab(project_id):
         if st.button("📥 Import Bible from Files", use_container_width=True, key="dash_import_bible"):
             st.session_state["import_bible_mode"] = True
         confirm_clean = st.checkbox(
-            "Tôi chắc chắn muốn xóa TOÀN BỘ lịch sử chat của dự án này",
+            "Tôi chắc chắn muốn xóa TOÀN BỘ lịch sử chat và điểm nhớ [CHAT] (crystallize) của tôi",
             key="dash_confirm_clean_chats",
-            help="Hành động không thể hoàn tác. Sẽ xóa toàn bộ chat_history theo project hiện tại.",
+            help="Xóa chat_history + Bible [CHAT] đã crystallize + reset counter crystallize. Không hoàn tác được.",
         )
         if st.button("🧹 Clean ALL Chats", use_container_width=True, key="dash_clean_chats"):
             if not confirm_clean:
                 st.warning("Vui lòng tick xác nhận trước khi xóa toàn bộ chat.")
             else:
                 try:
-                    # Xóa lịch sử chat RIÊNG của user hiện tại (không đụng chat của người khác)
                     user = st.session_state.get("user")
                     user_id = getattr(user, "id", None) if user else None
+                    # 1) Xóa lịch sử chat của user trong dự án
                     q = supabase.table("chat_history").delete().eq("story_id", project_id)
                     if user_id:
                         q = q.eq("user_id", str(user_id))
                     q.execute()
-                    st.success("✅ Đã xóa lịch sử chat của bạn trong dự án hiện tại.")
-                    # Clear cache + tăng update_trigger để Dashboard và các tab khác reload dữ liệu mới
+                    # 2) Xóa Bible [CHAT] đã crystallize từ chat của user này + reset crystallize state
+                    if user_id:
+                        _clean_crystallize_for_user(supabase, project_id, str(user_id))
+                    st.success("✅ Đã xóa lịch sử chat và điểm nhớ [CHAT] (crystallize) của bạn trong dự án.")
                     st.cache_data.clear()
                     st.session_state["update_trigger"] = st.session_state.get("update_trigger", 0) + 1
                     st.rerun()

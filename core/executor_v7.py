@@ -31,6 +31,7 @@ def step_to_router_result(step: Dict, user_prompt: str) -> Dict:
         "update_summary": args.get("update_summary") or "",
         "data_operation_type": args.get("data_operation_type") or "",
         "data_operation_target": args.get("data_operation_target") or "",
+        "query_target": args.get("query_target") or "",
     }
 
 
@@ -52,6 +53,7 @@ def _normalize_step(step: Dict, step_id: int, user_prompt: str) -> Dict:
             "update_summary": args.get("update_summary") or "",
             "data_operation_type": args.get("data_operation_type") or "",
             "data_operation_target": args.get("data_operation_target") or "",
+            "query_target": args.get("query_target") or "",
         },
         "dependency": step.get("dependency"),
     }
@@ -137,6 +139,43 @@ def execute_plan(
             free_chat_mode=free_chat_mode,
             max_context_tokens=token_limit,
         )
+
+        # Intent không sinh "nguyên liệu" cho bước sau: chỉ ghi nhắc ngắn, không đưa full context vào cumulative.
+        INDEPENDENT_INTENTS = ("query_Sql", "web_search", "ask_user_clarification", "chat_casual")
+        if intent in INDEPENDENT_INTENTS:
+            block = f"\n--- [STEP {step_id}: {intent}] ---\n(Đã thực hiện; bước sau không dùng kết quả này làm nguồn.)\n"
+            cumulative_parts.append(block)
+            all_sources.extend([f"Step {step_id}: {intent}"] + (sources or []))
+            step_results.append({
+                "step_id": step_id,
+                "intent": intent,
+                "context_snippet": ctx_text[:2000],
+                "executor_result": None,
+            })
+            steps_executed += 1
+            cumulative_so_far = "\n".join(cumulative_parts)
+            remaining_after = remaining_steps[1:]
+            should_replan, outcome_reason = evaluate_step_outcome(intent, ctx_text, sources or [])
+            if should_replan and remaining_after and replan_count < max_replan_rounds:
+                action, reason, new_plan = replan_after_step(
+                    user_prompt, cumulative_so_far, step_results, step, outcome_reason, remaining_after, project_id,
+                )
+                replan_events.append({
+                    "step_id": step_id,
+                    "reason": reason or outcome_reason,
+                    "action": action,
+                    "new_plan_summary": [s.get("intent") for s in new_plan] if new_plan else [],
+                })
+                if action == "replace" and new_plan:
+                    replan_count += 1
+                    normalized = [(_normalize_step(s, len(step_results) + 1 + i, user_prompt)) for i, s in enumerate(new_plan)]
+                    remaining_steps = normalized
+                    continue
+                if action == "abort":
+                    remaining_steps = []
+                    break
+            remaining_steps = remaining_after
+            continue
 
         executor_result = None
         if intent == "numerical_calculation" and run_numerical_executor and PythonExecutor and not free_chat_mode:

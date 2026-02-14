@@ -9,7 +9,7 @@ from utils.auth_manager import get_user_projects
 def render_sidebar(session_manager):
     """Sidebar: Project, Arc, Quick Actions. Không còn navigation - chuyển sang main tabs."""
     with st.sidebar:
-        st.markdown("🚀 **V-Universe Ver 6.0**", unsafe_allow_html=True)
+        st.markdown("<p style='text-align: center; margin: 0; font-weight: 600; color: #5b21b6;'>✦ V-Universe Ver 7.0</p>", unsafe_allow_html=True)
         if 'user' in st.session_state and st.session_state.user:
             user_email = st.session_state.user.email
             st.markdown(f"_{user_email.split('@')[0]}_", unsafe_allow_html=True)

@@ -306,26 +306,28 @@ class SessionManager:
         return False
 
     def render_login_form(self):
-        """Hiển thị form đăng nhập/đăng ký - Ver 6.0"""
+        """Hiển thị form đăng nhập/đăng ký - Ver 7.0"""
         st.markdown("""
         <style>
         .login-hero { display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 2rem 0; width: 100%; }
-        .login-hero h1 { font-size: 2.8rem; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin: 0 auto; }
-        .login-hero p { margin: 0.5rem 0 0 0; }
-        .login-form-center { margin: 0 auto; max-width: 480px; }
+        .login-hero h1 { font-size: 2.4rem; font-weight: 700; letter-spacing: -0.02em; background: linear-gradient(135deg, #5b21b6 0%, #7c3aed 50%, #6366f1 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; margin: 0 auto; text-align: center; }
+        .login-hero p { margin: 0.5rem 0 0 0; text-align: center; color: #64748b; font-size: 1rem; }
+        .login-form-center { margin: 0 auto; max-width: 420px; padding: 0 1rem; }
         .feature-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin: 2rem 0; }
-        .feature-card { background: linear-gradient(145deg, #f8fafc 0%, #e2e8f0 100%); border-radius: 16px; padding: 24px; text-align: center; box-shadow: 0 4px 12px rgba(0,0,0,0.08); transition: transform 0.2s; }
-        .feature-card:hover { transform: translateY(-4px); box-shadow: 0 8px 24px rgba(102,126,234,0.2); }
+        .feature-card { background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 20px; text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,0.06); transition: box-shadow 0.2s, border-color 0.2s; }
+        .feature-card:hover { box-shadow: 0 4px 12px rgba(124,58,237,0.12); border-color: #c4b5fd; }
         .feature-card .icon { font-size: 2.5rem; margin-bottom: 12px; }
         .feature-card h4 { color: #2d3748; font-size: 1rem; margin: 0 0 8px 0; }
         .feature-card p { color: #64748b; font-size: 0.85rem; margin: 0; }
         </style>
         """, unsafe_allow_html=True)
 
-        st.markdown('<div class="login-hero">', unsafe_allow_html=True)
-        st.markdown("<h1>🚀 V-Universe AI Hub Pro</h1>", unsafe_allow_html=True)
-        st.markdown("<p style='color: #64748b; font-size: 1.1rem;'>Ver 6.0 — Your Intelligent Writing & Development Assistant</p>", unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown("""
+        <div class="login-hero">
+            <h1>V-Universe AI Hub Pro</h1>
+            <p>Ver 7.0 — Your Intelligent Writing & Development Assistant</p>
+        </div>
+        """, unsafe_allow_html=True)
 
         col1, col2, col3 = st.columns([1, 3, 1])
 
@@ -411,7 +413,7 @@ class SessionManager:
 
                 st.markdown("""
                 <div style='margin-top: 40px;'>
-                    <h4 style='text-align: center; color: #2d3748; margin-bottom: 24px;'>✨ Ver 6.0 — Tính năng nổi bật</h4>
+                    <h4 style='text-align: center; color: #2d3748; margin-bottom: 24px;'>✨ Ver 7.0 — Tính năng nổi bật</h4>
                     <div class='feature-grid'>
                         <div class='feature-card'><div class='icon'>🤖</div><h4>Multi-AI</h4><p>20+ models OpenRouter</p></div>
                         <div class='feature-card'><div class='icon'>🎯</div><h4>Semantic Intent</h4><p>Khớp câu hỏi, bỏ Router</p></div>

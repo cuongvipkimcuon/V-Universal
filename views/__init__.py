@@ -10,6 +10,7 @@ from .collaboration import render_collaboration_tab
 from .setup_tabs import render_prefix_setup, render_persona_setup
 from .data_health import render_data_health_tab
 from .data_analyze import render_data_analyze_tab
+from .background_tasks_tab import render_background_tasks_tab
 from .review import render_review_tab
 
 try:
@@ -97,6 +98,7 @@ __all__ = [
     "render_persona_setup",
     "render_data_health_tab",
     "render_data_analyze_tab",
+    "render_background_tasks_tab",
     "render_review_tab",
     "render_rules_tab",
     "render_chat_management_tab",

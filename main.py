@@ -1,5 +1,5 @@
 """
-V-Universe AI Hub Pro Ver 6.0 - Entry point.
+V-Universe AI Hub Pro Ver 7.0 - Entry point.
 Main tabs: Workspace | Knowledge | Chat | Admin. Sub-tabs trong từng nhóm.
 """
 import streamlit as st
@@ -12,6 +12,7 @@ from views import (
     render_chat_tab,
     render_workstation_tab,
     render_data_analyze_tab,
+    render_background_tasks_tab,
     render_review_tab,
     render_bible_tab,
     render_cost_tab,
@@ -33,8 +34,8 @@ from views import (
 # PAGE CONFIG & CSS
 # ==========================================
 st.set_page_config(
-    page_title="V-Universe AI Hub Pro Ver 6.0",
-    page_icon="🚀",
+    page_title="V-Universe AI Hub Pro Ver 7.0",
+    page_icon="✦",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -43,20 +44,24 @@ st.markdown("""
 <style>
     .main .block-container { padding-top: 1.25rem; padding-bottom: 1.25rem; max-width: 1400px; }
     [data-testid="stSidebar"] .stButton > button {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white; border: none; border-radius: 10px; transition: opacity 0.2s;
+        background: linear-gradient(135deg, #6d28d9 0%, #7c3aed 100%);
+        color: white; border: none; border-radius: 8px; font-weight: 500; transition: opacity 0.2s, transform 0.05s;
     }
-    [data-testid="stSidebar"] .stButton > button:hover { opacity: 0.9; }
-    .stTabs [data-baseweb="tab-list"] { gap: 8px; background: #f1f5f9; padding: 10px; border-radius: 12px; }
-    .stTabs [aria-selected="true"] { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border-radius: 8px; }
-    .danger-zone { border: 2px solid #ef4444; border-radius: 12px; padding: 16px; margin-top: 16px; background: #fef2f2; }
-    .stExpander { border-radius: 10px; border: 1px solid #e2e8f0; }
+    [data-testid="stSidebar"] .stButton > button:hover { opacity: 0.92; }
+    .stTabs [data-baseweb="tab-list"] { gap: 6px; background: #f8fafc; padding: 8px; border-radius: 10px; }
+    .stTabs [aria-selected="true"] { background: linear-gradient(135deg, #6d28d9 0%, #7c3aed 100%); color: white; border-radius: 8px; }
+    .danger-zone { border: 1px solid #fecaca; border-radius: 10px; padding: 16px; margin-top: 16px; background: #fef2f2; }
+    .stExpander { border-radius: 8px; border: 1px solid #e2e8f0; }
     .stExpander summary { font-weight: 600; }
     div[data-testid="stHorizontalBlock"] > div { padding: 0 0.4rem; }
     .stSubheader, h3 { color: #334155; }
-    .dashboard-widget { background: #f8fafc; border-radius: 12px; padding: 16px; border: 1px solid #e2e8f0; }
+    .dashboard-widget { background: #fff; border-radius: 10px; padding: 16px; border: 1px solid #e2e8f0; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
     .widget-value { font-size: 1.75rem; font-weight: 700; color: #334155; }
     .widget-title { font-size: 0.9rem; color: #64748b; }
+    [data-testid="stTextInput"] input, [data-testid="stTextInput"] input:focus { border-radius: 8px; border-color: #e2e8f0; }
+    [data-testid="stTextInput"] input:focus { box-shadow: 0 0 0 2px rgba(124, 58, 237, 0.2); border-color: #7c3aed; }
+    .stButton > button { border-radius: 8px; font-weight: 500; transition: opacity 0.2s; }
+    .stButton > button:hover { opacity: 0.9; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -66,6 +71,7 @@ TAB_STRUCTURE = {
         ("dashboard", "📊 Dashboard", "render_dashboard_tab", False),
         ("workstation", "✍️ Workstation", "render_workstation_tab", True),
         ("data_analyze", "📊 Data Analyze", "render_data_analyze_tab", False),
+        ("background_tasks", "🔄 Tác vụ ngầm", "render_background_tasks_tab", False),
         ("review", "🤖 Review", "render_review_tab", False),
         ("python_executor", "🧮 Python Executor", "render_python_executor_tab", False),
     ],
@@ -96,6 +102,7 @@ RENDER_MAP = {
     "render_dashboard_tab": render_dashboard_tab,
     "render_workstation_tab": render_workstation_tab,
     "render_data_analyze_tab": render_data_analyze_tab,
+    "render_background_tasks_tab": render_background_tasks_tab,
     "render_review_tab": render_review_tab,
     "render_python_executor_tab": render_python_executor_tab,
     "render_bible_tab": render_bible_tab,
@@ -138,14 +145,20 @@ def main():
 
     project_id, persona = render_sidebar(session_manager)
 
-    # Header
+    # Header (tiêu đề căn giữa)
     col1, col2 = st.columns([3, 1])
     with col1:
         if st.session_state.get('current_project'):
-            st.title(f"🚀 {st.session_state.current_project.get('title', 'Untitled')}")
+            st.markdown(
+                f"<h1 style='text-align: center; margin: 0; font-size: 1.75rem; font-weight: 600; color: #334155;'>{st.session_state.current_project.get('title', 'Untitled')}</h1>",
+                unsafe_allow_html=True
+            )
         else:
-            st.title("🚀 V-Universe AI Hub Pro Ver 6.0")
-            st.caption("Select or create a project")
+            st.markdown(
+                "<h1 style='text-align: center; margin: 0; font-size: 1.75rem; font-weight: 600; background: linear-gradient(135deg, #5b21b6 0%, #7c3aed 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;'>V-Universe AI Hub Pro Ver 7.0</h1>",
+                unsafe_allow_html=True
+            )
+            st.markdown("<p style='text-align: center; color: #64748b; margin-top: 0.25rem; font-size: 0.95rem;'>Select or create a project</p>", unsafe_allow_html=True)
     with col2:
         if 'user' in st.session_state:
             budget = CostManager.get_user_budget(st.session_state.user.id)
@@ -200,8 +213,8 @@ def main():
 
     st.markdown("---")
     st.markdown(
-        "<div style='text-align: center; color: #666; padding: 20px;'>"
-        "🚀 V-Universe AI Hub Pro • Ver 6.0 • Semantic Intent • Arc • Chunking • Auto Crystallize"
+        "<div style='text-align: center; color: #64748b; padding: 16px; font-size: 0.85rem;'>"
+        "V-Universe AI Hub Pro • Ver 7.0 • Semantic Intent • Arc • Chunking • Chỉ lệnh @@ • Auto Crystallize"
         "</div>",
         unsafe_allow_html=True
     )

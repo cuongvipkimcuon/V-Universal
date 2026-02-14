@@ -11,7 +11,7 @@ from utils.cache_helpers import get_bible_list_cached, invalidate_cache_and_reru
 
 def render_rules_tab(project_id, persona):
     st.header("📋 Rules")
-    st.caption("Ver 6.0: Quy tắc dự án. Thêm/sửa tự tạo vector như Bible.")
+    st.caption("Ver 7.0: Quy tắc dự án. Thêm/sửa tự tạo vector như Bible.")
 
     if not project_id:
         st.info("📁 Chọn Project trước.")

@@ -5,9 +5,9 @@ from .setup_tabs import render_prefix_setup, render_persona_setup
 
 
 def render_settings_tab():
-    """Tab Settings Ver 6.0 — Account, AI Model (từ sidebar), Cấu hình AI, Giao diện, Bible & Personas."""
+    """Tab Settings Ver 7.0 — Account, AI Model (từ sidebar), Cấu hình AI, Giao diện, Bible & Personas."""
     st.header("⚙️ Settings")
-    st.caption("Ver 6.0: Tất cả tùy chỉnh AI chuyển vào đây.")
+    st.caption("Ver 7.0: Tất cả tùy chỉnh AI chuyển vào đây.")
 
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "👤 Account",

@@ -294,19 +294,37 @@ def run_data_operations_batch(
     user_id: Optional[str],
     steps: list,
     user_request: str,
+    job_id: Optional[str] = None,
 ) -> None:
     """
-    Chạy thao tác (extract/update/delete × bible/relation/timeline/chunking) theo LÔ:
-    - Mỗi lô tối đa MAX_CHAPTERS_PER_BATCH (7) chương, fetch một query rồi xử lý (tiết kiệm token/round-trip).
-    - Khoảng rộng chia thành nhiều lô chạy tuần tự; các target (bible, relation, timeline, chunking) chạy song song (ThreadPoolExecutor) để nhanh, chạy ngầm không lag UI.
-    Step: {"operation_type", "target", "chapter_number": n} hoặc {"operation_type", "target", "chapter_range": [start, end]}.
+    Chạy thao tác (extract/update/delete × bible/relation/timeline/chunking) theo LÔ.
+    Nếu job_id được truyền (từ Chat), cập nhật background_jobs để tab Tác vụ ngầm hiển thị.
+    Vẫn ghi tin hoàn thành vào chat_history để V Work hiện toast.
     """
     if not steps:
         _post_completion_message(project_id, user_id, user_request, False, "Không có bước nào để thực hiện.")
+        if job_id:
+            try:
+                from core.background_jobs import update_job
+                update_job(job_id, "failed", error_message="Không có bước nào để thực hiện.")
+            except Exception:
+                pass
         return
+    if job_id:
+        try:
+            from core.background_jobs import update_job
+            update_job(job_id, "running")
+        except Exception:
+            pass
     batch_items = _group_into_chunked_batches(steps)
     if not batch_items:
         _post_completion_message(project_id, user_id, user_request, False, "Không có bước hợp lệ (cần chapter_number hoặc chapter_range).")
+        if job_id:
+            try:
+                from core.background_jobs import update_job
+                update_job(job_id, "failed", error_message="Không có bước hợp lệ (cần chapter_number hoặc chapter_range).")
+            except Exception:
+                pass
         return
 
     # Gom theo (op_type, target): mỗi key có danh sách các lô chapter_numbers
@@ -345,6 +363,12 @@ def run_data_operations_batch(
     from config import init_services
     services = init_services()
     if not services:
+        if job_id:
+            try:
+                from core.background_jobs import update_job
+                update_job(job_id, "failed", error_message="Không kết nối được dịch vụ.")
+            except Exception:
+                pass
         return
     supabase = services["supabase"]
     now_iso = datetime.now(tz=timezone.utc).isoformat()
@@ -353,6 +377,18 @@ def run_data_operations_batch(
         content = f"✅ Đã thực hiện xong **tất cả {total_ops} thao tác** của bạn: **{user_request}**. Thời gian: {now_display}."
     else:
         content = f"⚠️ Hoàn thành một phần. **{user_request}**. Lỗi: {'; '.join(all_failed[:3])}. Thời gian: {now_display}."
+    if job_id:
+        try:
+            from core.background_jobs import update_job
+            summary = f"{total_ops} thao tác" + (f", {len(all_failed)} lỗi" if all_failed else "")
+            update_job(
+                job_id,
+                "failed" if all_failed and total_ops == 0 else "completed",
+                result_summary=summary,
+                error_message="; ".join(all_failed[:5]) if all_failed else None,
+            )
+        except Exception:
+            pass
     try:
         supabase.table("chat_history").insert({
             "story_id": project_id,

@@ -15,7 +15,7 @@ except ImportError:
 
 def render_arc_tab(project_id):
     st.subheader("📐 Arc Management")
-    st.caption("Ver 6.0: Phân vùng ngữ cảnh. Mỗi Arc gồm các chương từ Workstation.")
+    st.caption("Ver 7.0: Phân vùng ngữ cảnh. Mỗi Arc gồm các chương từ Workstation.")
 
     if not project_id:
         st.info("📁 Chọn Project trước.")
