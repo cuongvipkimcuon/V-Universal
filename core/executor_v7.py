@@ -29,6 +29,8 @@ def step_to_router_result(step: Dict, user_prompt: str) -> Dict:
         "inferred_prefixes": args.get("inferred_prefixes") or [],
         "clarification_question": args.get("clarification_question") or "",
         "update_summary": args.get("update_summary") or "",
+        "data_operation_type": args.get("data_operation_type") or "",
+        "data_operation_target": args.get("data_operation_target") or "",
     }
 
 
@@ -48,6 +50,8 @@ def _normalize_step(step: Dict, step_id: int, user_prompt: str) -> Dict:
             "inferred_prefixes": args.get("inferred_prefixes") if isinstance(args.get("inferred_prefixes"), list) else [],
             "clarification_question": args.get("clarification_question") or "",
             "update_summary": args.get("update_summary") or "",
+            "data_operation_type": args.get("data_operation_type") or "",
+            "data_operation_target": args.get("data_operation_target") or "",
         },
         "dependency": step.get("dependency"),
     }
@@ -64,13 +68,13 @@ def execute_plan(
     free_chat_mode: bool = False,
     max_context_tokens: Optional[int] = None,
     run_numerical_executor: bool = True,
-    max_steps_per_turn: int = 5,
+    max_steps_per_turn: int = 10,
     max_replan_rounds: int = 2,
-) -> Tuple[str, List[str], List[Dict], List[Dict]]:
+) -> Tuple[str, List[str], List[Dict], List[Dict], List[Dict]]:
     """
     Thực thi plan; sau mỗi bước có thể re-plan (đổi phần còn lại nếu bước vừa thất bại).
-    Returns: (cumulative_context, sources, step_results, replan_events).
-    replan_events: [ { "step_id", "reason", "action", "new_plan_summary" } ].
+    Returns: (cumulative_context, sources, step_results, replan_events, data_operation_steps).
+    data_operation_steps: các bước update_data (bible/relation/timeline/chunking) cần xác nhận sau.
     """
     ContextManager, AIService, Config, parse_chapter_range_from_query, _get_default_tool_model = _get_engine()
     try:
@@ -84,6 +88,7 @@ def execute_plan(
     all_sources: List[str] = []
     step_results: List[Dict] = []
     replan_events: List[Dict] = []
+    data_operation_steps: List[Dict] = []
 
     token_limit = max_context_tokens or Config.CONTEXT_SIZE_TOKENS.get("medium", 60000)
     remaining_steps = list(plan)
@@ -95,6 +100,32 @@ def execute_plan(
         step_id = step.get("step_id", len(step_results) + 1)
         intent = step.get("intent", "chat_casual")
         router_result = step_to_router_result(step, user_prompt)
+        args = step.get("args") or {}
+        op_target = (args.get("data_operation_target") or "").strip()
+
+        # Bước update_data (bible/relation/timeline/chunking): thu thập để xác nhận sau, không build context.
+        if intent == "update_data" and op_target in ("bible", "relation", "timeline", "chunking"):
+            op_type = args.get("data_operation_type") or "extract"
+            ch_range = args.get("chapter_range")
+            if ch_range and isinstance(ch_range, (list, tuple)) and len(ch_range) >= 2:
+                try:
+                    start, end = int(ch_range[0]), int(ch_range[1])
+                    start, end = min(start, end), max(start, end)
+                    if start == end:
+                        data_operation_steps.append({"operation_type": op_type, "target": op_target, "chapter_number": start})
+                    else:
+                        data_operation_steps.append({"operation_type": op_type, "target": op_target, "chapter_range": [start, end]})
+                except (ValueError, TypeError):
+                    if ch_range and len(ch_range) >= 1:
+                        data_operation_steps.append({"operation_type": op_type, "target": op_target, "chapter_number": int(ch_range[0])})
+            elif ch_range and len(ch_range) >= 1:
+                data_operation_steps.append({"operation_type": op_type, "target": op_target, "chapter_number": int(ch_range[0])})
+            block = f"\n--- [STEP {step_id}: update_data] ---\n(Thao tác {op_type} {op_target} — chờ xác nhận để thực hiện)\n"
+            cumulative_parts.append(block)
+            step_results.append({"step_id": step_id, "intent": intent, "context_snippet": "", "executor_result": None})
+            steps_executed += 1
+            remaining_steps = remaining_steps[1:]
+            continue
 
         ctx_text, sources, _ = ContextManager.build_context(
             router_result,
@@ -182,4 +213,4 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
     cumulative_context = "\n".join(cumulative_parts)
     if max_context_tokens and AIService.estimate_tokens(cumulative_context) > token_limit:
         cumulative_context = cumulative_context[: token_limit * 4]
-    return cumulative_context, all_sources, step_results, replan_events
+    return cumulative_context, all_sources, step_results, replan_events, data_operation_steps

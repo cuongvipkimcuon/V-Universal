@@ -26,6 +26,7 @@ from views import (
     render_arc_tab,
     render_semantic_intent_tab,
     render_timeline_tab,
+    render_commands_tab,
 )
 
 # ==========================================
@@ -76,6 +77,7 @@ TAB_STRUCTURE = {
         ("chat_mgmt", "💬 Memory", "render_chat_management_tab", True),
         ("arc", "📐 Arc", "render_arc_tab", False),
         ("timeline", "📅 Timeline", "render_timeline_tab", False),
+        ("commands", "📌 Chỉ lệnh", "render_commands_tab", True),
         ("data_health", "🛡️ Data Health", "render_data_health_tab", False),
         ("semantic_intent", "🎯 Semantic Intent", "render_semantic_intent_tab", False),
     ],
@@ -103,6 +105,7 @@ RENDER_MAP = {
     "render_chunking_tab": render_chunking_tab,
     "render_arc_tab": render_arc_tab,
     "render_timeline_tab": render_timeline_tab,
+    "render_commands_tab": render_commands_tab,
     "render_data_health_tab": render_data_health_tab,
     "render_semantic_intent_tab": render_semantic_intent_tab,
     "render_chat_tab": render_chat_tab,

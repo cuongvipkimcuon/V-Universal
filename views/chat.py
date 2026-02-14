@@ -11,9 +11,11 @@ from ai_engine import (
     RuleMiningSystem,
     HybridSearch,
     check_semantic_intent,
+    get_v7_reminder_message,
 )
 from ai_verifier import run_verification_loop
 from core.executor_v7 import execute_plan
+from core.command_parser import is_command_message, parse_command, get_fallback_clarification
 from persona import PersonaSystem
 from utils.auth_manager import check_permission, submit_pending_change
 from utils.python_executor import PythonExecutor
@@ -411,22 +413,46 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                     debug_notes = ["Intent: chat_casual", "🌐 Chat tự do"]
                 else:
                     debug_notes = []
-                    semantic_match = None
-                    try:
-                        svc = init_services()
-                        if svc:
-                            r = svc["supabase"].table("settings").select("value").eq("key", "semantic_intent_no_use").execute()
-                            no_use = r.data and r.data[0] and int(r.data[0].get("value", 0)) == 1
-                            if not no_use:
-                                semantic_match = check_semantic_intent(prompt, project_id)
-                    except Exception:
-                        semantic_match = check_semantic_intent(prompt, project_id)
-                    if semantic_match:
+                    # Chỉ lệnh @: parse trước; fallback ask_user_clarification nếu thiếu/sai (không đoán ý)
+                    if not is_v_home and is_command_message(prompt):
+                        parse_result = parse_command(prompt, project_id, str(user_id) if user_id else None)
+                        if parse_result.status in ("incomplete", "unknown"):
+                            clarification_message = get_fallback_clarification(parse_result)
+                            with st.chat_message("assistant", avatar=active_persona['icon']):
+                                st.caption("📌 Chỉ lệnh (@@) — cần làm rõ")
+                                st.info(clarification_message)
+                            if st.session_state.get('enable_history', True):
+                                try:
+                                    services = init_services()
+                                    supabase = services['supabase']
+                                    supabase.table("chat_history").insert([
+                                        {"story_id": project_id, "user_id": str(user_id) if user_id else None, "role": "user", "content": prompt, "created_at": now_timestamp, "metadata": {"source": "command_fallback", "intent": "ask_user_clarification"}},
+                                        {"story_id": project_id, "user_id": str(user_id) if user_id else None, "role": "model", "content": f"[Cần làm rõ] {clarification_message}", "created_at": now_timestamp, "metadata": {"intent": "ask_user_clarification"}},
+                                    ]).execute()
+                                    _after_save_history_v_work(project_id, user_id, active_persona.get("role", ""))
+                                except Exception:
+                                    pass
+                            v7_handled = True
+                        elif parse_result.status == "ok":
+                            router_out = parse_result.parsed.router_out
+                            debug_notes = ["📌 Chỉ lệnh", f"Intent: {parse_result.parsed.intent}"]
+                    if router_out is None:
+                        semantic_match = None
+                        try:
+                            svc = init_services()
+                            if svc:
+                                r = svc["supabase"].table("settings").select("value").eq("key", "semantic_intent_no_use").execute()
+                                no_use = r.data and r.data[0] and int(r.data[0].get("value", 0)) == 1
+                                if not no_use:
+                                    semantic_match = check_semantic_intent(prompt, project_id)
+                        except Exception:
+                            semantic_match = check_semantic_intent(prompt, project_id)
+                    if router_out is None and semantic_match:
                         router_out = {"intent": "chat_casual", "target_files": [], "target_bible_entities": [], "rewritten_query": prompt, "chapter_range": None, "chapter_range_mode": None, "chapter_range_count": 5}
                         if semantic_match.get("related_data"):
                             router_out["_semantic_data"] = semantic_match["related_data"]
                         debug_notes.append(f"🎯 Semantic match {int(semantic_match.get('similarity',0)*100)}%")
-                    elif not is_v_home and st.session_state.get('use_v7_planner', False):
+                    elif router_out is None and not is_v_home and st.session_state.get('use_v7_planner', False):
                         plan_result = SmartAIRouter.get_plan_v7(prompt, recent_history_text, project_id)
                         plan = plan_result.get("plan") or []
                         first_intent = (plan[0].get("intent", "") if plan else "") or "chat_casual"
@@ -449,7 +475,79 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                                 except Exception:
                                     pass
                             v7_handled = True
-                        else:
+                        elif first_intent == "update_data" and not is_v_home and can_write and (plan or []) and all((s.get("intent") or "") == "update_data" for s in (plan or [])):
+                            # Chỉ xử lý "chỉ update_data" khi toàn bộ plan là update_data; nếu có bước khác thì chạy execute_plan bên dưới.
+                            data_steps = []
+                            for s in (plan or []):
+                                if (s.get("intent") or "") != "update_data":
+                                    continue
+                                a = s.get("args") or {}
+                                t = (a.get("data_operation_target") or "").strip()
+                                if t not in ("bible", "relation", "timeline", "chunking"):
+                                    continue
+                                op_type = a.get("data_operation_type") or "extract"
+                                ch_range = a.get("chapter_range")
+                                if ch_range and isinstance(ch_range, (list, tuple)) and len(ch_range) >= 2:
+                                    try:
+                                        start, end = int(ch_range[0]), int(ch_range[1])
+                                        start, end = min(start, end), max(start, end)
+                                        if start == end:
+                                            data_steps.append({"operation_type": op_type, "target": t, "chapter_number": start})
+                                        else:
+                                            data_steps.append({"operation_type": op_type, "target": t, "chapter_range": [start, end]})
+                                    except (ValueError, TypeError):
+                                        if ch_range and len(ch_range) >= 1:
+                                            data_steps.append({"operation_type": op_type, "target": t, "chapter_number": int(ch_range[0])})
+                                elif ch_range and len(ch_range) >= 1:
+                                    data_steps.append({"operation_type": op_type, "target": t, "chapter_number": int(ch_range[0])})
+                                else:
+                                    continue
+                            if data_steps:
+                                op_label_map = {"extract": "Trích xuất", "update": "Cập nhật", "delete": "Xóa"}
+                                target_label_map = {"bible": "Bible", "relation": "Relation", "timeline": "Timeline", "chunking": "Chunking"}
+                                with st.chat_message("assistant", avatar=active_persona['icon']):
+                                    st.caption("🧠 V7 Planner — update_data — Cần xác nhận (một lần cho tất cả)")
+                                    def _step_label(st):
+                                    op = op_label_map.get(st.get('operation_type', ''), st.get('operation_type', ''))
+                                    tg = target_label_map.get(st.get('target', ''), st.get('target', ''))
+                                    if st.get("chapter_range") and len(st["chapter_range"]) >= 2:
+                                        a, b = st["chapter_range"][0], st["chapter_range"][1]
+                                        ch_str = f"chương **{a}–{b}**" if a != b else f"chương **{a}**"
+                                    else:
+                                        ch_str = f"chương **{st.get('chapter_number', '')}**"
+                                    return f"{op} **{tg}** {ch_str}"
+                                if len(data_steps) == 1:
+                                        st.info(
+                                            f"**Yêu cầu của bạn:** {prompt}\n\n"
+                                            f"**Thao tác:** {_step_label(data_steps[0])}. "
+                                            "Bạn có chấp nhận kết quả thao tác này không? Sẽ chạy ngầm và xem như đã chấp nhận."
+                                        )
+                                    else:
+                                        lines = [_step_label(st) for st in data_steps]
+                                        st.info(
+                                            f"**Yêu cầu của bạn:** {prompt}\n\n**Các thao tác sẽ thực hiện ({len(data_steps)} bước):**\n" + "\n".join(f"- {line}" for line in lines) + "\n\nXác nhận **một lần** đồng nghĩa bạn đồng ý tất cả. Sẽ chạy ngầm và xem như đã chấp nhận."
+                                        )
+                                if st.session_state.get('enable_history', True):
+                                    try:
+                                        services = init_services()
+                                        supabase = services['supabase']
+                                        model_msg = f"[Cần xác nhận] {len(data_steps)} thao tác. Xác nhận một lần = đồng ý tất cả. Sẽ chạy ngầm."
+                                        supabase.table("chat_history").insert([
+                                            {"story_id": project_id, "user_id": str(user_id) if user_id else None, "role": "user", "content": prompt, "created_at": now_timestamp, "metadata": {"intent": first_intent, "v7_plan": plan_result}},
+                                            {"story_id": project_id, "user_id": str(user_id) if user_id else None, "role": "model", "content": model_msg, "created_at": now_timestamp, "metadata": {"intent": first_intent}},
+                                        ]).execute()
+                                        if not is_v_home:
+                                            _after_save_history_v_work(project_id, user_id, active_persona.get("role", ""))
+                                    except Exception:
+                                        pass
+                                st.session_state["pending_data_operation"] = {
+                                    "project_id": project_id,
+                                    "user_id": user_id,
+                                    "user_request": prompt,
+                                    "steps": data_steps,
+                                }
+                                v7_handled = True
+                        if not v7_handled:
                             retries_used = 0
                             status_label = "V7 Multi-step"
                             with st.status(f"📐 {status_label}", expanded=True) as status:
@@ -462,7 +560,7 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                                 replan_events = []
                                 try:
                                     st.write(f"⚙️ Executing {len(plan)} step(s)...")
-                                    cumulative_context, sources, step_results, replan_events = execute_plan(
+                                    cumulative_context, sources, step_results, replan_events, data_operation_steps = execute_plan(
                                         plan,
                                         project_id,
                                         active_persona,
@@ -474,6 +572,13 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                                         max_context_tokens=Config.CONTEXT_SIZE_TOKENS.get(st.session_state.get("context_size", "medium")),
                                         run_numerical_executor=True,
                                     )
+                                    if data_operation_steps:
+                                        st.session_state["pending_data_operation"] = {
+                                            "project_id": project_id,
+                                            "user_id": user_id,
+                                            "user_request": prompt,
+                                            "steps": data_operation_steps,
+                                        }
                                     if replan_events:
                                         for ev in replan_events:
                                             st.caption(f"🔄 Re-plan (sau step {ev.get('step_id')}): {ev.get('reason', '')[:80]}... → {ev.get('action', '')}")
@@ -557,7 +662,7 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                                 except Exception:
                                     pass
                             v7_handled = True
-                    else:
+                    elif router_out is None:
                         router_out = SmartAIRouter.ai_router_pro_v2(prompt, recent_history_text, project_id)
                     if router_out is not None:
                         debug_notes = [f"Intent: {router_out.get('intent', 'chat_casual')}"] + debug_notes
@@ -586,6 +691,101 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                                     _after_save_history_v_work(project_id, user_id, active_persona.get("role", ""))
                             except Exception:
                                 pass
+                    elif intent == "suggest_v7":
+                        reason = (router_out.get("reason") or "").strip()
+                        with st.chat_message("assistant", avatar=active_persona['icon']):
+                            st.caption("🧠 V6 — Gợi ý dùng V7 Planner")
+                            st.warning(get_v7_reminder_message())
+                            if reason:
+                                st.caption(f"*Lý do: {reason}*")
+                        if st.session_state.get('enable_history', True):
+                            try:
+                                services = init_services()
+                                supabase = services['supabase']
+                                model_msg = "Câu hỏi cần nhiều bước xử lý (nhiều intent hoặc nhiều thao tác). Vui lòng bật V7 Planner để thực hiện đủ trong một lần."
+                                supabase.table("chat_history").insert([
+                                    {"story_id": project_id, "user_id": str(user_id) if user_id else None, "role": "user", "content": prompt, "created_at": now_timestamp, "metadata": {"intent": intent, "router_output": router_out}},
+                                    {"story_id": project_id, "user_id": str(user_id) if user_id else None, "role": "model", "content": model_msg, "created_at": now_timestamp, "metadata": {"intent": intent}},
+                                ]).execute()
+                                if not is_v_home:
+                                    _after_save_history_v_work(project_id, user_id, active_persona.get("role", ""))
+                            except Exception:
+                                pass
+                    elif intent == "update_data" and not is_v_home and can_write:
+                        ch_range = router_out.get("chapter_range")
+                        # @data_analyze: 4 bước (bible, relation, timeline, chunking)
+                        if router_out.get("_data_analyze_full") and ch_range and len(ch_range) >= 2:
+                            start, end = int(ch_range[0]), int(ch_range[1])
+                            start, end = min(start, end), max(start, end)
+                            data_steps = [
+                                {"operation_type": "extract", "target": "bible", "chapter_range": [start, end]},
+                                {"operation_type": "extract", "target": "relation", "chapter_range": [start, end]},
+                                {"operation_type": "extract", "target": "timeline", "chapter_range": [start, end]},
+                                {"operation_type": "extract", "target": "chunking", "chapter_range": [start, end]},
+                            ]
+                            with st.chat_message("assistant", avatar=active_persona['icon']):
+                                st.caption("📌 Chỉ lệnh @data_analyze — Cần xác nhận")
+                                ch_str = f"chương **{start}–{end}**" if start != end else f"chương **{start}**"
+                                st.info(f"**Yêu cầu:** {prompt}\n\n**Thao tác (4 bước):** Trích xuất Bible, Relation, Timeline, Chunking cho {ch_str}. Xác nhận một lần = đồng ý tất cả.")
+                                if st.session_state.get('enable_history', True):
+                                    try:
+                                        services = init_services()
+                                        supabase = services['supabase']
+                                        supabase.table("chat_history").insert([
+                                            {"story_id": project_id, "user_id": str(user_id) if user_id else None, "role": "user", "content": prompt, "created_at": now_timestamp, "metadata": {"intent": intent, "source": "command"}},
+                                            {"story_id": project_id, "user_id": str(user_id) if user_id else None, "role": "model", "content": "[Cần xác nhận] 4 bước Data Analyze. Sẽ chạy ngầm.", "created_at": now_timestamp, "metadata": {"intent": intent}},
+                                        ]).execute()
+                                        _after_save_history_v_work(project_id, user_id, active_persona.get("role", ""))
+                                    except Exception:
+                                        pass
+                                st.session_state["pending_data_operation"] = {
+                                    "project_id": project_id,
+                                    "user_id": user_id,
+                                    "user_request": prompt,
+                                    "steps": data_steps,
+                                }
+                        elif (router_out.get("data_operation_target") or "") in ("bible", "relation", "timeline", "chunking"):
+                            op_type = router_out.get("data_operation_type") or "extract"
+                            op_target = router_out.get("data_operation_target") or "bible"
+                            ch_num = int(ch_range[0]) if (ch_range and len(ch_range) >= 1) else None
+                            if ch_range and len(ch_range) >= 2:
+                                start, end = int(ch_range[0]), int(ch_range[1])
+                                ch_num = min(start, end)
+                            op_label = {"extract": "Trích xuất", "update": "Cập nhật", "delete": "Xóa"}.get(op_type, op_type)
+                            target_label = {"bible": "Bible", "relation": "Relation", "timeline": "Timeline", "chunking": "Chunking"}.get(op_target, op_target)
+                            if ch_num is None:
+                                with st.chat_message("assistant", avatar=active_persona['icon']):
+                                    st.caption("🧠 Intent: update_data (thao tác theo chương)")
+                                    st.warning("Không xác định được chương. Vui lòng nói rõ số chương hoặc tên chương (ví dụ: chương 1, chương Khởi đầu).")
+                            else:
+                                with st.chat_message("assistant", avatar=active_persona['icon']):
+                                    st.caption("🧠 Intent: update_data — Cần xác nhận")
+                                    st.info(
+                                        f"**Yêu cầu của bạn:** {prompt}\n\n"
+                                        f"**Thao tác:** {op_label} **{target_label}** cho chương **{ch_num}**. "
+                                        "Bạn có chấp nhận kết quả thao tác này không? Sẽ chạy ngầm và xem như đã chấp nhận."
+                                    )
+                                if st.session_state.get('enable_history', True):
+                                    try:
+                                        services = init_services()
+                                        supabase = services['supabase']
+                                        model_msg = f"[Cần xác nhận] {op_label} {target_label} chương {ch_num}. Bạn có chấp nhận kết quả không? Sẽ chạy ngầm."
+                                        supabase.table("chat_history").insert([
+                                            {"story_id": project_id, "user_id": str(user_id) if user_id else None, "role": "user", "content": prompt, "created_at": now_timestamp, "metadata": {"intent": intent, "router_output": router_out}},
+                                            {"story_id": project_id, "user_id": str(user_id) if user_id else None, "role": "model", "content": model_msg, "created_at": now_timestamp, "metadata": {"intent": intent}},
+                                        ]).execute()
+                                        if not is_v_home:
+                                            _after_save_history_v_work(project_id, user_id, active_persona.get("role", ""))
+                                    except Exception:
+                                        pass
+                                st.session_state["pending_data_operation"] = {
+                                    "project_id": project_id,
+                                    "user_id": user_id,
+                                    "user_request": prompt,
+                                    "operation_type": op_type,
+                                    "target": op_target,
+                                    "chapter_number": ch_num,
+                                }
                     else:
                         max_context_tokens = Config.CONTEXT_SIZE_TOKENS.get(st.session_state.get("context_size", "medium"))
                         exec_result = None
@@ -747,8 +947,9 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
                                         }
                                     ]).execute()
 
-                                # update_data: lưu pending xác nhận trước khi ghi Bible/file (chỉ V Work)
-                                if not is_v_home and intent == "update_data" and can_write:
+                                # update_data (ghi nhớ quy tắc): lưu pending xác nhận trước khi ghi Bible (chỉ V Work; thao tác theo chương xử lý ở nhánh khác)
+                                op_t = (router_out.get("data_operation_target") or "").strip()
+                                if not is_v_home and intent == "update_data" and can_write and op_t not in ("bible", "relation", "timeline", "chunking"):
                                     st.session_state["pending_update_confirm"] = {
                                         "project_id": project_id,
                                         "prompt": prompt,
@@ -821,6 +1022,81 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
                 if st.button("❌ Bỏ qua", key=f"chat_semantic_skip_btn_{chat_mode}"):
                     del st.session_state["pending_semantic_add"]
                     st.rerun()
+
+    # data_operation: Xác nhận thực hiện thao tác (một hoặc nhiều bước) — chạy ngầm, xong gửi tin nhắn (chỉ V Work)
+    if not is_v_home and "pending_data_operation" in st.session_state and can_write:
+        pdo = st.session_state["pending_data_operation"]
+        if pdo.get("project_id") == project_id:
+            steps = pdo.get("steps")
+            is_batch = isinstance(steps, list) and len(steps) > 0
+            with st.expander("📦 Xác nhận thực hiện thao tác dữ liệu?", expanded=True):
+                st.caption("Thao tác sẽ chạy ngầm và xem như bạn đã chấp nhận kết quả. Khi xong sẽ có tin nhắn trong chat.")
+                st.write("**Yêu cầu:**", pdo.get("user_request", "")[:200])
+                if is_batch:
+                    st.write("**Số bước (logic):**", len(steps))
+                    for i, st in enumerate(steps[:10]):
+                        if st.get("chapter_range") and len(st.get("chapter_range", [])) >= 2:
+                            a, b = st["chapter_range"][0], st["chapter_range"][1]
+                            ch_display = f"{a}–{b}" if a != b else str(a)
+                        else:
+                            ch_display = st.get('chapter_number', '')
+                        st.write(f"- {st.get('operation_type', '')} {st.get('target', '')} — chương {ch_display}")
+                    if len(steps) > 10:
+                        st.caption(f"... và {len(steps) - 10} bước khác.")
+                else:
+                    st.write("**Thao tác:**", pdo.get("operation_type", ""), pdo.get("target", ""), "— chương", pdo.get("chapter_number", ""))
+                col_ok, col_no = st.columns(2)
+                with col_ok:
+                    if st.button("✅ Xác nhận thực hiện", key=f"data_op_confirm_ok_{chat_mode}"):
+                        try:
+                            import threading
+                            if is_batch:
+                                from core.data_operation_jobs import run_data_operations_batch
+                                threading.Thread(
+                                    target=run_data_operations_batch,
+                                    kwargs={
+                                        "project_id": pdo["project_id"],
+                                        "user_id": pdo.get("user_id"),
+                                        "steps": steps,
+                                        "user_request": pdo["user_request"],
+                                    },
+                                    daemon=True,
+                                ).start()
+                            else:
+                                from core.data_operation_jobs import run_data_operation
+                                threading.Thread(
+                                    target=run_data_operation,
+                                    kwargs={
+                                        "project_id": pdo["project_id"],
+                                        "user_id": pdo.get("user_id"),
+                                        "operation_type": pdo["operation_type"],
+                                        "target": pdo["target"],
+                                        "chapter_number": pdo["chapter_number"],
+                                        "user_request": pdo["user_request"],
+                                    },
+                                    daemon=True,
+                                ).start()
+                            services = init_services()
+                            if services and st.session_state.get('enable_history', True):
+                                supabase = services["supabase"]
+                                now_ts = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+                                supabase.table("chat_history").insert({
+                                    "story_id": project_id,
+                                    "user_id": str(pdo.get("user_id")) if pdo.get("user_id") else None,
+                                    "role": "model",
+                                    "content": "Đã chấp nhận. Đang thực hiện yêu cầu của bạn (chạy ngầm). Khi xong sẽ có tin nhắn tiếp theo." + (" (" + str(len(steps)) + " bước)" if is_batch else ""),
+                                    "created_at": now_ts,
+                                    "metadata": {"data_operation_accepted": True, "batch": is_batch},
+                                }).execute()
+                            del st.session_state["pending_data_operation"]
+                            st.toast("Đã chấp nhận. Thao tác đang chạy ngầm." + (" (" + str(len(steps)) + " bước)" if is_batch else ""))
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Lỗi: {e}")
+                with col_no:
+                    if st.button("❌ Hủy", key=f"data_op_confirm_no_{chat_mode}"):
+                        del st.session_state["pending_data_operation"]
+                        st.rerun()
 
     # update_data: Xác nhận cuối cùng trước khi ghi Bible / cập nhật (chỉ V Work)
     if not is_v_home and "pending_update_confirm" in st.session_state and can_write:

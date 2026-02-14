@@ -76,6 +76,14 @@ except ImportError:
         st.warning("Timeline view failed to load.")
     render_timeline_tab.__module__ = "views"
 
+try:
+    from .commands_tab import render_commands_tab
+except ImportError:
+    def render_commands_tab(project_id, persona=None):
+        import streamlit as st
+        st.warning("Commands tab failed to load.")
+    render_commands_tab.__module__ = "views"
+
 __all__ = [
     "render_sidebar",
     "render_dashboard_tab",
@@ -98,4 +106,5 @@ __all__ = [
     "render_arc_tab",
     "render_semantic_intent_tab",
     "render_timeline_tab",
+    "render_commands_tab",
 ]
