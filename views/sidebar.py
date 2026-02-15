@@ -32,7 +32,9 @@ def render_sidebar(session_manager):
         else:
             projects = []
 
-        proj_id = None
+        # Giữ project đã chọn khi danh sách tạm thời rỗng (tránh mất project sau rerun/cache clear)
+        proj_id = st.session_state.get("project_id")
+        current_proj = st.session_state.get("current_project")
         persona = PersonaSystem.PERSONAS["Writer"]
 
         if projects:
@@ -50,6 +52,8 @@ def render_sidebar(session_manager):
                 format_func=lambda i: labels[i] if i < len(labels) else "",
                 key="project_selector"
             )
+            # Tránh index vượt range (widget state lệch sau rerun)
+            idx = max(0, min(int(idx) if idx is not None else 0, len(projects) - 1))
             current_proj = projects[idx]
             proj_id = current_proj["id"]
             proj_type = current_proj.get("category", "Writer")
@@ -81,6 +85,10 @@ def render_sidebar(session_manager):
                     st.session_state["current_arc_id"] = None
             except Exception:
                 st.session_state["current_arc_id"] = None
+        else:
+            # Danh sách trống (lỗi tải hoặc chưa có project): giữ project_id/current_project trong session, không xóa
+            if current_proj:
+                persona = PersonaSystem.get_persona(current_proj.get("category", "Writer"))
 
         st.markdown("---")
         if st.button("Create New Project", type="primary"):

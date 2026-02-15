@@ -23,6 +23,23 @@ from utils.auth_manager import check_permission, submit_pending_change
 from utils.python_executor import PythonExecutor
 
 
+def _get_logic_reminder(project_id):
+    """V7.7: Nếu có lỗi logic đang active thì trả về đoạn nhắc; không thì ''."""
+    if not project_id:
+        return ""
+    try:
+        from core.chapter_logic_check import get_active_logic_issues_summary
+        summary = get_active_logic_issues_summary(project_id)
+        if not summary:
+            return ""
+        total = sum(s.get("count", 0) for s in summary)
+        if total == 0:
+            return ""
+        return "\n\n---\n💡 **Nhắc:** Bạn đang có **%s** lỗi logic chưa sửa (ở %s chương). Vào **Data Health** (Knowledge) để xem và sửa." % (total, len(summary))
+    except Exception:
+        return ""
+
+
 def _get_crystallize_count(project_id, user_id):
     """Lấy số tin nhắn từ lần crystallize gần nhất (schema v7.1). Trả về 0 nếu chưa có bảng."""
     try:
@@ -676,6 +693,7 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                                     import traceback
                                     st.exception(ex)
 
+                            final_response += _get_logic_reminder(project_id)
                             with st.chat_message("assistant", avatar=active_persona['icon']):
                                 # Stream hiển thị câu trả lời cuối (typewriter effect)
                                 _placeholder = st.empty()
@@ -955,6 +973,11 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
                                                 debug_notes.append("📄 Fallback read full content")
                                         except Exception:
                                             pass
+
+                                reminder = _get_logic_reminder(project_id)
+                                if reminder:
+                                    full_response_text += reminder
+                                    placeholder.markdown(full_response_text)
 
                             input_tokens = AIService.estimate_tokens(system_message + prompt)
                             output_tokens = AIService.estimate_tokens(full_response_text)

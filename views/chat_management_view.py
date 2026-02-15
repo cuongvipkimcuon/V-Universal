@@ -1,5 +1,5 @@
 # views/chat_management_view.py - Quản lý Bible entries [CHAT] (Auto Crystallize)
-"""Tab quản lý [CHAT]: xem, sửa nội dung, xóa. Không add tay - chỉ Auto Crystallize tạo."""
+"""Tab quản lý [CHAT]: xem, sửa nội dung, xóa, Archive/Unarchive. Không add tay - chỉ Auto Crystallize tạo."""
 import streamlit as st
 
 from config import init_services
@@ -10,7 +10,7 @@ from utils.cache_helpers import get_bible_list_cached, invalidate_cache_and_reru
 
 def render_chat_management_tab(project_id, persona):
     st.header("💬 Chat Knowledge")
-    st.caption("Điểm nhớ từ hội thoại (Auto Crystallize). Chỉ sửa nội dung hoặc xóa. Không add tay.")
+    st.caption("Điểm nhớ từ hội thoại (Auto Crystallize). Sửa, xóa, Archive (đã archive: không đưa vào context, chỉ Unarchive).")
 
     if not project_id:
         st.info("📁 Chọn Project trước.")
@@ -30,27 +30,49 @@ def render_chat_management_tab(project_id, persona):
     can_write = check_permission(str(user_id or ""), user_email or "", project_id, "write")
     can_delete = check_permission(str(user_id or ""), user_email or "", project_id, "delete")
 
+    archived_count = sum(1 for e in chat_data if e.get("archived"))
     st.metric("Tổng [CHAT] entries", len(chat_data))
+    if archived_count:
+        st.caption("📦 Đã archive: %s (không đưa vào context, chỉ hiện nút Unarchive)." % archived_count)
 
     if not chat_data:
         st.info("Chưa có điểm nhớ [CHAT]. Auto Crystallize sẽ tạo khi đủ 30 tin nhắn trong Chat.")
         return
 
     for entry in chat_data:
-        with st.expander(f"**{entry.get('entity_name', '')}**", expanded=False):
+        is_archived = entry.get("archived") is True
+        label = "%s %s" % ("📦", entry.get("entity_name", "")) if is_archived else entry.get("entity_name", "")
+        with st.expander(f"**{label}**", expanded=False):
             st.markdown(entry.get("description", ""))
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("✏️ Sửa nội dung", key=f"chat_edit_{entry['id']}") and can_write:
-                    st.session_state["chat_editing"] = entry
-            with col2:
-                if can_delete and st.button("🗑️ Xóa", key=f"chat_del_{entry['id']}"):
+            if is_archived:
+                if st.button("📤 Unarchive", key=f"chat_unarchive_{entry['id']}", type="primary") and can_write:
                     try:
-                        supabase.table("story_bible").delete().eq("id", entry["id"]).execute()
-                        st.success("Đã xóa.")
+                        supabase.table("story_bible").update({"archived": False}).eq("id", entry["id"]).execute()
+                        st.success("Đã bỏ archive.")
                         invalidate_cache_and_rerun()
                     except Exception as e:
                         st.error(str(e))
+            else:
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    if st.button("✏️ Sửa nội dung", key=f"chat_edit_{entry['id']}") and can_write:
+                        st.session_state["chat_editing"] = entry
+                with col2:
+                    if can_delete and st.button("🗑️ Xóa", key=f"chat_del_{entry['id']}"):
+                        try:
+                            supabase.table("story_bible").delete().eq("id", entry["id"]).execute()
+                            st.success("Đã xóa.")
+                            invalidate_cache_and_rerun()
+                        except Exception as e:
+                            st.error(str(e))
+                with col3:
+                    if st.button("📦 Archive", key=f"chat_archive_{entry['id']}") and can_write:
+                        try:
+                            supabase.table("story_bible").update({"archived": True}).eq("id", entry["id"]).execute()
+                            st.success("Đã archive (sẽ không đưa vào context).")
+                            invalidate_cache_and_rerun()
+                        except Exception as e:
+                            st.error(str(e))
 
     if st.session_state.get("chat_editing") and can_write:
         e = st.session_state["chat_editing"]

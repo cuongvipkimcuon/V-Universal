@@ -129,6 +129,7 @@ Bạn là AI Điều Phối Viên (Router) cho hệ thống V7-Universal. Nhiệ
 | **query_Sql** | User **CHỈ MUỐN XEM/LIỆT KÊ** dữ liệu thô (không hỏi tự nhiên). Khi chọn query_Sql BẮT BUỘC điền **query_target**. **KHÔNG** chọn cho câu hỏi tự nhiên về quan hệ/timeline — những câu đó chọn search_context. | "Liệt kê chương", "Cho tôi xem luật", "Xuất timeline chương 2 dạng list". |
 | **search_context** | **Intent thống nhất** cho mọi câu hỏi cần tra cứu/đọc nội dung dự án. Khi chọn search_context BẮT BUỘC điền **context_needs** (mảng, giá trị trong: "bible", "relation", "timeline", "chunk", "chapter") và **context_priority** (mảng cùng phần tử với context_needs nhưng **theo thứ tự ưu tiên** cho câu hỏi này: phần tử đầu = quan trọng nhất, dùng để tối ưu token). Ví dụ: "Trong chương 3 A làm gì và quan hệ B" -> context_needs: ["bible","relation","chapter"], context_priority: ["chapter","bible","relation"] (nội dung chương quan trọng nhất). | "A và B có quan hệ gì", "Trong chương 3 A làm gì và quan hệ B", "Sự kiện nào trước", "Tóm tắt chương 1", "nhân vật X". |
 | **suggest_v7** | Câu hỏi **rõ ràng cần 2+ intent** hoặc **2+ thao tác update_data** (vd: trích xuất Bible + Relation + Timeline + Chunking; hoặc "tóm tắt chương 1 rồi so sánh timeline"). Dùng REFERENCE (bộ lọc nhanh) làm gợi ý; nếu đồng ý thì trả về suggest_v7. | "Chạy tất cả data analyze chương 1", "tóm tắt chương 1 rồi so sánh với timeline", "trích xuất bible và relation chương 2". |
+| **check_chapter_logic** | User **hỏi về tính logic / mâu thuẫn / điểm vô lý / plot hole** của chương (soát lỗi logic theo timeline, bible, relation, crystallize, rule). **KHÔNG** chọn khi user chỉ hỏi nội dung, tóm tắt hay tra cứu thông thường — những câu đó dùng **search_context**. Khi chọn check_chapter_logic BẮT BUỘC điền **chapter_range** (chương cần soát). | "Chương 3 có điểm vô lý không", "Soát lỗi logic chương 5", "Mâu thuẫn trong chương 2", "Plot hole chương 1", "Kiểm tra logic chương 4". |
 | **chat_casual** | Chào hỏi xã giao, không yêu cầu dữ liệu hay tra cứu. | "Hello", "Cảm ơn", "Bạn khỏe không". |
 
 **BẢNG QUERY_TARGET (chỉ dùng khi intent = query_Sql):**
@@ -154,6 +155,7 @@ Bạn là AI Điều Phối Viên (Router) cho hệ thống V7-Universal. Nhiệ
 8. **Quy tắc "Tra cứu":** Tra cứu ngoài (tỷ giá, tin) -> `web_search`. Tra cứu nội dung dự án -> `search_context`.
 9. **Quy tắc "query_Sql":** CHỈ khi user muốn XEM/LIỆT KÊ dữ liệu thô. Câu hỏi tự nhiên về quan hệ/timeline -> `search_context`. Điền **query_target** khi intent = query_Sql.
 10. **Quy tắc "search_context — context_needs":** Luôn điền **context_needs** (mảng): hỏi quan hệ -> ["bible","relation"]; hỏi timeline/sự kiện -> ["timeline"] hoặc ["bible","timeline"]; hỏi chi tiết vụn (ai nói, câu nào) -> ["chunk"]; hỏi trong chương X kết hợp Bible -> ["bible","relation","chapter"] hoặc ["bible","chapter"]; chỉ tóm tắt chương -> ["chapter"]. Có thể kết hợp nhiều: ["bible","relation","timeline","chunk","chapter"] tùy câu hỏi.
+11. **Quy tắc "check_chapter_logic vs search_context":** User hỏi **cụ thể về lỗi logic / mâu thuẫn / điểm vô lý / plot hole** của chương -> **check_chapter_logic**, điền chapter_range. User chỉ hỏi nội dung chương, tóm tắt, nhân vật làm gì, quan hệ... (tra cứu thông thường) -> **search_context**, không dùng check_chapter_logic.
 
 ### 4. LOGIC TRÍCH XUẤT CHAPTER RANGE
 - "Chương 1", "Chap 5" -> chapter_range_mode: "range", chapter_range: [1, 1] hoặc [5, 5]
@@ -189,7 +191,7 @@ Bạn là AI Điều Phối Viên (Router) cho hệ thống V7-Universal. Nhiệ
 
 ### 7. OUTPUT (JSON ONLY) — Trả về đúng format sau, đủ các key:
 {{
-    "intent": "ask_user_clarification" | "web_search" | "numerical_calculation" | "update_data" | "query_Sql" | "search_context" | "suggest_v7" | "chat_casual",
+    "intent": "ask_user_clarification" | "web_search" | "numerical_calculation" | "update_data" | "query_Sql" | "search_context" | "suggest_v7" | "check_chapter_logic" | "chat_casual",
     "context_needs": [] hoặc ["bible"] | ["relation"] | ["timeline"] | ["chunk"] | ["chapter"] hoặc kết hợp (BẮT BUỘC khi intent = search_context),
     "context_priority": [] hoặc mảng cùng phần tử với context_needs theo thứ tự ưu tiên (phần tử đầu = quan trọng nhất; dùng để tối ưu token; BẮT BUỘC khi intent = search_context),
     "target_files": [],
@@ -309,7 +311,7 @@ QUY TẮC:
 - **Tham chiếu chat cũ — phân định ĐÃ LÀM / CẦN LÀM:** Khi user tham chiếu lệnh trước (vd "làm đi", "cái đó", "tiếp đi"): (1) Từ LỊCH SỬ xác định **ĐÃ LÀM GÌ** (các bước/intent đã thực thi, kết quả model đã trả lời). (2) Xác định **CẦN LÀM GÌ** (phần còn lại user muốn, hoặc câu hỏi mới). (3) Chỉ lên plan cho phần **CẦN LÀM**; không thêm bước lặp lại việc đã làm. (4) Mỗi bước trong plan: **query_refined** = câu hỏi/nội dung **chỉ dành cho bước đó** (phần cần làm của bước đó), không gộp cả "đã làm".
 - **search_context (intent thống nhất):** Mọi câu hỏi cần tra cứu/đọc (lore, nhân vật, quan hệ, timeline, chunk, tóm tắt chương) -> ĐÚNG MỘT bước intent `search_context`. BẮT BUỘC điền **context_needs** trong args: mảng ["bible"] | ["relation"] | ["timeline"] | ["chunk"] | ["chapter"] hoặc kết hợp. read_full_content KHÔNG dùng; chỉ fallback nội bộ khi trả lời chưa đủ.
 - **Nhiều bước (plan 2+ step):** Chỉ khi user nói RÕ nhiều việc (vd "tóm tắt chương 1 rồi so sánh với timeline") -> tách nhiều bước, dependency khi cần.
-- update_data chỉ khi ra lệnh thực thi. query_Sql chỉ khi XEM/LIỆT KÊ dữ liệu thô; args có query_target. dependency: null cho update_data, query_Sql, web_search, ask_user_clarification, chat_casual. verification_required: true nếu plan có numerical_calculation, search_context, query_Sql.
+- update_data chỉ khi ra lệnh thực thi. query_Sql chỉ khi XEM/LIỆT KÊ dữ liệu thô; args có query_target. check_chapter_logic khi user hỏi về lỗi logic/mâu thuẫn/điểm vô lý của chương — điền chapter_range; không dùng search_context cho câu đó. dependency: null cho update_data, query_Sql, web_search, ask_user_clarification, chat_casual, check_chapter_logic. verification_required: true nếu plan có numerical_calculation, search_context, query_Sql, check_chapter_logic.
 
 Trả về ĐÚNG MỘT JSON:
 - **analysis**: Mô tả ngắn; nếu dùng LỊCH SỬ thì ghi rõ: "Đã làm: ...; Cần làm: ..." để plan chỉ chạy đúng bước còn lại.
@@ -342,7 +344,7 @@ Chỉ trả về JSON."""
             return SmartAIRouter._single_intent_to_plan(single, user_prompt)
         analysis = data.get("analysis", "")
         verification_required = bool(data.get("verification_required", False))
-        valid_intents = {"numerical_calculation", "search_context", "web_search", "ask_user_clarification", "update_data", "query_Sql", "chat_casual"}
+        valid_intents = {"numerical_calculation", "search_context", "web_search", "ask_user_clarification", "update_data", "query_Sql", "check_chapter_logic", "chat_casual"}
         normalized_plan = []
         for i, s in enumerate(plan):
             if not isinstance(s, dict):
@@ -393,7 +395,7 @@ Chỉ trả về JSON."""
         if not normalized_plan:
             single = SmartAIRouter.ai_router_pro_v2(user_prompt, chat_history_text, project_id)
             return SmartAIRouter._single_intent_to_plan(single, user_prompt)
-        intents_need_verify = {"numerical_calculation", "search_context", "query_Sql"}
+        intents_need_verify = {"numerical_calculation", "search_context", "query_Sql", "check_chapter_logic"}
         if any(s.get("intent") in intents_need_verify for s in normalized_plan):
             verification_required = True
         return {"analysis": analysis, "plan": normalized_plan, "verification_required": verification_required}
@@ -425,5 +427,5 @@ Chỉ trả về JSON."""
                 },
                 "dependency": None,
             }],
-            "verification_required": intent in ("numerical_calculation", "search_context", "query_Sql"),
+            "verification_required": intent in ("numerical_calculation", "search_context", "query_Sql", "check_chapter_logic"),
         }

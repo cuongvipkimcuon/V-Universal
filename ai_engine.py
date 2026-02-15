@@ -379,6 +379,55 @@ class ContextManager:
                 intent = "search_context"
                 context_needs = ["bible", "relation"]
 
+        elif intent == "check_chapter_logic":
+            try:
+                from core.chapter_logic_check import run_chapter_logic_check
+                ch_range = router_result.get("chapter_range")
+                ch_num = int(ch_range[0]) if (ch_range and len(ch_range) >= 1) else None
+                if ch_num is None:
+                    context_parts.append("[SOÁT LOGIC CHƯƠNG] Chưa xác định được chương. Hãy nêu rõ số chương (vd: chương 3).")
+                    sources.append("🔍 Logic check")
+                else:
+                    services = init_services()
+                    supabase = services.get("supabase") if services else None
+                    if not supabase:
+                        context_parts.append("[SOÁT LOGIC CHƯƠNG] Không kết nối được dịch vụ.")
+                        sources.append("🔍 Logic check")
+                    else:
+                        r = supabase.table("chapters").select("id, chapter_number, title, content, arc_id").eq(
+                            "story_id", project_id
+                        ).eq("chapter_number", ch_num).limit(1).execute()
+                        row = (r.data or [None])[0] if r.data else None
+                        if not row:
+                            context_parts.append("[SOÁT LOGIC CHƯƠNG] Không tìm thấy chương %s." % ch_num)
+                            sources.append("🔍 Logic check")
+                        else:
+                            issues, resolved_count, _check_id, err = run_chapter_logic_check(
+                                project_id,
+                                row["id"],
+                                row.get("chapter_number") or ch_num,
+                                row.get("title") or ("Chương %s" % ch_num),
+                                row.get("content") or "",
+                                arc_id=row.get("arc_id"),
+                            )
+                            if err:
+                                context_parts.append("[SOÁT LOGIC CHƯƠNG] Lỗi: %s" % err)
+                            else:
+                                lines = ["[KẾT QUẢ SOÁT LOGIC - Chương %s]" % ch_num]
+                                if not issues:
+                                    lines.append("Không phát hiện lỗi logic (timeline, bible, relation, chat crystallize, rule).")
+                                else:
+                                    for i, it in enumerate(issues, 1):
+                                        lines.append("%s. [%s] %s" % (i, it.get("dimension", ""), it.get("message", "")))
+                                if resolved_count:
+                                    lines.append("(Đã đánh dấu khắc phục %s lỗi cũ từ lần soát trước.)" % resolved_count)
+                                lines.append("Xem chi tiết tại **Data Health**.")
+                                context_parts.append("\n".join(lines))
+                            sources.append("🔍 Logic check (Data Health)")
+            except Exception as ex:
+                context_parts.append("[SOÁT LOGIC CHƯƠNG] Lỗi: %s" % str(ex))
+                sources.append("🔍 Logic check")
+
         if intent == "search_context":
             range_bounds_bible = ContextManager._resolve_chapter_range(
                 project_id, chapter_range_mode, chapter_range_count, chapter_range

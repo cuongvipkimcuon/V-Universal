@@ -4,6 +4,25 @@ from typing import Any, List, Optional, Tuple
 from config import init_services
 
 
+def get_archived_bible_ids(project_id: str) -> set:
+    """V7.7: Lấy set id các story_bible đã archived (không đưa vào context)."""
+    try:
+        services = init_services()
+        if not services:
+            return set()
+        r = (
+            services["supabase"]
+            .table("story_bible")
+            .select("id")
+            .eq("story_id", project_id)
+            .eq("archived", True)
+            .execute()
+        )
+        return {row["id"] for row in (r.data or []) if row.get("id")}
+    except Exception:
+        return set()
+
+
 def get_related_chapter_nums(project_id: str, target_bible_entities: List[str]) -> List[int]:
     """Lấy danh sách chapter_number có liên quan đến các entity (reverse lookup). Dùng cho fallback read_full_content khi search_context trả lời chưa đủ."""
     if not project_id or not target_bible_entities:
@@ -31,15 +50,20 @@ def get_related_chapter_nums(project_id: str, target_bible_entities: List[str]) 
 
 
 def get_mandatory_rules(project_id: str) -> str:
-    """Lấy tất cả các luật (RULE) bắt buộc từ story_bible."""
+    """Lấy tất cả các luật (RULE) bắt buộc từ story_bible (bỏ qua entry đã archived)."""
     try:
         services = init_services()
         if not services:
             return ""
         supabase = services["supabase"]
-        res = supabase.table("story_bible").select("description").eq(
+        q = supabase.table("story_bible").select("description").eq(
             "story_id", project_id
-        ).ilike("entity_name", "%[RULE]%").execute()
+        ).ilike("entity_name", "%[RULE]%")
+        try:
+            q = q.or_("archived.is.null,archived.eq.false")
+        except Exception:
+            pass
+        res = q.execute()
         if res.data:
             rules_text = "\n".join([f"- {r['description']}" for r in res.data])
             return f"\n🔥 --- MANDATORY RULES ---\n{rules_text}\n"

@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 from config import init_services
 
 from ai.service import AIService
+from ai.context_helpers import get_archived_bible_ids
 from ai.utils import (
     _safe_float,
     _rerank_by_score,
@@ -69,6 +70,14 @@ class HybridSearch:
 
             if not raw_list:
                 return []
+
+            # V7.7: Loại entry đã archived (không đưa vào context)
+            try:
+                archived_ids = get_archived_bible_ids(project_id)
+                if archived_ids:
+                    raw_list = [r for r in raw_list if r.get("id") not in archived_ids]
+            except Exception:
+                pass
 
             if inferred_prefixes:
                 reranked = _rerank_by_score_with_prefix(raw_list, top_k, inferred_prefixes)
