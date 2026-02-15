@@ -20,6 +20,8 @@ def step_to_router_result(step: Dict, user_prompt: str) -> Dict:
     args = step.get("args") or {}
     return {
         "intent": intent,
+        "context_needs": args.get("context_needs") if isinstance(args.get("context_needs"), list) else [],
+        "context_priority": args.get("context_priority") if isinstance(args.get("context_priority"), list) else [],
         "target_files": args.get("target_files") or [],
         "target_bible_entities": args.get("target_bible_entities") or [],
         "rewritten_query": args.get("query_refined") or user_prompt,
@@ -43,6 +45,8 @@ def _normalize_step(step: Dict, step_id: int, user_prompt: str) -> Dict:
         "intent": (step.get("intent") or "chat_casual").strip(),
         "args": {
             "query_refined": args.get("query_refined") or args.get("rewritten_query") or user_prompt,
+            "context_needs": args.get("context_needs") if isinstance(args.get("context_needs"), list) else [],
+            "context_priority": args.get("context_priority") if isinstance(args.get("context_priority"), list) else [],
             "target_files": args.get("target_files") if isinstance(args.get("target_files"), list) else [],
             "target_bible_entities": args.get("target_bible_entities") if isinstance(args.get("target_bible_entities"), list) else [],
             "chapter_range": args.get("chapter_range"),

@@ -12,14 +12,11 @@ INTENTS_SKIP_VERIFY = {"ask_user_clarification", "update_data", "chat_casual"}
 INTENTS_VERIFY_NUMERICAL = {"numerical_calculation"}
 
 # Intent verify timeline (độ dài, thứ tự)
-INTENTS_VERIFY_TIMELINE = {"manage_timeline"}
+INTENTS_VERIFY_TIMELINE = {"search_context"}
 
 # Intent verify grounding (chỉ được dựa trên Bible/chunk/timeline/context)
 INTENTS_VERIFY_GROUNDING = {
-    "read_full_content",
-    "search_chunks",
-    "search_bible",
-    "mixed_context",
+    "search_context",
     "query_Sql",
 }
 
@@ -139,7 +136,7 @@ def verify_output(
     - ask_user_clarification, update_data, chat_casual: không verify.
     - numerical_calculation: so sánh số với executor (1%).
     - manage_timeline: độ dài và timeline có trong context.
-    - read_full_content, search_chunks, search_bible, mixed_context, query_Sql: grounding (LLM judge).
+    - search_context, query_Sql: grounding (LLM judge).
     - web_search: bỏ qua (hoặc tùy chọn sau).
     Returns: (is_valid, error_msg).
     """

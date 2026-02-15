@@ -21,12 +21,12 @@ BUILTIN_TRIGGERS = {
     "summarize_chapter": "summarize_chapter",
     "read": "read_chapter",
     "read_chapter": "read_chapter",
-    "search_bible": "search_bible",
-    "search_chunks": "search_chunks",
-    "timeline": "manage_timeline",
-    "manage_timeline": "manage_timeline",
-    "mixed": "mixed_context",
-    "mixed_context": "mixed_context",
+    "search_bible": "search_context",
+    "search_chunks": "search_context",
+    "timeline": "search_context",
+    "manage_timeline": "search_context",
+    "mixed": "search_context",
+    "mixed_context": "search_context",
     "calc": "numerical_calculation",
     "numerical_calculation": "numerical_calculation",
     "web": "web_search",
@@ -52,17 +52,17 @@ COMMAND_TO_ROUTER = {
     "delete_timeline": ("update_data", "delete", "timeline"),
     "delete_chunking": ("update_data", "delete", "chunking"),
     "data_analyze": ("update_data", None, None),  # đặc biệt: 4 bước
-    "summarize_chapter": ("read_full_content", None, None),
-    "read_chapter": ("read_full_content", None, None),
-    "search_bible": ("search_bible", None, None),
-    "search_chunks": ("search_chunks", None, None),
-    "manage_timeline": ("manage_timeline", None, None),
-    "mixed_context": ("mixed_context", None, None),
+    "summarize_chapter": ("search_context", None, None),
+    "read_chapter": ("search_context", None, None),
+    "search_bible": ("search_context", None, None),
+    "search_chunks": ("search_context", None, None),
+    "manage_timeline": ("search_context", None, None),
+    "mixed_context": ("search_context", None, None),
     "numerical_calculation": ("numerical_calculation", None, None),
     "web_search": ("web_search", None, None),
     "remember_rule": ("update_data", "remember_rule", "rule"),
     "query_sql": ("query_Sql", None, None),
-    "list_chapters": ("read_full_content", None, None),
+    "list_chapters": ("search_context", None, None),
     "suggest_v7": ("suggest_v7", None, None),
     "ask_user_clarification": ("ask_user_clarification", None, None),
 }
@@ -183,6 +183,8 @@ def _build_router_out(
     """Tạo dict giống output của SmartAIRouter cho executor."""
     out = {
         "intent": intent,
+        "context_needs": [],
+        "context_priority": [],
         "target_files": [],
         "target_bible_entities": [],
         "rewritten_query": query_text or "",
@@ -192,6 +194,25 @@ def _build_router_out(
         "clarification_question": "",
         "update_summary": update_summary,
     }
+    if intent == "search_context":
+        if command_key in ("summarize_chapter", "read_chapter", "list_chapters"):
+            out["context_needs"] = ["chapter"]
+            out["context_priority"] = ["chapter"]
+        elif command_key == "search_bible":
+            out["context_needs"] = ["bible", "relation"]
+            out["context_priority"] = ["bible", "relation"]
+        elif command_key == "search_chunks":
+            out["context_needs"] = ["chunk"]
+            out["context_priority"] = ["chunk"]
+        elif command_key in ("manage_timeline", "timeline"):
+            out["context_needs"] = ["timeline"]
+            out["context_priority"] = ["timeline"]
+        elif command_key in ("mixed_context", "mixed"):
+            out["context_needs"] = ["bible", "relation", "chapter"]
+            out["context_priority"] = ["chapter", "bible", "relation"]
+        else:
+            out["context_needs"] = ["chapter"]
+            out["context_priority"] = ["chapter"]
     if intent == "update_data":
         t = COMMAND_TO_ROUTER.get(command_key, (None, None, None))
         out["data_operation_type"] = t[1] or "extract"

@@ -701,7 +701,7 @@ def render_bible_tab(project_id, persona):
                 st.subheader(f"Similar to: {target_entry['entity_name']}")
 
                 search_text = f"{target_entry['entity_name']} {target_entry['description'][:100]}"
-                similar_results = HybridSearch.smart_search_hybrid_raw(search_text, project_id, top_k=5)
+                similar_results = HybridSearch.smart_search_hybrid_raw(search_text, project_id, top_k=10)
 
                 similar_results = [r for r in similar_results if r['id'] != entry_id]
 

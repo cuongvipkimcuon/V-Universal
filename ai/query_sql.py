@@ -91,7 +91,7 @@ def build_query_sql_context(
         return block, "🔍 Query SQL"
 
     if query_target == "bible_entity":
-        raw_list = HybridSearch.smart_search_hybrid_raw(rewritten, project_id, top_k=5) if rewritten else []
+        raw_list = HybridSearch.smart_search_hybrid_raw(rewritten, project_id, top_k=10) if rewritten else []
         if range_bounds and raw_list:
             raw_list = _filter_bible_by_chapter_range(raw_list, range_bounds, max_items=10)
         if raw_list:
@@ -178,7 +178,7 @@ def build_query_sql_context(
         return block, "🔍 Query SQL"
 
     # fallback: bible_entity
-    raw_list = HybridSearch.smart_search_hybrid_raw(rewritten, project_id, top_k=5) if rewritten else []
+    raw_list = HybridSearch.smart_search_hybrid_raw(rewritten, project_id, top_k=10) if rewritten else []
     if range_bounds and raw_list:
         raw_list = _filter_bible_by_chapter_range(raw_list, range_bounds, max_items=10)
     if raw_list:

@@ -6,6 +6,11 @@ from typing import Dict
 from config import Config
 
 from ai.context_helpers import get_mandatory_rules
+from ai.context_schema import (
+    infer_default_context_needs,
+    normalize_context_needs,
+    normalize_context_priority,
+)
 from ai.service import AIService, _get_default_tool_model
 from ai.utils import (
     cap_chat_history_to_tokens,
@@ -121,12 +126,8 @@ Bạn là AI Điều Phối Viên (Router) cho hệ thống V7-Universal. Nhiệ
 | **web_search** | Cần thông tin **THỰC TẾ, THỜI GIAN THỰC** bên ngoài dự án. | "Tỷ giá", "Giá vàng", "Thời tiết", "Tin tức", "Thông số súng Glock ngoài đời", "mới nhất", "tra cứu". |
 | **numerical_calculation** | Yêu cầu **TÍNH TOÁN CON SỐ**, thống kê, so sánh dữ liệu định lượng. | "Tính tổng", "Doanh thu", "Trung bình", "Đếm số lượng", "% tăng trưởng". |
 | **update_data** | User yêu cầu **thay đổi/ghi dữ liệu** hệ thống. Gồm hai nhóm: (1) **Ghi nhớ quy tắc**: "Hãy nhớ rằng...", "Cập nhật quy tắc...", "Thêm nhân vật..." -> data_operation_type: "remember_rule", data_operation_target: "rule", update_summary: mô tả. (2) **Thao tác theo chương**: trích xuất/xóa/cập nhật Bible, Relation, Timeline, Chunking theo chương -> data_operation_type: "extract"|"update"|"delete", data_operation_target: "bible"|"relation"|"timeline"|"chunking", chapter_range. | "Hãy nhớ rằng...", "Trích xuất Bible chương 1", "Xóa relation chương 2", "Cập nhật timeline chương 3". |
-| **read_full_content** | 1. Nhắc **TÊN FILE** hoặc **SỐ CHƯƠNG** cụ thể. 2. Yêu cầu: Tóm tắt, Review, Viết tiếp, Kiểm tra logic toàn bài. | "Chương 1", "Chapter 5", "File luong.xlsx", "Tóm tắt chương này". |
-| **manage_timeline** | Hỏi về **THỨ TỰ THỜI GIAN**, sự kiện trước/sau, timeline, flashback. | "Sự kiện nào trước", "Sau khi A chết thì...", "Mốc thời gian", "Năm bao nhiêu". |
-| **query_Sql** | User **CHỈ MUỐN XEM/LIỆT KÊ** dữ liệu thô (không hỏi tự nhiên). Dùng khi: "Liệt kê chương", "Cho tôi xem luật", "Xuất timeline dạng danh sách". **KHÔNG** chọn query_Sql khi user **hỏi tự nhiên** kiểu "A và B có quan hệ gì", "Quan hệ giữa X và Y", "Sự kiện nào diễn ra trước" — những câu đó chọn search_bible hoặc manage_timeline. Khi chọn query_Sql BẮT BUỘC điền **query_target**. | "Liệt kê chương", "Cho tôi xem luật", "Xuất timeline chương 2 dạng list". |
-| **mixed_context** | User hỏi **MỘT việc** duy nhất nhưng để trả lời cần **dữ liệu hỗn hợp**: vừa nội dung chương/file vừa Bible (nhân vật, lore, quan hệ). Một câu hỏi → một câu trả lời. **Không** chọn khi user nói rõ **nhiều thao tác** — lúc đó chọn suggest_v7. | "Trong chương 3 nhân vật A làm gì và quan hệ với B", "Chương 5 mô tả nhân vật X thế nào". |
-| **search_chunks** | Hỏi **CHI TIẾT VỤN VẶT** trong văn bản nhưng **KHÔNG** nhắc số chương cụ thể. | "Ai nói câu...", "Hùng cầm vũ khí gì", "Chi tiết cái áo màu đỏ". |
-| **search_bible** | Hỏi về **Lore, nhân vật, quan hệ giữa các nhân vật, timeline/sự kiện** (chi tiết); hoặc tham chiếu chat cũ. Intent này **mở rộng**: khi user hỏi **quan hệ** (A và B có quan hệ gì, mối quan hệ giữa X và Y) -> chọn search_bible, điền target_bible_entities = [A, B] hoặc [X, Y]. Khi user hỏi **timeline/sự kiện** (sự kiện nào trước, mốc thời gian) nhưng không chỉ rõ "liệt kê" -> có thể search_bible hoặc manage_timeline. **Ưu tiên search_bible** cho câu hỏi tự nhiên về quan hệ/timeline. | "A và B có quan hệ gì", "Quan hệ giữa X và Y", "Mối quan hệ của nhân vật A", (tên nhân vật), "Thế giới này vận hành sao", "Sự kiện nào diễn ra trước", "như tôi đã nói về...". |
+| **query_Sql** | User **CHỈ MUỐN XEM/LIỆT KÊ** dữ liệu thô (không hỏi tự nhiên). Khi chọn query_Sql BẮT BUỘC điền **query_target**. **KHÔNG** chọn cho câu hỏi tự nhiên về quan hệ/timeline — những câu đó chọn search_context. | "Liệt kê chương", "Cho tôi xem luật", "Xuất timeline chương 2 dạng list". |
+| **search_context** | **Intent thống nhất** cho mọi câu hỏi cần tra cứu/đọc nội dung dự án. Khi chọn search_context BẮT BUỘC điền **context_needs** (mảng, giá trị trong: "bible", "relation", "timeline", "chunk", "chapter") và **context_priority** (mảng cùng phần tử với context_needs nhưng **theo thứ tự ưu tiên** cho câu hỏi này: phần tử đầu = quan trọng nhất, dùng để tối ưu token). Ví dụ: "Trong chương 3 A làm gì và quan hệ B" -> context_needs: ["bible","relation","chapter"], context_priority: ["chapter","bible","relation"] (nội dung chương quan trọng nhất). | "A và B có quan hệ gì", "Trong chương 3 A làm gì và quan hệ B", "Sự kiện nào trước", "Tóm tắt chương 1", "nhân vật X". |
 | **suggest_v7** | Câu hỏi **rõ ràng cần 2+ intent** hoặc **2+ thao tác update_data** (vd: trích xuất Bible + Relation + Timeline + Chunking; hoặc "tóm tắt chương 1 rồi so sánh timeline"). Dùng REFERENCE (bộ lọc nhanh) làm gợi ý; nếu đồng ý thì trả về suggest_v7. | "Chạy tất cả data analyze chương 1", "tóm tắt chương 1 rồi so sánh với timeline", "trích xuất bible và relation chương 2". |
 | **chat_casual** | Chào hỏi xã giao, không yêu cầu dữ liệu hay tra cứu. | "Hello", "Cảm ơn", "Bạn khỏe không". |
 
@@ -143,18 +144,16 @@ Bạn là AI Điều Phối Viên (Router) cho hệ thống V7-Universal. Nhiệ
 | art | Nghệ thuật, style | "Nghệ thuật chương 1", "Style tác phẩm" |
 
 ### 3. HƯỚNG DẪN XỬ LÝ ĐẶC BIỆT (CRITICAL RULES)
-1. **Quy tắc "Chương Cụ Thể":** Khi user nhắc "Chương X", "Chapter Y" và yêu cầu **đọc/tóm tắt/xem** nội dung -> chọn `read_full_content`, tuyệt đối KHÔNG chọn `search_chunks`. Nếu user **ra lệnh thao tác dữ liệu** (extract/update/delete Bible, Relation, Timeline, Chunking) theo chương thì ưu tiên quy tắc 7 -> `update_data`, không áp dụng "Chương Cụ Thể" cho read_full_content.
-2. **Quy tắc "Thực Tế":** Nếu hỏi tỷ giá, tin tức, thời tiết, giá vàng, thông số thực tế -> BẮT BUỘC chọn `web_search`. Tuyệt đối KHÔNG chọn `chat_casual` hay `search_bible`.
-3. **Quy tắc "Làm Rõ":** Nếu không hiểu user muốn gì (câu quá ngắn/mơ hồ) -> Chọn `ask_user_clarification` và điền `clarification_question`.
-4. **Quy tắc "Tham chiếu chat cũ":** Nếu tin nhắn mới CHỈ là tham chiếu đến lệnh/câu hỏi trước (vd: "làm cái đó", "ok làm đi", "như vừa nói", "thực hiện đi", "đúng rồi làm đi") thì dựa vào LỊCH SỬ CHAT: lấy lại intent và rewritten_query của tin nhắn user gần nhất có nội dung cụ thể, điền vào output.
-5. **Quy tắc "Tham chiếu nội dung chat (crystallize)":** Nếu user nói đã bàn / đã nói về chủ đề X trong chat -> chọn `search_bible`. Điền `rewritten_query` là chủ đề hoặc từ khóa cần tìm.
-6. **Quy tắc "Nhiều bước (suggest_v7)":** Nếu câu hỏi **rõ ràng** cần thực thi 2+ intent hoặc 2+ thao tác update_data -> chọn `suggest_v7`, điền `reason` giải thích ngắn.
-7. **Quy tắc "update_data — tránh nhầm":** Chỉ chọn `update_data` khi user **ra lệnh thay đổi/ghi dữ liệu**. Nếu user **chỉ muốn xem, tóm tắt, hỏi** thì KHÔNG chọn update_data.
-8. **Quy tắc "Tra cứu":** "Tra cứu" đi với tỷ giá, tin tức, thời tiết -> `web_search`. "Tra cứu" đi với nội dung dự án -> `search_bible` hoặc `read_full_content`.
-9. **Quy tắc "query_Sql":** Chọn `query_Sql` CHỈ khi user **chỉ muốn XEM/LIỆT KÊ/TRÍCH** dữ liệu thô (vd "Liệt kê chương", "Cho tôi xem luật"). **KHÔNG** chọn query_Sql cho câu hỏi tự nhiên về quan hệ hay timeline. Điền **query_target** đúng một giá trị trong bảng QUERY_TARGET.
-10. **Quy tắc "query_Sql vs search_bible vs read_full_content":** `query_Sql` = xem/liệt kê dữ liệu cấu trúc (liệt kê, xuất, cho tôi xem). `search_bible` = hỏi lore, nhân vật, **quan hệ giữa nhân vật** (vd "A và B có quan hệ gì", "Quan hệ giữa X và Y"), timeline/sự kiện chi tiết. `read_full_content` = đọc/tóm tắt **nội dung văn bản** chương/file.
-12. **Quy tắc "Quan hệ nhân vật":** Khi user hỏi **quan hệ giữa hai hay nhiều nhân vật** (vd "A và B có quan hệ gì", "Quan hệ giữa X và Y", "Mối quan hệ của nhân vật A") -> luôn chọn **search_bible**, điền **target_bible_entities** = [tên các nhân vật]. **Tuyệt đối KHÔNG** chọn query_Sql cho loại câu này.
-11. **Quy tắc "mixed_context (một việc, dữ liệu hỗn hợp)":** User chỉ hỏi **một điều** nhưng câu trả lời cần **cả** nội dung chương/file **và** Bible (nhân vật, quan hệ, lore) → chọn `mixed_context`. Chỉ đọc/tóm tắt/xem nội dung chương, không đòi hỏi kết hợp Bible → `read_full_content`. **Phân biệt với suggest_v7:** Nếu user nói rõ **nhiều việc** (vd "tóm tắt chương 1 **rồi** so sánh với timeline", "trích Bible **và** relation chương 2") → `suggest_v7`, không dùng `mixed_context`.
+1. **Quy tắc "Chương / đọc nội dung":** User nhắc "Chương X" hoặc "tóm tắt chương" / "xem nội dung chương" -> chọn **search_context** với **context_needs** chứa "chapter", điền chapter_range. **read_full_content KHÔNG bao giờ chọn** — chỉ dùng nội bộ khi search_context trả lời chưa đủ. Nếu user **ra lệnh thao tác dữ liệu** (extract/update/delete) theo chương -> `update_data`.
+2. **Quy tắc "Thực Tế":** Hỏi tỷ giá, tin tức, thời tiết -> BẮT BUỘC `web_search`.
+3. **Quy tắc "Làm Rõ":** Câu quá ngắn/mơ hồ -> `ask_user_clarification`, điền `clarification_question`.
+4. **Quy tắc "Tham chiếu chat cũ":** Tin nhắn chỉ tham chiếu lệnh trước (vd "làm cái đó", "ok làm đi") -> từ LỊCH SỬ CHAT: (1) **Phân định**: ĐÃ LÀM GÌ (bước/intent đã thực thi, kết quả đã có) vs CẦN LÀM GÌ (phần user muốn thực hiện tiếp hoặc câu hỏi còn lại). (2) Chỉ trả về intent và rewritten_query cho phần **CẦN LÀM**; không lặp lại bước đã làm. Lấy intent/rewritten_query từ tin nhắn user gần nhất có nội dung cụ thể.
+5. **Quy tắc "Tham chiếu nội dung chat (crystallize)":** User nói đã bàn về X -> `search_context`, context_needs: ["bible"], rewritten_query: X.
+6. **Quy tắc "Nhiều bước (suggest_v7)":** Câu hỏi rõ ràng cần 2+ intent hoặc 2+ thao tác -> `suggest_v7`.
+7. **Quy tắc "update_data":** Chỉ khi user **ra lệnh thay đổi/ghi dữ liệu**. Chỉ xem/tóm tắt/hỏi -> KHÔNG update_data.
+8. **Quy tắc "Tra cứu":** Tra cứu ngoài (tỷ giá, tin) -> `web_search`. Tra cứu nội dung dự án -> `search_context`.
+9. **Quy tắc "query_Sql":** CHỈ khi user muốn XEM/LIỆT KÊ dữ liệu thô. Câu hỏi tự nhiên về quan hệ/timeline -> `search_context`. Điền **query_target** khi intent = query_Sql.
+10. **Quy tắc "search_context — context_needs":** Luôn điền **context_needs** (mảng): hỏi quan hệ -> ["bible","relation"]; hỏi timeline/sự kiện -> ["timeline"] hoặc ["bible","timeline"]; hỏi chi tiết vụn (ai nói, câu nào) -> ["chunk"]; hỏi trong chương X kết hợp Bible -> ["bible","relation","chapter"] hoặc ["bible","chapter"]; chỉ tóm tắt chương -> ["chapter"]. Có thể kết hợp nhiều: ["bible","relation","timeline","chunk","chapter"] tùy câu hỏi.
 
 ### 4. LOGIC TRÍCH XUẤT CHAPTER RANGE
 - "Chương 1", "Chap 5" -> chapter_range_mode: "range", chapter_range: [1, 1] hoặc [5, 5]
@@ -165,26 +164,34 @@ Bạn là AI Điều Phối Viên (Router) cho hệ thống V7-Universal. Nhiệ
 
 ### 5. VÍ DỤ MINH HỌA (FEW-SHOT)
 **Input:** "Tóm tắt nội dung chương 1 cho anh."
-**Output:** {{ "intent": "read_full_content", "reason": "User yêu cầu tóm tắt và chỉ định chương 1.", "chapter_range": [1, 1], "chapter_range_mode": "range", "rewritten_query": "Tóm tắt chương 1", "target_files": [], "target_bible_entities": [], "inferred_prefixes": [], "chapter_range_count": 5, "clarification_question": "", "update_summary": "" }}
+**Output:** {{ "intent": "search_context", "context_needs": ["chapter"], "context_priority": ["chapter"], "reason": "User tóm tắt chương 1. read_full_content không chọn; dùng search_context.", "chapter_range": [1, 1], "chapter_range_mode": "range", "rewritten_query": "Tóm tắt chương 1", "target_files": [], "target_bible_entities": [], "inferred_prefixes": [], "chapter_range_count": 5, "clarification_question": "", "update_summary": "", "query_target": "" }}
 
 **Input:** "Tỷ giá USD/VND hôm nay bao nhiêu?"
-**Output:** {{ "intent": "web_search", "reason": "Hỏi thông tin thời gian thực ngoài hệ thống.", "rewritten_query": "Tỷ giá USD VND hôm nay", "target_files": [], "target_bible_entities": [], "inferred_prefixes": [], "chapter_range": null, "chapter_range_mode": null, "chapter_range_count": 5, "clarification_question": "", "update_summary": "" }}
+**Output:** {{ "intent": "web_search", "context_needs": [], "reason": "Hỏi thông tin thời gian thực ngoài hệ thống.", "rewritten_query": "Tỷ giá USD VND hôm nay", "target_files": [], "target_bible_entities": [], "inferred_prefixes": [], "chapter_range": null, "chapter_range_mode": null, "chapter_range_count": 5, "clarification_question": "", "update_summary": "", "query_target": "" }}
 
 **Input:** "Trong chương 3 nhân vật A làm gì và quan hệ với B thế nào?"
-**Output:** {{ "intent": "mixed_context", "reason": "Một câu hỏi cần cả nội dung chương 3 và thông tin Bible (A, B, quan hệ). Dữ liệu hỗn hợp, một câu trả lời.", "chapter_range": [3, 3], "chapter_range_mode": "range", "rewritten_query": "Nhân vật A làm gì trong chương 3 và quan hệ với B", "target_files": [], "target_bible_entities": ["A", "B"], "inferred_prefixes": [], "chapter_range_count": 5, "clarification_question": "", "update_summary": "" }}
+**Output:** {{ "intent": "search_context", "context_needs": ["bible", "relation", "chapter"], "context_priority": ["chapter", "bible", "relation"], "reason": "Một câu hỏi cần Bible, quan hệ và nội dung chương 3.", "chapter_range": [3, 3], "chapter_range_mode": "range", "rewritten_query": "Nhân vật A làm gì trong chương 3 và quan hệ với B", "target_files": [], "target_bible_entities": ["A", "B"], "inferred_prefixes": [], "chapter_range_count": 5, "clarification_question": "", "update_summary": "", "query_target": "" }}
 
 **Input:** "A và B có quan hệ gì?" hoặc "Quan hệ giữa nhân vật X và Y?"
-**Output:** {{ "intent": "search_bible", "reason": "User hỏi tự nhiên về quan hệ giữa nhân vật. Dùng search_bible, không dùng query_Sql.", "rewritten_query": "Quan hệ giữa A và B", "target_files": [], "target_bible_entities": ["A", "B"], "inferred_prefixes": [], "chapter_range": null, "chapter_range_mode": null, "chapter_range_count": 5, "clarification_question": "", "update_summary": "", "query_target": "" }}
+**Output:** {{ "intent": "search_context", "context_needs": ["bible", "relation"], "context_priority": ["bible", "relation"], "reason": "Hỏi quan hệ nhân vật.", "rewritten_query": "Quan hệ giữa A và B", "target_files": [], "target_bible_entities": ["A", "B"], "inferred_prefixes": [], "chapter_range": null, "chapter_range_mode": null, "chapter_range_count": 5, "clarification_question": "", "update_summary": "", "query_target": "" }}
+
+**Input:** "Sự kiện nào diễn ra trước?"
+**Output:** {{ "intent": "search_context", "context_needs": ["timeline"], "context_priority": ["timeline"], "reason": "Hỏi thứ tự sự kiện.", "rewritten_query": "Sự kiện nào diễn ra trước", "target_files": [], "target_bible_entities": [], "inferred_prefixes": [], "chapter_range": null, "chapter_range_mode": null, "chapter_range_count": 5, "clarification_question": "", "update_summary": "", "query_target": "" }}
+
+**Input:** "Hùng cầm vũ khí gì?"
+**Output:** {{ "intent": "search_context", "context_needs": ["chunk"], "context_priority": ["chunk"], "reason": "Hỏi chi tiết vụn trong văn bản.", "rewritten_query": "Hùng cầm vũ khí gì", "target_files": [], "target_bible_entities": [], "inferred_prefixes": [], "chapter_range": null, "chapter_range_mode": null, "chapter_range_count": 5, "clarification_question": "", "update_summary": "", "query_target": "" }}
 
 **Input:** "Tóm tắt chương 1 rồi so sánh với timeline chương 2."
-**Output:** {{ "intent": "suggest_v7", "reason": "User yêu cầu rõ ràng hai việc: tóm tắt chương 1 và so sánh với timeline. Cần nhiều bước.", "rewritten_query": "Tóm tắt chương 1 rồi so sánh với timeline chương 2", "target_files": [], "target_bible_entities": [], "inferred_prefixes": [], "chapter_range": null, "chapter_range_mode": null, "chapter_range_count": 5, "clarification_question": "", "update_summary": "" }}
+**Output:** {{ "intent": "suggest_v7", "context_needs": [], "reason": "User yêu cầu hai việc: tóm tắt và so sánh timeline. Cần nhiều bước.", "rewritten_query": "Tóm tắt chương 1 rồi so sánh với timeline chương 2", "target_files": [], "target_bible_entities": [], "inferred_prefixes": [], "chapter_range": null, "chapter_range_mode": null, "chapter_range_count": 5, "clarification_question": "", "update_summary": "" }}
 
 ### 6. INPUT CỦA USER
 "{user_prompt}"
 
 ### 7. OUTPUT (JSON ONLY) — Trả về đúng format sau, đủ các key:
 {{
-    "intent": "ask_user_clarification" | "web_search" | "numerical_calculation" | "update_data" | "read_full_content" | "manage_timeline" | "query_Sql" | "mixed_context" | "search_chunks" | "search_bible" | "suggest_v7" | "chat_casual",
+    "intent": "ask_user_clarification" | "web_search" | "numerical_calculation" | "update_data" | "query_Sql" | "search_context" | "suggest_v7" | "chat_casual",
+    "context_needs": [] hoặc ["bible"] | ["relation"] | ["timeline"] | ["chunk"] | ["chapter"] hoặc kết hợp (BẮT BUỘC khi intent = search_context),
+    "context_priority": [] hoặc mảng cùng phần tử với context_needs theo thứ tự ưu tiên (phần tử đầu = quan trọng nhất; dùng để tối ưu token; BẮT BUỘC khi intent = search_context),
     "target_files": [],
     "target_bible_entities": [],
     "inferred_prefixes": [],
@@ -228,6 +235,31 @@ Bạn là AI Điều Phối Viên (Router) cho hệ thống V7-Universal. Nhiệ
             result.setdefault("data_operation_type", "")
             result.setdefault("data_operation_target", "")
             result.setdefault("query_target", "")
+            result.setdefault("context_needs", [])
+            result.setdefault("context_priority", [])
+            # Chuẩn hóa intent cũ -> search_context
+            legacy_search = ("read_full_content", "search_bible", "mixed_context", "manage_timeline", "search_chunks")
+            if result.get("intent") in legacy_search:
+                old = result["intent"]
+                result["intent"] = "search_context"
+                if not result.get("context_needs"):
+                    if old == "read_full_content":
+                        result["context_needs"] = ["chapter"]
+                    elif old == "manage_timeline":
+                        result["context_needs"] = ["timeline"]
+                    elif old == "search_chunks":
+                        result["context_needs"] = ["chunk"]
+                    elif old == "search_bible":
+                        result["context_needs"] = ["bible", "relation"]
+                    else:
+                        result["context_needs"] = ["bible", "relation", "chapter", "timeline", "chunk"]
+            # Schema: chuẩn hóa context_needs và context_priority
+            if result.get("intent") == "search_context":
+                needs = normalize_context_needs(result.get("context_needs"))
+                if not needs:
+                    needs = infer_default_context_needs(result)
+                result["context_needs"] = needs
+                result["context_priority"] = normalize_context_priority(result.get("context_priority"), needs)
             if not isinstance(result.get("inferred_prefixes"), list):
                 result["inferred_prefixes"] = []
             valid_keys = Config.get_valid_prefix_keys()
@@ -241,6 +273,7 @@ Bạn là AI Điều Phối Viên (Router) cho hệ thống V7-Universal. Nhiệ
             print(f"Router error: {e}")
             return {
                 "intent": "chat_casual",
+                "context_needs": [], "context_priority": [],
                 "target_files": [], "target_bible_entities": [], "inferred_prefixes": [],
                 "reason": f"Router error: {e}", "rewritten_query": user_prompt,
                 "chapter_range": None, "chapter_range_mode": None, "chapter_range_count": 5,
@@ -273,13 +306,16 @@ DỮ LIỆU: QUY TẮC={rules_context[:1500]} | PREFIX={prefix_setup_str[:800]} 
 INPUT USER: "{user_prompt}"
 
 QUY TẮC:
-- Tham chiếu chat cũ -> lấy query_refined từ LỊCH SỬ.
-- **mixed_context (một việc, dữ liệu hỗn hợp):** Khi user hỏi MỘT điều nhưng câu trả lời cần CẢ nội dung chương/file VÀ Bible (nhân vật, quan hệ, lore) -> dùng ĐÚNG MỘT bước intent `mixed_context`. Không tách thành 2 bước read_full_content + search_bible. mixed_context = một câu hỏi, một câu trả lời, chỉ khác là context gom nhiều nguồn.
-- **Nhiều bước (plan 2+ step):** Chỉ khi user nói RÕ nhiều việc hoặc thao tác (vd "tóm tắt chương 1 rồi so sánh với timeline", "trích Bible và relation chương 2") -> tách thành nhiều bước, đặt dependency khi bước sau cần output bước trước.
-- Chương cụ thể đọc/tóm tắt (không đòi Bible) -> read_full_content. update_data chỉ khi ra lệnh thực thi. update_data theo khoảng chương -> một bước mỗi (data_operation_type, data_operation_target) với chapter_range [start,end]. **Quan hệ/timeline:** Câu hỏi tự nhiên về quan hệ giữa nhân vật (A và B có quan hệ gì) hoặc timeline/sự kiện -> dùng **search_bible** (hoặc manage_timeline nếu chỉ thứ tự thời gian), điền target_bible_entities khi có tên nhân vật. **KHÔNG** dùng query_Sql cho câu hỏi dạng này. query_Sql chỉ khi user muốn XEM/LIỆT KÊ dữ liệu thô (liệt kê chương, xuất luật, xuất timeline dạng list). query_Sql -> args có query_target. dependency: null cho update_data, query_Sql, web_search, ask_user_clarification, chat_casual; step_id bước trước khi bước sau cần output. verification_required: true nếu plan có numerical_calculation, manage_timeline, read_full_content, search_chunks, search_bible, mixed_context, query_Sql.
+- **Tham chiếu chat cũ — phân định ĐÃ LÀM / CẦN LÀM:** Khi user tham chiếu lệnh trước (vd "làm đi", "cái đó", "tiếp đi"): (1) Từ LỊCH SỬ xác định **ĐÃ LÀM GÌ** (các bước/intent đã thực thi, kết quả model đã trả lời). (2) Xác định **CẦN LÀM GÌ** (phần còn lại user muốn, hoặc câu hỏi mới). (3) Chỉ lên plan cho phần **CẦN LÀM**; không thêm bước lặp lại việc đã làm. (4) Mỗi bước trong plan: **query_refined** = câu hỏi/nội dung **chỉ dành cho bước đó** (phần cần làm của bước đó), không gộp cả "đã làm".
+- **search_context (intent thống nhất):** Mọi câu hỏi cần tra cứu/đọc (lore, nhân vật, quan hệ, timeline, chunk, tóm tắt chương) -> ĐÚNG MỘT bước intent `search_context`. BẮT BUỘC điền **context_needs** trong args: mảng ["bible"] | ["relation"] | ["timeline"] | ["chunk"] | ["chapter"] hoặc kết hợp. read_full_content KHÔNG dùng; chỉ fallback nội bộ khi trả lời chưa đủ.
+- **Nhiều bước (plan 2+ step):** Chỉ khi user nói RÕ nhiều việc (vd "tóm tắt chương 1 rồi so sánh với timeline") -> tách nhiều bước, dependency khi cần.
+- update_data chỉ khi ra lệnh thực thi. query_Sql chỉ khi XEM/LIỆT KÊ dữ liệu thô; args có query_target. dependency: null cho update_data, query_Sql, web_search, ask_user_clarification, chat_casual. verification_required: true nếu plan có numerical_calculation, search_context, query_Sql.
 
 Trả về ĐÚNG MỘT JSON:
-{{ "analysis": "...", "plan": [ {{ "step_id": 1, "intent": "...", "args": {{ "query_refined": "...", "target_files": [], "target_bible_entities": [], "chapter_range": null, "chapter_range_mode": null, "chapter_range_count": 5, "data_operation_type": "", "data_operation_target": "", "query_target": "" }}, "dependency": null }} ], "verification_required": true }}
+- **analysis**: Mô tả ngắn; nếu dùng LỊCH SỬ thì ghi rõ: "Đã làm: ...; Cần làm: ..." để plan chỉ chạy đúng bước còn lại.
+- **plan**: Chỉ gồm các bước **CẦN LÀM** (không lặp bước đã làm). Mỗi bước có args.query_refined = nội dung chỉ cho bước đó.
+
+{{ "analysis": "...", "plan": [ {{ "step_id": 1, "intent": "...", "args": {{ "query_refined": "...", "context_needs": [], "target_files": [], "target_bible_entities": [], "chapter_range": null, "chapter_range_mode": null, "chapter_range_count": 5, "data_operation_type": "", "data_operation_target": "", "query_target": "" }}, "dependency": null }} ], "verification_required": true }}
 Chỉ trả về JSON."""
 
         try:
@@ -306,7 +342,7 @@ Chỉ trả về JSON."""
             return SmartAIRouter._single_intent_to_plan(single, user_prompt)
         analysis = data.get("analysis", "")
         verification_required = bool(data.get("verification_required", False))
-        valid_intents = {"manage_timeline", "numerical_calculation", "read_full_content", "search_chunks", "search_bible", "mixed_context", "web_search", "ask_user_clarification", "update_data", "query_Sql", "chat_casual"}
+        valid_intents = {"numerical_calculation", "search_context", "web_search", "ask_user_clarification", "update_data", "query_Sql", "chat_casual"}
         normalized_plan = []
         for i, s in enumerate(plan):
             if not isinstance(s, dict):
@@ -324,6 +360,11 @@ Chỉ trả về JSON."""
                         args["data_operation_target"] = target
                     if not args.get("data_operation_type"):
                         args["data_operation_type"] = "extract"
+                elif intent in ("read_full_content", "search_bible", "mixed_context", "manage_timeline", "search_chunks"):
+                    intent = "search_context"
+                    args = dict(args)
+                    if not args.get("context_needs"):
+                        args["context_needs"] = ["bible", "relation", "chapter", "timeline", "chunk"]
                 else:
                     intent = "chat_casual"
             step_id = int(s.get("step_id", i + 1))
@@ -333,6 +374,8 @@ Chỉ trả về JSON."""
                 "intent": intent,
                 "args": {
                     "query_refined": args.get("query_refined") or args.get("rewritten_query") or user_prompt,
+                    "context_needs": args.get("context_needs") if isinstance(args.get("context_needs"), list) else [],
+                    "context_priority": args.get("context_priority") if isinstance(args.get("context_priority"), list) else [],
                     "target_files": args.get("target_files") if isinstance(args.get("target_files"), list) else [],
                     "target_bible_entities": args.get("target_bible_entities") if isinstance(args.get("target_bible_entities"), list) else [],
                     "chapter_range": args.get("chapter_range"),
@@ -350,7 +393,7 @@ Chỉ trả về JSON."""
         if not normalized_plan:
             single = SmartAIRouter.ai_router_pro_v2(user_prompt, chat_history_text, project_id)
             return SmartAIRouter._single_intent_to_plan(single, user_prompt)
-        intents_need_verify = {"numerical_calculation", "manage_timeline", "read_full_content", "search_chunks", "search_bible", "mixed_context", "query_Sql"}
+        intents_need_verify = {"numerical_calculation", "search_context", "query_Sql"}
         if any(s.get("intent") in intents_need_verify for s in normalized_plan):
             verification_required = True
         return {"analysis": analysis, "plan": normalized_plan, "verification_required": verification_required}
@@ -366,6 +409,8 @@ Chỉ trả về JSON."""
                 "intent": intent,
                 "args": {
                     "query_refined": single_router_result.get("rewritten_query") or user_prompt,
+                    "context_needs": single_router_result.get("context_needs") or [],
+                    "context_priority": single_router_result.get("context_priority") or [],
                     "target_files": single_router_result.get("target_files") or [],
                     "target_bible_entities": single_router_result.get("target_bible_entities") or [],
                     "chapter_range": single_router_result.get("chapter_range"),
@@ -380,8 +425,5 @@ Chỉ trả về JSON."""
                 },
                 "dependency": None,
             }],
-            "verification_required": intent in (
-                "numerical_calculation", "manage_timeline",
-                "read_full_content", "search_chunks", "search_bible", "mixed_context", "query_Sql",
-            ),
+            "verification_required": intent in ("numerical_calculation", "search_context", "query_Sql"),
         }

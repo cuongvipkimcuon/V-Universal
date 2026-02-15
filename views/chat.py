@@ -13,6 +13,8 @@ from ai_engine import (
     check_semantic_intent,
     get_v7_reminder_message,
 )
+from ai.evaluate import is_answer_sufficient
+from ai.context_helpers import get_related_chapter_nums
 from ai_verifier import run_verification_loop
 from core.executor_v7 import execute_plan
 from core.command_parser import is_command_message, parse_command, get_fallback_clarification
@@ -441,6 +443,7 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                 with st.chat_message(m["role"], avatar=role_icon):
                     st.markdown(m.get("content", ""))
         else:
+            visible_msgs = []
             try:
                 services = init_services()
                 supabase = services["supabase"]
@@ -458,7 +461,8 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                 )
                 msgs = msgs_data.data[::-1] if msgs_data.data else []
                 visible_msgs = [m for m in msgs if m["created_at"] > st.session_state.get("chat_cutoff", "1970-01-01")]
-                for m in visible_msgs:
+                # Hiển thị càng mới càng ở trên cao (newest first)
+                for m in reversed(visible_msgs):
                     role_icon = active_persona["icon"] if m["role"] == "model" else None
                     with st.chat_message(m["role"], avatar=role_icon):
                         st.markdown(m["content"])
@@ -902,6 +906,55 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
                                         placeholder.markdown(full_response_text + "▌")
 
                                 placeholder.markdown(full_response_text)
+
+                            # search_context: thẩm định câu trả lời; nếu chưa đủ ý thì fallback đọc full content các chương reverse lookup
+                            if (
+                                not is_v_home
+                                and intent == "search_context"
+                                and full_response_text
+                                and not is_answer_sufficient(
+                                    prompt,
+                                    full_response_text,
+                                    (context_text or "")[:1000],
+                                    router_out.get("context_needs"),
+                                )
+                            ):
+                                ch_range = router_out.get("chapter_range")
+                                start, end = None, None
+                                if ch_range and len(ch_range) >= 2:
+                                    start, end = int(ch_range[0]), int(ch_range[1])
+                                    start, end = min(start, end), max(start, end)
+                                if start is None or end is None:
+                                    related_nums = get_related_chapter_nums(
+                                        project_id, router_out.get("target_bible_entities") or []
+                                    )
+                                    if related_nums:
+                                        start, end = min(related_nums), max(related_nums)
+                                if start is not None and end is not None:
+                                    fallback_text, _ = ContextManager.load_chapters_by_range(
+                                        project_id, start, end,
+                                        token_limit=ContextManager.DEFAULT_CHAPTER_TOKEN_LIMIT,
+                                    )
+                                    if fallback_text:
+                                        extended_context = (context_text or "") + "\n\n--- NỘI DUNG CHƯƠNG (FALLBACK - đọc đầy đủ để trả lời đủ ý) ---\n" + fallback_text[:8000]
+                                        retry_messages = [
+                                            {"role": "system", "content": run_instruction + "\n\nTHÔNG TIN NGỮ CẢNH (CONTEXT):\n" + extended_context + "\n\nTrả lời ĐẦY ĐỦ dựa trên context, đặc biệt nội dung chương vừa bổ sung."},
+                                            {"role": "user", "content": prompt},
+                                        ]
+                                        try:
+                                            retry_resp = AIService.call_openrouter(
+                                                messages=retry_messages,
+                                                model=model,
+                                                temperature=run_temperature,
+                                                max_tokens=active_persona.get("max_tokens", 4000),
+                                            )
+                                            new_answer = (retry_resp.choices[0].message.content or "").strip()
+                                            if new_answer:
+                                                full_response_text = new_answer
+                                                placeholder.markdown(full_response_text)
+                                                debug_notes.append("📄 Fallback read full content")
+                                        except Exception:
+                                            pass
 
                             input_tokens = AIService.estimate_tokens(system_message + prompt)
                             output_tokens = AIService.estimate_tokens(full_response_text)

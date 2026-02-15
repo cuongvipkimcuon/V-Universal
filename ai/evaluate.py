@@ -1,8 +1,71 @@
-# ai/evaluate.py - V7 dynamic re-planning: evaluate_step_outcome, replan_after_step
+# ai/evaluate.py - V7 dynamic re-planning: evaluate_step_outcome, replan_after_step, is_answer_sufficient
 import json
 from typing import Dict, List, Optional, Tuple
 
 from ai.service import AIService, _get_default_tool_model
+
+
+def is_answer_sufficient(
+    user_prompt: str,
+    model_answer: str,
+    context_preview: str = "",
+    context_needs: Optional[List[str]] = None,
+) -> bool:
+    """Thẩm định câu trả lời: heuristic trước, LLM khi cần. Trả về True nếu đủ ý, False nếu cần fallback (đọc thêm chương)."""
+    if not (user_prompt and model_answer):
+        return True
+
+    context_needs = context_needs or []
+    ctx_lower = (context_preview or "").lower()
+    prompt_lower = (user_prompt or "").lower()
+
+    # Heuristic 1: User cần nội dung chương nhưng context không có chapter content -> chưa đủ
+    if "chapter" in context_needs:
+        has_chapter_content = (
+            "target content" in ctx_lower
+            or "nội dung chương" in ctx_lower
+            or "related files" in ctx_lower
+            or "reverse lookup" in ctx_lower
+        )
+        if not has_chapter_content:
+            return False
+
+    # Heuristic 2: Câu hỏi cụ thể (chương/tóm tắt/làm gì) mà trả lời quá ngắn
+    if len(model_answer.strip()) < 80 and any(
+        k in prompt_lower for k in ("chương", "tóm tắt", "làm gì", "nội dung", "diễn ra")
+    ):
+        return False
+
+    # Heuristic 3: Trả lời mang tính từ chối hoặc không có thông tin
+    if any(
+        phrase in (model_answer or "").lower()
+        for phrase in ("chưa có thông tin", "không tìm thấy", "chưa có dữ liệu", "chưa có nội dung")
+    ) and any(k in prompt_lower for k in ("chương", "tóm tắt", "nội dung")):
+        return False
+
+    # Không kết luận được bằng heuristic -> gọi LLM
+    prompt = f"""User hỏi: "{user_prompt[:400]}"
+
+Câu trả lời hiện tại:
+{model_answer[:1500]}
+
+Context đã dùng (rút gọn): {context_preview[:500] if context_preview else "(không)"}
+
+Nhiệm vụ: Câu trả lời trên có ĐỦ ý, trực tiếp đáp ứng câu hỏi của user không? Nếu còn chung chung, thiếu chi tiết từ nội dung chương/văn bản mà user đang hỏi thì trả false.
+Trả về ĐÚNG MỘT JSON: {{ "sufficient": true hoặc false }}"""
+    try:
+        r = AIService.call_openrouter(
+            messages=[{"role": "user", "content": prompt}],
+            model=_get_default_tool_model(),
+            temperature=0,
+            max_tokens=50,
+            response_format={"type": "json_object"},
+        )
+        content = AIService.clean_json_text(r.choices[0].message.content or "{}")
+        data = json.loads(content)
+        return bool(data.get("sufficient", True))
+    except Exception:
+        return True
 
 
 def evaluate_step_outcome(intent: str, ctx_text: str, sources: List[str]) -> Tuple[bool, str]:
@@ -15,33 +78,14 @@ def evaluate_step_outcome(intent: str, ctx_text: str, sources: List[str]) -> Tup
     ctx_upper = (ctx_text or "").upper()
     src_list = sources or []
 
-    if intent == "read_full_content":
-        if "--- TARGET CONTENT ---" not in ctx_text and "NỘI DUNG CHƯƠNG" not in ctx_text:
-            return True, "read_full_content: không tìm thấy file/chương (target content trống)"
-        return False, ""
-
-    if intent == "search_chunks":
-        has_chunk = any("chunk" in s.lower() or "reverse" in s.lower() for s in src_list)
-        has_fallback = "Chapter fallback" in str(src_list) or "NỘI DUNG CHƯƠNG" in ctx_text
-        if not has_chunk and not has_fallback:
-            return True, "search_chunks: không tìm thấy chunk hoặc fallback chương"
-        return False, ""
-
-    if intent == "search_bible":
-        has_bible = "📚" in str(src_list) or "KNOWLEDGE BASE" in ctx_upper or ("--- " in ctx_text and "---" in ctx_text)
-        if not has_bible or (len(ctx_text or "") < 500 and "Bible" not in ctx_text):
-            return True, "search_bible: không tìm thấy dữ liệu Bible"
-        return False, ""
-
-    if intent == "mixed_context":
-        has_any = "📚" in str(src_list) or "RELATED FILES" in ctx_text or "Timeline" in ctx_upper or "Chunk" in str(src_list)
-        if not has_any:
-            return True, "mixed_context: không có Bible, file, timeline hay chunk"
-        return False, ""
-
-    if intent == "manage_timeline":
-        if "[TIMELINE] Chưa có dữ liệu" in ctx_text or "Timeline (empty)" in str(src_list):
-            return True, "manage_timeline: chưa có dữ liệu timeline_events"
+    if intent == "search_context":
+        has_any = (
+            "📚" in str(src_list) or "KNOWLEDGE BASE" in ctx_upper
+            or "TARGET CONTENT" in ctx_text or "NỘI DUNG CHƯƠNG" in ctx_text
+            or "Timeline" in ctx_upper or "Chunk" in str(src_list) or "chunk" in str(src_list).lower()
+        )
+        if not has_any or (len(ctx_text or "") < 200):
+            return True, "search_context: không có dữ liệu Bible, chapter, timeline hay chunk"
         return False, ""
 
     if intent == "query_Sql":

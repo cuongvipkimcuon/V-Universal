@@ -4,6 +4,32 @@ from typing import Any, List, Optional, Tuple
 from config import init_services
 
 
+def get_related_chapter_nums(project_id: str, target_bible_entities: List[str]) -> List[int]:
+    """Lấy danh sách chapter_number có liên quan đến các entity (reverse lookup). Dùng cho fallback read_full_content khi search_context trả lời chưa đủ."""
+    if not project_id or not target_bible_entities:
+        return []
+    try:
+        services = init_services()
+        if not services:
+            return []
+        supabase = services["supabase"]
+        related = set()
+        for entity in target_bible_entities:
+            if not (entity or str(entity).strip()):
+                continue
+            res = supabase.table("story_bible").select("source_chapter").eq(
+                "story_id", project_id
+            ).ilike("entity_name", f"%{entity}%").execute()
+            if res.data:
+                for row in res.data:
+                    if row.get("source_chapter") and row["source_chapter"] > 0:
+                        related.add(int(row["source_chapter"]))
+        return sorted(related)
+    except Exception as e:
+        print(f"get_related_chapter_nums error: {e}")
+        return []
+
+
 def get_mandatory_rules(project_id: str) -> str:
     """Lấy tất cả các luật (RULE) bắt buộc từ story_bible."""
     try:
