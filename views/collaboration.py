@@ -96,7 +96,6 @@ def _render_members_tab(project_id):
                         "role": new_role,
                     }).execute()
                     st.success(f"Đã thêm {new_email} với vai trò {new_role}.")
-                    st.rerun()
                 except Exception as ex:
                     st.error(f"Lỗi: {ex}")
             else:
@@ -117,7 +116,6 @@ def _render_members_tab(project_id):
                     "story_id", project_id
                 ).eq("user_email", email).execute()
                 st.success("Đã gỡ thành viên.")
-                st.rerun()
             except Exception as ex:
                 st.error(f"Lỗi: {ex}")
 
@@ -152,13 +150,11 @@ def _render_pending_tab(project_id):
                 if st.button("✅ Approve", key=f"approve_{req_id}"):
                     if approve_pending_change(str(req_id)):
                         st.success("Đã duyệt và áp dụng thay đổi.")
-                        st.rerun()
                     else:
                         st.error("Không thể áp dụng.")
             with col_reject:
                 if st.button("❌ Reject", key=f"reject_{req_id}"):
                     if reject_pending_change(str(req_id)):
                         st.success("Đã từ chối.")
-                        st.rerun()
                     else:
                         st.error("Lỗi từ chối.")

@@ -146,7 +146,6 @@ def render_commands_tab(project_id, persona=None):
                     with col2:
                         if project_id and st.button("Xóa alias", key=f"del_alias_{key}_{a}"):
                             _delete_alias(project_id, a)
-                            st.rerun()
             if project_id:
                 new_alias = st.text_input(
                     "Thêm alias (không cần gõ @@)",
@@ -157,7 +156,6 @@ def render_commands_tab(project_id, persona=None):
                     ok, msg = _add_alias(project_id, new_alias, key)
                     if ok:
                         st.success(msg)
-                        st.rerun()
                     else:
                         st.error(msg)
 

@@ -5,7 +5,7 @@ import streamlit as st
 from config import init_services
 from ai_engine import AIService
 from utils.auth_manager import check_permission
-from utils.cache_helpers import get_bible_list_cached, invalidate_cache_and_rerun
+from utils.cache_helpers import get_bible_list_cached, invalidate_cache
 
 
 def render_chat_management_tab(project_id, persona):
@@ -49,7 +49,7 @@ def render_chat_management_tab(project_id, persona):
                     try:
                         supabase.table("story_bible").update({"archived": False}).eq("id", entry["id"]).execute()
                         st.success("Đã bỏ archive.")
-                        invalidate_cache_and_rerun()
+                        invalidate_cache()
                     except Exception as e:
                         st.error(str(e))
             else:
@@ -62,7 +62,7 @@ def render_chat_management_tab(project_id, persona):
                         try:
                             supabase.table("story_bible").delete().eq("id", entry["id"]).execute()
                             st.success("Đã xóa.")
-                            invalidate_cache_and_rerun()
+                            invalidate_cache()
                         except Exception as e:
                             st.error(str(e))
                 with col3:
@@ -70,7 +70,7 @@ def render_chat_management_tab(project_id, persona):
                         try:
                             supabase.table("story_bible").update({"archived": True}).eq("id", entry["id"]).execute()
                             st.success("Đã archive (sẽ không đưa vào context).")
-                            invalidate_cache_and_rerun()
+                            invalidate_cache()
                         except Exception as e:
                             st.error(str(e))
 
@@ -91,13 +91,12 @@ def render_chat_management_tab(project_id, persona):
                     st.success("Đã cập nhật.")
                     st.session_state["update_trigger"] = st.session_state.get("update_trigger", 0) + 1
                     del st.session_state["chat_editing"]
-                    invalidate_cache_and_rerun()
+                    invalidate_cache()
                 except Exception as ex:
                     upd.pop("embedding", None)
                     supabase.table("story_bible").update(upd).eq("id", e["id"]).execute()
                     st.success("Đã cập nhật.")
                     del st.session_state["chat_editing"]
-                    invalidate_cache_and_rerun()
+                    invalidate_cache()
             if st.form_submit_button("Hủy"):
                 del st.session_state["chat_editing"]
-                st.rerun()

@@ -10,7 +10,7 @@ from config import Config, init_services
 from ai_engine import AIService, HybridSearch, ContextManager, generate_chapter_metadata, analyze_split_strategy, execute_split_logic
 from utils.file_importer import UniversalLoader
 from utils.auth_manager import check_permission, submit_pending_change
-from utils.cache_helpers import get_chapters_cached, invalidate_cache_and_rerun
+from utils.cache_helpers import get_chapters_cached, invalidate_cache, full_refresh
 
 
 def render_workstation_tab(project_id, persona):
@@ -174,7 +174,6 @@ def render_workstation_tab(project_id, persona):
                             )
                             thread.start()
                             time.sleep(0.5)
-                            st.rerun()
                         elif can_request:
                             pid = submit_pending_change(
                                 story_id=project_id,
@@ -196,7 +195,6 @@ def render_workstation_tab(project_id, persona):
         with btn_cols[2]:
             if st.button("📂 Import", use_container_width=True, key="ws_import_btn"):
                 st.session_state["workstation_import_mode"] = True
-                st.rerun()
         with btn_cols[3]:
             if chap_num and st.button("🗑️ Xóa", use_container_width=True, key="ws_delete_current"):
                 uid = getattr(st.session_state.get("user"), "id", None) or ""
@@ -216,10 +214,8 @@ def render_workstation_tab(project_id, persona):
                     else:
                         try:
                             supabase.table("chapters").delete().eq("story_id", project_id).eq("chapter_number", chap_num).execute()
-                            st.success(f"Đã xóa chương #{chap_num}.")
-                            st.cache_data.clear()
-                            st.session_state["update_trigger"] = st.session_state.get("update_trigger", 0) + 1
-                            st.rerun()
+                            st.success(f"Đã xóa chương #{chap_num}. Bấm Refresh để cập nhật.")
+                            invalidate_cache()
                         except Exception as e:
                             st.error(f"Lỗi xóa chương: {e}")
                 else:
@@ -235,10 +231,8 @@ def render_workstation_tab(project_id, persona):
                     try:
                         supabase.table("chapters").delete().eq("story_id", project_id).execute()
                         st.success("✅ Đã xóa sạch tất cả chương!")
-                        # st.session_state["ws_confirm_clear_all_top"] = False
-                        st.cache_data.clear()
-                        st.session_state["update_trigger"] = st.session_state.get("update_trigger", 0) + 1
-                        st.rerun()
+                        invalidate_cache()
+                        st.success("Đã xóa. Bấm Refresh để cập nhật.")
                     except Exception as e:
                         st.error(f"Lỗi xóa sạch: {e}")
                 else:
@@ -298,7 +292,6 @@ def render_workstation_tab(project_id, persona):
                             st.session_state.pop("workstation_split_preview", None)
                             st.session_state.pop("workstation_import_ext", None)
                             st.success("Đã thay thế. Nhớ bấm Save để lưu DB.")
-                            st.rerun()
                     with col_append:
                         if st.button("➕ Thêm vào cuối", use_container_width=True, key="imp_append", help="Nối file vào cuối chương hiện tại."):
                             current = st.session_state.get(f"file_content_{chap_num}", db_content or "")
@@ -308,13 +301,11 @@ def render_workstation_tab(project_id, persona):
                             st.session_state.pop("workstation_split_preview", None)
                             st.session_state.pop("workstation_import_ext", None)
                             st.success("Đã thêm vào cuối. Nhớ bấm Save.")
-                            st.rerun()
                     with col_cut:
                         if not is_pdf:
                             if st.button("✂️ Cắt", use_container_width=True, key="imp_smart_split", help="AI cắt theo chương/entity/sheet, đề xuất nhiều phần để lưu thành nhiều chương."):
                                 st.session_state["workstation_split_mode"] = True
                                 st.session_state["workstation_imported_text"] = text
-                                st.rerun()
                         else:
                             st.caption("⚠️ PDF: không hỗ trợ cắt tự động.")
                     with col_cancel:
@@ -324,7 +315,6 @@ def render_workstation_tab(project_id, persona):
                             st.session_state.pop("workstation_split_preview", None)
                             st.session_state.pop("workstation_split_mode", None)
                             st.session_state.pop("workstation_import_ext", None)
-                            st.rerun()
 
                     # --- Workflow Cắt thông minh: AI Suggest (nhẹ) -> Python Execute (mạnh) ---
                     text_for_split = st.session_state.get("workstation_imported_text") or text
@@ -406,7 +396,7 @@ def render_workstation_tab(project_id, persona):
                                             st.session_state.pop("workstation_split_strategy", None)
                                             st.session_state.pop("workstation_split_mode", None)
                                             st.session_state.pop("workstation_import_ext", None)
-                                            invalidate_cache_and_rerun()
+                                            invalidate_cache()
                                     except Exception as e:
                                         st.error(f"Lỗi lưu: {e}")
                         
@@ -414,12 +404,10 @@ def render_workstation_tab(project_id, persona):
                             st.session_state.pop("workstation_split_preview", None)
                             st.session_state.pop("workstation_split_strategy", None)
                             st.session_state["workstation_split_mode"] = False
-                            st.rerun()
             else:
                 if st.button("Đóng Import", key="workstation_import_close"):
                     st.session_state["workstation_import_mode"] = False
                     st.session_state.pop("workstation_imported_text", None)
-                    st.rerun()
 
         file_title = st.text_input(
             "Tiêu đề chương",

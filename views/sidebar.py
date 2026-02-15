@@ -4,6 +4,7 @@ import streamlit as st
 from config import Config, init_services, CostManager
 from persona import PersonaSystem
 from utils.auth_manager import get_user_projects
+from utils.cache_helpers import full_refresh
 
 
 def render_sidebar(session_manager):
@@ -110,8 +111,8 @@ def render_sidebar(session_manager):
 
         st.markdown("---")
         st.subheader("⚡ Quick Actions")
-        if st.button("🔄 Refresh", use_container_width=True):
-            st.rerun()
+        if st.button("🔄 Refresh", use_container_width=True, help="Tải lại dữ liệu và giao diện"):
+            full_refresh()
 
         st.markdown("---")
         if st.button("🚪 Logout", use_container_width=True, type="secondary"):

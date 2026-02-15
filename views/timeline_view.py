@@ -5,6 +5,7 @@ import streamlit as st
 from config import init_services
 from ai_engine import get_timeline_events
 from utils.auth_manager import check_permission
+from utils.cache_helpers import full_refresh
 
 
 def render_timeline_tab(project_id):
@@ -32,8 +33,7 @@ def render_timeline_tab(project_id):
     can_write = check_permission(user_id, user_email, project_id, "write")
 
     if st.button("🔄 Refresh", key="timeline_refresh_btn"):
-        st.cache_data.clear()
-        st.rerun()
+        full_refresh()
 
     events = get_timeline_events(project_id, limit=200)
     events_sorted = sorted(events, key=lambda x: (x.get("event_order", 0), x.get("title", "")))
@@ -56,11 +56,9 @@ def render_timeline_tab(project_id):
                             st.session_state["tl_edit_raw_date"] = ev.get("raw_date", "") or ""
                             st.session_state["tl_edit_event_type"] = ev.get("event_type", "event")
                             st.session_state["tl_edit_event_order"] = ev.get("event_order", 0)
-                            st.rerun()
                     with col_b:
                         if st.button("🗑️ Xóa", key=f"tl_del_{eid}"):
                             st.session_state["tl_confirm_delete_id"] = eid
-                            st.rerun()
 
     if st.session_state.get("tl_confirm_delete_id"):
         del_id = st.session_state["tl_confirm_delete_id"]
@@ -70,12 +68,10 @@ def render_timeline_tab(project_id):
                 supabase.table("timeline_events").delete().eq("id", del_id).execute()
                 st.session_state.pop("tl_confirm_delete_id", None)
                 st.toast("Đã xóa.")
-                st.rerun()
             except Exception as e:
                 st.error(str(e))
         if st.button("❌ Hủy", key="tl_confirm_del_no"):
             st.session_state.pop("tl_confirm_delete_id", None)
-            st.rerun()
 
     # --- Form sửa (khi đang edit) ---
     if st.session_state.get("tl_editing_id"):
@@ -106,14 +102,12 @@ def render_timeline_tab(project_id):
                     for k in ["tl_editing_id", "tl_edit_title", "tl_edit_description", "tl_edit_raw_date", "tl_edit_event_type", "tl_edit_event_order"]:
                         st.session_state.pop(k, None)
                     st.toast("Đã lưu.")
-                    st.rerun()
                 except Exception as e:
                     st.error(str(e))
         with c2:
             if st.button("❌ Hủy sửa", key="tl_edit_cancel"):
                 for k in ["tl_editing_id", "tl_edit_title", "tl_edit_description", "tl_edit_raw_date", "tl_edit_event_type", "tl_edit_event_order"]:
                     st.session_state.pop(k, None)
-                st.rerun()
 
     # --- Thêm mới ---
     st.markdown("---")
@@ -140,7 +134,6 @@ def render_timeline_tab(project_id):
                             "event_type": new_type,
                         }).execute()
                         st.toast("Đã thêm sự kiện.")
-                        st.rerun()
                     except Exception as e:
                         st.error(str(e))
                 else:

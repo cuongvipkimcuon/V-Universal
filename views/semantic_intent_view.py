@@ -80,7 +80,6 @@ def render_semantic_intent_tab(project_id):
                 except Exception:
                     supabase.table("settings").insert({"key": k, "value": v}).execute()
             st.toast("Đã lưu.")
-            st.rerun()
         except Exception as e:
             st.error(str(e))
 
@@ -122,16 +121,13 @@ def render_semantic_intent_tab(project_id):
                         supabase.table("semantic_intent").insert(payload).execute()
                         st.success("Đã thêm.")
                         st.session_state["si_adding"] = False
-                        st.rerun()
                     except Exception as e:
                         payload.pop("embedding", None)
                         supabase.table("semantic_intent").insert(payload).execute()
                         st.success("Đã thêm (chưa vector).")
                         st.session_state["si_adding"] = False
-                        st.rerun()
             if st.form_submit_button("Hủy"):
                 st.session_state["si_adding"] = False
-                st.rerun()
 
     st.markdown("---")
     for item in items:
@@ -146,7 +142,6 @@ def render_semantic_intent_tab(project_id):
                     try:
                         supabase.table("semantic_intent").delete().eq("id", item["id"]).execute()
                         st.success("Đã xóa.")
-                        st.rerun()
                     except Exception as e:
                         st.error(str(e))
 
@@ -167,15 +162,12 @@ def render_semantic_intent_tab(project_id):
                         supabase.table("semantic_intent").update(upd).eq("id", edit_id).execute()
                         del st.session_state["si_editing"]
                         st.success("Đã cập nhật.")
-                        st.rerun()
                     except Exception as e:
                         upd.pop("embedding", None)
                         supabase.table("semantic_intent").update(upd).eq("id", edit_id).execute()
                         del st.session_state["si_editing"]
-                        st.rerun()
                 if st.form_submit_button("Hủy"):
                     del st.session_state["si_editing"]
-                    st.rerun()
 
     # Danger Zone
     st.markdown("---")
@@ -187,7 +179,6 @@ def render_semantic_intent_tab(project_id):
                 try:
                     supabase.table("semantic_intent").delete().eq("story_id", project_id).execute()
                     st.success("Đã xóa sạch.")
-                    st.rerun()
                 except Exception as e:
                     st.error(str(e))
         st.markdown("</div>", unsafe_allow_html=True)

@@ -45,7 +45,6 @@ def render_chunking_tab(project_id):
     can_delete = check_permission(str(user_id or ""), user_email or "", project_id, "delete")
 
     if st.button("🔄 Refresh", key="chunking_refresh_btn"):
-        st.rerun()
 
     # Kiểm tra chunk chưa có embedding + Đồng bộ vector (chỉ khi user bấm)
     try:
@@ -60,7 +59,6 @@ def render_chunking_tab(project_id):
     c1, c2 = st.columns(2)
     with c1:
         if st.button("🔄 Kiểm tra chunk chưa có embedding", key="chunking_check_vec_btn"):
-            st.rerun()
     with c2:
         if st.button("🔄 Đồng bộ vector (Chunks)", key="chunking_sync_vec_btn", disabled=(chunks_no_vec == 0)):
             import threading
@@ -69,7 +67,6 @@ def render_chunking_tab(project_id):
                 run_embedding_backfill(project_id, bible_limit=0, chunks_limit=200)
             threading.Thread(target=_run, daemon=True).start()
             st.toast("Đã bắt đầu đồng bộ vector. Bấm Refresh sau vài giây để xem kết quả.")
-            st.rerun()
 
     r = supabase.table("chunks").select(
         "id, content, raw_content, source_type, meta_json, arc_id, chapter_id, sort_order"
@@ -124,7 +121,6 @@ def render_chunking_tab(project_id):
                                             "embedding": vec,
                                         }).eq("id", cid).execute()
                                         st.success("Đã cập nhật nội dung và vector.")
-                                        st.rerun()
                                     except Exception as e:
                                         if "embedding" in str(e).lower() or "vector" in str(e).lower():
                                             try:
@@ -133,7 +129,6 @@ def render_chunking_tab(project_id):
                                                     "raw_content": new_content.strip(),
                                                 }).eq("id", cid).execute()
                                                 st.success("Đã cập nhật nội dung (embedding bỏ qua do lỗi DB).")
-                                                st.rerun()
                                             except Exception as e2:
                                                 st.error(str(e2))
                                         else:
@@ -144,7 +139,6 @@ def render_chunking_tab(project_id):
                 if can_delete and st.button("🗑️ Xóa", key=f"chunk_del_{cid}"):
                     supabase.table("chunks").delete().eq("id", cid).execute()
                     st.success("Đã xóa.")
-                    st.rerun()
 
     st.markdown("---")
     with st.expander("💀 Danger Zone", expanded=False):
@@ -154,5 +148,4 @@ def render_chunking_tab(project_id):
             if confirm and st.button("🗑️ Xóa sạch Chunks"):
                 supabase.table("chunks").delete().eq("story_id", project_id).execute()
                 st.success("Đã xóa sạch.")
-                st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)

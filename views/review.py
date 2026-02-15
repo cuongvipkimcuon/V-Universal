@@ -4,7 +4,7 @@ import streamlit as st
 
 from config import Config, init_services
 from ai_engine import AIService
-from utils.cache_helpers import get_chapters_cached, invalidate_cache_and_rerun
+from utils.cache_helpers import get_chapters_cached, invalidate_cache
 from persona import PersonaSystem
 from core.chapter_logic_check import build_logic_context_for_chapter
 
@@ -133,7 +133,6 @@ NỘI DUNG CHƯƠNG CẦN REVIEW:
                         st.error("AI không trả về nội dung.")
                 except Exception as e:
                     st.error(f"Lỗi gọi AI: {e}")
-            st.rerun()
 
     with col_save:
         save_clicked = st.button("💾 Lưu review hiện tại", key="review_save_btn", use_container_width=True, disabled=not show_review_block)
@@ -143,8 +142,7 @@ NỘI DUNG CHƯƠNG CẦN REVIEW:
             st.session_state.pop("review_unsaved", None)
             st.session_state.pop("review_unsaved_chap", None)
             st.session_state["update_trigger"] = st.session_state.get("update_trigger", 0) + 1
-            st.success("Đã xóa review khỏi database.")
-            st.rerun()
+            st.success("Đã xóa review khỏi database. Bấm Refresh để cập nhật.")
 
     # Lưu: chỉ khi đã có khối review và có nội dung từ widget
     if save_clicked and show_review_block:
@@ -153,4 +151,5 @@ NỘI DUNG CHƯƠNG CẦN REVIEW:
         st.session_state.pop("review_unsaved", None)
         st.session_state.pop("review_unsaved_chap", None)
         st.session_state["update_trigger"] = st.session_state.get("update_trigger", 0) + 1
-        invalidate_cache_and_rerun()
+        invalidate_cache()
+        st.success("Đã lưu review. Bấm Refresh để cập nhật.")

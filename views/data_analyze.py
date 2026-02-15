@@ -262,7 +262,6 @@ def _render_timeline_section(project_id, content, chap_num, selected_row, supaba
                 threading.Thread(target=run_job_worker, args=(job_id,), daemon=True).start()
                 st.toast("Queued. Check Background Jobs tab for status.")
                 st.session_state["update_trigger"] = st.session_state.get("update_trigger", 0) + 1
-                st.rerun()
             else:
                 st.error("Không tạo được job.")
 
@@ -303,7 +302,6 @@ def _render_extract_bible_relations_chunking(project_id, content, chap_num, sele
                 threading.Thread(target=run_job_worker, args=(job_id,), daemon=True).start()
                 st.toast("Queued. Check Background Jobs tab for status.")
                 st.session_state["update_trigger"] = st.session_state.get("update_trigger", 0) + 1
-                st.rerun()
             else:
                 st.error("Không tạo được job.")
     st.checkbox(
@@ -328,7 +326,6 @@ def _render_extract_bible_relations_chunking(project_id, content, chap_num, sele
                 threading.Thread(target=run_job_worker, args=(job_id,), daemon=True).start()
                 st.toast("Queued. Check Background Jobs tab for status.")
                 st.session_state["update_trigger"] = st.session_state.get("update_trigger", 0) + 1
-                st.rerun()
             else:
                 st.error("Không tạo được job.")
     if can_write:
@@ -344,7 +341,6 @@ def _render_extract_bible_relations_chunking(project_id, content, chap_num, sele
             if job_id:
                 threading.Thread(target=run_job_worker, args=(job_id,), daemon=True).start()
                 st.toast("Queued. Check Background Jobs tab for status.")
-                st.rerun()
             else:
                 st.error("Không tạo được job.")
     if not can_write:
@@ -375,7 +371,6 @@ def _render_extract_bible_relations_chunking(project_id, content, chap_num, sele
             if job_id:
                 threading.Thread(target=run_job_worker, args=(job_id,), daemon=True).start()
                 st.toast("Queued. Check Background Jobs tab for status.")
-                st.rerun()
             else:
                 st.error("Không tạo được job.")
     if can_write:
@@ -391,7 +386,6 @@ def _render_extract_bible_relations_chunking(project_id, content, chap_num, sele
             if job_id:
                 threading.Thread(target=run_job_worker, args=(job_id,), daemon=True).start()
                 st.toast("Queued. Check Background Jobs tab for status.")
-                st.rerun()
             else:
                 st.error("Không tạo được job.")
 
@@ -421,6 +415,5 @@ def _render_extract_bible_relations_chunking(project_id, content, chap_num, sele
                 threading.Thread(target=run_job_worker, args=(job_id,), daemon=True).start()
                 st.toast("Queued. Check Background Jobs tab for status.")
                 st.session_state["update_trigger"] = st.session_state.get("update_trigger", 0) + 1
-                st.rerun()
             else:
                 st.error("Không tạo được job.")

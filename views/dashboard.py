@@ -114,10 +114,9 @@ def render_dashboard_tab(project_id):
                     # 2) Xóa Bible [CHAT] đã crystallize từ chat của user này + reset crystallize state
                     if user_id:
                         _clean_crystallize_for_user(supabase, project_id, str(user_id))
-                    st.success("✅ Đã xóa lịch sử chat và điểm nhớ [CHAT] (crystallize) của bạn trong dự án.")
-                    st.cache_data.clear()
-                    st.session_state["update_trigger"] = st.session_state.get("update_trigger", 0) + 1
-                    st.rerun()
+                    st.success("✅ Đã xóa lịch sử chat và điểm nhớ [CHAT] (crystallize) của bạn trong dự án. Bấm Refresh để cập nhật.")
+                    from utils.cache_helpers import invalidate_cache
+                    invalidate_cache()
                 except Exception as e:
                     st.error(f"Lỗi khi xóa chat: {e}")
         if st.button("🔄 Re-index Bible", use_container_width=True, key="dash_reindex"):
@@ -162,9 +161,7 @@ def render_dashboard_tab(project_id):
                     }).eq("id", project_id).execute()
 
                     st.session_state.current_project['title'] = new_name
-                    st.success("Project renamed successfully!")
-                    time.sleep(1)
-                    st.rerun()
+                    st.success("Project renamed successfully! Bấm Refresh để cập nhật.")
                 except Exception as e:
                     st.error(f"Error renaming: {e}")
 
@@ -175,7 +172,6 @@ def render_dashboard_tab(project_id):
         if not st.session_state.get('confirm_delete_project'):
             if st.button("💣 Delete Project", type="primary", use_container_width=True):
                 st.session_state['confirm_delete_project'] = True
-                st.rerun()
         else:
             st.error("⚠️ Are you sure? This cannot be undone!")
             c1, c2 = st.columns(2)
@@ -183,20 +179,16 @@ def render_dashboard_tab(project_id):
             with c1:
                 if st.button("❌ Cancel", use_container_width=True):
                     st.session_state['confirm_delete_project'] = False
-                    st.rerun()
 
             with c2:
                 if st.button("✅ YES, DELETE", type="primary", use_container_width=True):
                     try:
                         supabase.table("stories").delete().eq("id", project_id).execute()
 
-                        st.success("Project deleted!")
+                        st.success("Project deleted! Bấm Refresh (sidebar) để về màn hình chọn project.")
 
                         st.session_state['current_project'] = None
                         st.session_state['project_id'] = None
                         st.session_state['confirm_delete_project'] = False
-
-                        time.sleep(1.5)
-                        st.rerun()
                     except Exception as e:
                         st.error(f"Error deleting: {e}")

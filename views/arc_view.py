@@ -65,19 +65,16 @@ def render_arc_tab(project_id):
                 with col1:
                     if can_write and st.button("🔄 Cập nhật tóm tắt", key=f"arc_update_{arc_id}", help="Lấy tóm tắt từng chương → tạo tóm tắt Arc"):
                         st.session_state["arc_updating"] = arc_id
-                        st.rerun()
                     if can_write and st.button("✏️ Sửa tóm tắt", key=f"arc_edit_{arc_id}"):
                         st.session_state["arc_editing"] = arc_id
                 with col2:
                     if a.get("status") == "active" and st.button("📦 Archive", key=f"arc_archive_{arc_id}"):
                         supabase.table("arcs").update({"status": "archived", "updated_at": datetime.utcnow().isoformat()}).eq("id", arc_id).execute()
                         st.toast("Đã archive.")
-                        st.rerun()
                 with col3:
                     if can_delete and st.button("🗑️ Xóa Arc", key=f"arc_del_{arc_id}"):
                         supabase.table("arcs").update({"status": "archived"}).eq("id", arc_id).execute()
                         st.toast("Đã archive (xóa mềm).")
-                        st.rerun()
 
         for a in arcs_archived:
             arc_id = a.get("id")
@@ -89,7 +86,6 @@ def render_arc_tab(project_id):
                 if can_write and st.button("↩️ Un-archive", key=f"arc_unarchive_{arc_id}"):
                     supabase.table("arcs").update({"status": "active", "updated_at": datetime.utcnow().isoformat()}).eq("id", arc_id).execute()
                     st.toast("Đã bỏ archive.")
-                    st.rerun()
 
     if st.session_state.get("arc_updating") and can_write:
         update_id = st.session_state["arc_updating"]
@@ -104,19 +100,16 @@ def render_arc_tab(project_id):
                     st.warning("Không có chương nào có tóm tắt. Thêm tóm tắt chương trước khi cập nhật Arc.")
                     if st.button("Đóng", key="arc_update_close"):
                         del st.session_state["arc_updating"]
-                        st.rerun()
                 else:
                     new_summary = generate_arc_summary_from_chapters(chapter_summaries, arc.get("name", ""))
                     if new_summary:
                         supabase.table("arcs").update({"summary": new_summary, "updated_at": datetime.utcnow().isoformat()}).eq("id", update_id).execute()
                         del st.session_state["arc_updating"]
                         st.success("Đã cập nhật tóm tắt Arc từ tóm tắt chương!")
-                        st.rerun()
                     else:
                         st.error("Không thể tạo tóm tắt. Thử lại sau.")
                         if st.button("Đóng", key="arc_update_close2"):
                             del st.session_state["arc_updating"]
-                            st.rerun()
 
     if st.session_state.get("arc_editing") and can_write:
         edit_id = st.session_state["arc_editing"]
@@ -129,10 +122,8 @@ def render_arc_tab(project_id):
                     supabase.table("arcs").update({"summary": new_summary, "updated_at": datetime.utcnow().isoformat()}).eq("id", edit_id).execute()
                     del st.session_state["arc_editing"]
                     st.success("Đã cập nhật.")
-                    st.rerun()
                 if st.form_submit_button("Hủy"):
                     del st.session_state["arc_editing"]
-                    st.rerun()
 
     st.markdown("---")
     st.subheader("Tạo Arc mới")
@@ -152,7 +143,6 @@ def render_arc_tab(project_id):
                         "sort_order": len(arcs) + 1,
                     }).execute()
                     st.success("Đã tạo Arc.")
-                    st.rerun()
 
     st.markdown("---")
     with st.expander("💀 Danger Zone", expanded=False):
@@ -163,5 +153,4 @@ def render_arc_tab(project_id):
                 for a in arcs_active:
                     supabase.table("arcs").update({"status": "archived"}).eq("id", a["id"]).execute()
                 st.success("Đã archive tất cả.")
-                st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)

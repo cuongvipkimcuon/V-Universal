@@ -37,13 +37,11 @@ def render_data_health_tab(project_id):
                 with col1:
                     if st.button("✅ Force Sync with Bible", key="force_%s" % log_id):
                         if resolve_conflict(log_id, "resolved_force_sync", resolved_by=getattr(st.session_state.get("user"), "email", "")):
-                            st.toast("Đã đánh dấu: Force Sync with Bible.")
-                            st.rerun()
+                            st.toast("Đã đánh dấu: Force Sync with Bible. Bấm Refresh để cập nhật.")
                 with col2:
                     if st.button("📌 Keep Exception", key="keep_%s" % log_id):
                         if resolve_conflict(log_id, "resolved_keep_exception", resolved_by=getattr(st.session_state.get("user"), "email", "")):
-                            st.toast("Đã đánh dấu: Keep Exception.")
-                            st.rerun()
+                            st.toast("Đã đánh dấu: Keep Exception. Bấm Refresh để cập nhật.")
 
     st.markdown("---")
     st.markdown("#### 📋 Lỗi logic theo chương (Timeline, Bible, Relation, Chat crystallize, Rule)")
@@ -78,8 +76,7 @@ def render_data_health_tab(project_id):
             if err:
                 st.error("Lỗi: %s" % err)
             else:
-                st.success("Phát hiện %s lỗi; đã đánh dấu khắc phục %s lỗi cũ. Xem bên dưới." % (len(issues), resolved_count))
-                st.rerun()
+                st.success("Phát hiện %s lỗi; đã đánh dấu khắc phục %s lỗi cũ. Bấm Refresh để tải lại danh sách." % (len(issues), resolved_count))
 
     # Danh sách issues: active + resolved (đã khắc phục)
     all_issues = get_chapter_logic_issues(project_id, chapter_id=ch_id, status_filter=None, limit=100)

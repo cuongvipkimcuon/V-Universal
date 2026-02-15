@@ -8,7 +8,7 @@ from config import Config, init_services
 from ai_engine import AIService, HybridSearch, suggest_import_category, _get_default_tool_model
 from utils.file_importer import UniversalLoader
 from utils.auth_manager import check_permission, submit_pending_change
-from utils.cache_helpers import get_bible_list_cached, invalidate_cache_and_rerun
+from utils.cache_helpers import get_bible_list_cached, invalidate_cache
 
 # Tiền tố khóa (chỉ sửa nội dung, không sửa tiền tố): lấy từ Config.PREFIX_SPECIAL_SYSTEM, bỏ OTHER.
 def _get_locked_prefixes():
@@ -59,7 +59,7 @@ def render_bible_tab(project_id, persona):
     with col_act[2]:
         st.markdown("###")
         if st.button("🔄 Refresh", key="bible_refresh_btn"):
-            invalidate_cache_and_rerun()
+            invalidate_cache()
         if st.button("➕ Add Entry", type="primary", key="bible_add_btn"):
             st.session_state["adding_bible_entry"] = True
         if st.button("📥 Import Knowledge", type="secondary", key="bible_import_btn"):
@@ -77,7 +77,6 @@ def render_bible_tab(project_id, persona):
     c1, c2 = st.columns(2)
     with c1:
         if st.button("🔄 Kiểm tra mục chưa có embedding", key="bible_check_vec_btn"):
-            st.rerun()
     with c2:
         if st.button("🔄 Đồng bộ vector (Bible)", key="bible_sync_vec_btn", disabled=(bible_no_vec_count == 0)):
             import threading
@@ -86,7 +85,6 @@ def render_bible_tab(project_id, persona):
                 run_embedding_backfill(project_id, bible_limit=200, chunks_limit=0)
             threading.Thread(target=_run, daemon=True).start()
             st.toast("Đã bắt đầu đồng bộ vector. Bấm Refresh sau vài giây để xem kết quả.")
-            st.rerun()
 
     # --- Import Knowledge: upload file -> parse -> gợi ý category -> thêm entry ---
     if st.session_state.get('import_knowledge_mode'):
@@ -168,7 +166,6 @@ def render_bible_tab(project_id, persona):
                                 st.session_state['import_knowledge_mode'] = False
                                 st.session_state.pop('import_parsed_text', None)
                                 st.session_state.pop('import_suggested_category', None)
-                                st.rerun()
                         except Exception as e:
                             st.error(f"Lỗi: {e}")
                     else:
@@ -176,11 +173,9 @@ def render_bible_tab(project_id, persona):
                 if st.button("Hủy Import", key="import_cancel"):
                     st.session_state['import_knowledge_mode'] = False
                     st.session_state.pop('import_parsed_text', None)
-                    st.rerun()
         else:
             if st.button("Đóng Import", key="import_close"):
                 st.session_state['import_knowledge_mode'] = False
-                st.rerun()
 
     @st.fragment
     def _bible_search_fragment():
@@ -235,7 +230,6 @@ def render_bible_tab(project_id, persona):
                                 supabase.table("story_bible").update({"importance_bias": new_val}).eq("id", eid).execute()
                                 st.session_state["update_trigger"] = st.session_state.get("update_trigger", 0) + 1
                                 st.toast("Đã cập nhật Importance Bias.")
-                                st.rerun()
                             except Exception as ex:
                                 st.error(str(ex))
             else:
@@ -364,7 +358,6 @@ def render_bible_tab(project_id, persona):
                                             st.session_state["update_trigger"] = st.session_state.get("update_trigger", 0) + 1
                                             st.success("Entry added!")
                                             st.session_state['adding_bible_entry'] = False
-                                            st.rerun()
                                         elif can_request:
                                             pid = submit_pending_change(
                                                 story_id=project_id,
@@ -377,7 +370,6 @@ def render_bible_tab(project_id, persona):
                                             if pid:
                                                 st.toast("Đã gửi yêu cầu chỉnh sửa đến Owner.", icon="📤")
                                                 st.session_state['adding_bible_entry'] = False
-                                                st.rerun()
                                             else:
                                                 st.error("Không gửi được yêu cầu.")
                                         else:
@@ -392,7 +384,6 @@ def render_bible_tab(project_id, persona):
                 with col_cancel:
                     if st.form_submit_button("❌ Cancel"):
                         st.session_state['adding_bible_entry'] = False
-                        st.rerun()
 
     st.markdown("---")
 
@@ -430,7 +421,7 @@ def render_bible_tab(project_id, persona):
                                 .in_("id", selected_ids) \
                                 .execute()
                             st.success(f"Deleted {len(selected_ids)} entries")
-                            invalidate_cache_and_rerun()
+                            invalidate_cache()
                         except Exception as e:
                             st.error(f"Lỗi xóa: {e}")
                     else:
@@ -474,7 +465,7 @@ def render_bible_tab(project_id, persona):
                                     .in_("id", selected_ids) \
                                     .execute()
                                 st.success("Merged successfully!")
-                                invalidate_cache_and_rerun()
+                                invalidate_cache()
                         except Exception as e:
                             st.error(f"Merge error: {e}")
 
@@ -518,7 +509,7 @@ def render_bible_tab(project_id, persona):
                         if check_permission(uid, uem, project_id, "delete"):
                             try:
                                 supabase.table("story_bible").delete().eq("id", entry['id']).execute()
-                                invalidate_cache_and_rerun()
+                                invalidate_cache()
                             except Exception as e:
                                 st.error(f"Lỗi xóa: {e}")
                         else:
@@ -589,7 +580,6 @@ def render_bible_tab(project_id, persona):
                                         }
                                         supabase.table("entity_relations").insert(payload).execute()
                                     st.success("Đã thêm quan hệ.")
-                                    st.rerun()
                                 except Exception as ex:
                                     st.error(f"Lỗi: {ex}")
                         else:
@@ -662,7 +652,6 @@ def render_bible_tab(project_id, persona):
                                 st.session_state["update_trigger"] = st.session_state.get("update_trigger", 0) + 1
                                 st.success("Updated!")
                                 del st.session_state['editing_bible_entry']
-                                st.rerun()
                             elif can_request:
                                 pid = submit_pending_change(
                                     story_id=project_id,
@@ -675,7 +664,6 @@ def render_bible_tab(project_id, persona):
                                 if pid:
                                     st.toast("Đã gửi yêu cầu chỉnh sửa đến Owner.", icon="📤")
                                     del st.session_state['editing_bible_entry']
-                                    st.rerun()
                                 else:
                                     st.error("Không gửi được yêu cầu.")
                             else:
@@ -685,7 +673,6 @@ def render_bible_tab(project_id, persona):
 
                 if st.form_submit_button("❌ Cancel"):
                     del st.session_state['editing_bible_entry']
-                    st.rerun()
 
         if st.session_state.get('find_similar_to'):
             entry_id = st.session_state['find_similar_to']
@@ -712,7 +699,6 @@ def render_bible_tab(project_id, persona):
 
                 if st.button("Close Similar Search"):
                     del st.session_state['find_similar_to']
-                    st.rerun()
 
     else:
         st.info("No bible entries found. Add some to build your project's knowledge base!")
@@ -722,7 +708,6 @@ def render_bible_tab(project_id, persona):
         if not st.session_state.get('confirm_delete_all_bible'):
             if st.button("💣 Clear All Bible Entries", type="secondary", use_container_width=True):
                 st.session_state['confirm_delete_all_bible'] = True
-                st.rerun()
 
         else:
             st.warning("⚠️ CẢNH BÁO: Hành động này sẽ xóa sạch toàn bộ dữ liệu Bible và không thể khôi phục. Bạn chắc chứ?")
@@ -732,7 +717,6 @@ def render_bible_tab(project_id, persona):
             with col_no:
                 if st.button("❌ Thôi, giữ lại", use_container_width=True):
                     st.session_state['confirm_delete_all_bible'] = False
-                    st.rerun()
 
             with col_yes:
                 if st.button("✅ Tôi chắc chắn. Xóa!", type="primary", use_container_width=True):
@@ -746,10 +730,9 @@ def render_bible_tab(project_id, persona):
                                 .execute()
                             st.success("Đã xóa sạch Bible!")
                             st.session_state['confirm_delete_all_bible'] = False
-                            invalidate_cache_and_rerun()
+                            invalidate_cache()
                         except Exception as e:
                             st.error(f"Lỗi xóa: {e}")
                     else:
                         st.warning("Chỉ Owner mới được xóa toàn bộ Bible.")
                     st.session_state['confirm_delete_all_bible'] = False
-                    st.rerun()

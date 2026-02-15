@@ -1,5 +1,5 @@
 # Cache helpers: st.cache_data với TTL 5 phút. Invalidate bằng update_trigger (tham số thứ 2).
-# Sau khi xóa/ghi DB: gọi st.cache_data.clear() và tăng st.session_state["update_trigger"] rồi st.rerun().
+# Sau khi xóa/ghi DB: gọi invalidate_cache() (chỉ tăng trigger, không rerun). User bấm Refresh để xem mới.
 import streamlit as st
 
 
@@ -49,8 +49,18 @@ def get_bible_list_cached(project_id: str, update_trigger: int = 0):
         return []
 
 
+def invalidate_cache():
+    """Sau khi xóa/ghi DB: chỉ tăng update_trigger (lần chạy sau sẽ cache miss). Không clear cache, không rerun. User bấm Refresh nếu muốn xem ngay."""
+    st.session_state["update_trigger"] = st.session_state.get("update_trigger", 0) + 1
+
+
 def invalidate_cache_and_rerun():
-    """Sau khi xóa/ghi DB: xóa cache RAM và tăng update_trigger rồi rerun. Gọi từ views."""
+    """Deprecated: dùng invalidate_cache() thay vì rerun. Giữ lại để tương thích import."""
+    invalidate_cache()
+
+
+def full_refresh():
+    """Xóa toàn bộ cache và rerun app. Chỉ gọi từ nút Refresh (sidebar)."""
     st.cache_data.clear()
     st.session_state["update_trigger"] = st.session_state.get("update_trigger", 0) + 1
     st.rerun()

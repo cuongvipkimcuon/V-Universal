@@ -164,6 +164,9 @@ def main():
             budget = CostManager.get_user_budget(st.session_state.user.id)
             st.metric("Credits", f"${budget.get('remaining_credits', 0):.2f}")
 
+    # Fragment (nếu có): chỉ tab đang tương tác rerun, giảm lag toàn app
+    _fragment = getattr(st, "fragment", None) or getattr(st, "experimental_fragment", None)
+
     # Main tabs
     main_tab = st.tabs(["📂 Workspace", "📚 Knowledge", "💬 Chat", "⚙️ Admin"])
 
@@ -177,15 +180,20 @@ def main():
                 sub_id, _, fn_name, needs_persona = subs[0]
                 render_fn = RENDER_MAP.get(fn_name)
                 if render_fn:
-                    try:
-                        if needs_persona:
-                            render_fn(project_id, persona)
-                        elif sub_id in ("cost", "settings"):
-                            render_fn()
-                        else:
-                            render_fn(project_id)
-                    except TypeError:
-                        render_fn(project_id) if sub_id not in ("cost", "settings") else render_fn()
+                    def _run_one(pid=project_id, pers=persona, sid=sub_id, need_p=needs_persona, fn=render_fn):
+                        try:
+                            if need_p:
+                                fn(pid, pers)
+                            elif sid in ("cost", "settings"):
+                                fn()
+                            else:
+                                fn(pid)
+                        except TypeError:
+                            fn(pid) if sid not in ("cost", "settings") else fn()
+                    if _fragment:
+                        _fragment(_run_one)()
+                    else:
+                        _run_one()
             else:
                 sub_labels = [s[1] for s in subs]
                 sub_tabs = st.tabs(sub_labels)
@@ -193,23 +201,28 @@ def main():
                     with sub_tabs[j]:
                         render_fn = RENDER_MAP.get(fn_name)
                         if render_fn:
-                            try:
-                                if sub_id in ("v_work", "v_home"):
-                                    render_fn(project_id, persona, sub_id)
-                                elif needs_persona:
-                                    render_fn(project_id, persona)
-                                elif sub_id in ("cost", "settings"):
-                                    render_fn()
-                                else:
-                                    render_fn(project_id)
-                            except TypeError:
-                                if sub_id in ("v_work", "v_home"):
-                                    try:
-                                        render_fn(project_id, persona, sub_id)
-                                    except TypeError:
-                                        render_fn(project_id, persona)
-                                else:
-                                    render_fn(project_id) if sub_id not in ("cost", "settings") else render_fn()
+                            def _run_sub(pid=project_id, pers=persona, sid=sub_id, need_p=needs_persona, fn=render_fn):
+                                try:
+                                    if sid in ("v_work", "v_home"):
+                                        fn(pid, pers, sid)
+                                    elif need_p:
+                                        fn(pid, pers)
+                                    elif sid in ("cost", "settings"):
+                                        fn()
+                                    else:
+                                        fn(pid)
+                                except TypeError:
+                                    if sid in ("v_work", "v_home"):
+                                        try:
+                                            fn(pid, pers, sid)
+                                        except TypeError:
+                                            fn(pid, pers)
+                                    else:
+                                        fn(pid) if sid not in ("cost", "settings") else fn()
+                            if _fragment:
+                                _fragment(_run_sub)()
+                            else:
+                                _run_sub()
 
     st.markdown("---")
     st.markdown(

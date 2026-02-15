@@ -301,7 +301,6 @@ class SessionManager:
                     session = services['supabase'].auth.set_session(access_token, refresh_token)
                     if session and session.user:
                         st.session_state.user = session.user
-                        st.rerun()
             except Exception:
                 self.cookie_manager.delete("supabase_access_token", key="del_access_check_login")
                 self.cookie_manager.delete("supabase_refresh_token", key="del_refresh_check_login")
@@ -374,7 +373,6 @@ class SessionManager:
 
                                     st.success("✅ Login successful!")
                                     time.sleep(1.5)
-                                    st.rerun()
                                 except Exception as e:
                                     st.error(f"Login failed: {str(e)}")
 

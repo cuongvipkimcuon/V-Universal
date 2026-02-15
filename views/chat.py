@@ -188,7 +188,6 @@ def _start_data_operation_background(
             ).start()
         st.toast("Started in background. Check Background Jobs tab for status.")
         if rerun_after:
-            st.rerun()
     except Exception as e:
         st.error(f"Lỗi khi bắt đầu thao tác: {e}")
 
@@ -394,7 +393,6 @@ def render_chat_tab(project_id, persona, chat_mode=None):
             if st.button("🔄 Reset topic", use_container_width=True, key=f"chat_btn_reset_topic_{chat_mode}", help="Bắt đầu topic mới: từ giờ chỉ đưa tin nhắn sau thời điểm này vào context."):
                 _v_home_reset_topic(user_id)
                 st.toast("Đã bắt đầu topic mới.")
-                st.rerun()
         else:
             available = PersonaSystem.get_available_personas()
             default_key = st.session_state.get("persona", "Writer")
@@ -411,11 +409,9 @@ def render_chat_tab(project_id, persona, chat_mode=None):
 
             if st.button("🧹 Clear Screen", use_container_width=True, key=f"chat_btn_clear_{chat_mode}"):
                 st.session_state['chat_cutoff'] = datetime.utcnow().isoformat()
-                st.rerun()
 
             if st.button("🔄 Show All", use_container_width=True, key=f"chat_btn_show_all_{chat_mode}"):
                 st.session_state['chat_cutoff'] = "1970-01-01"
-                st.rerun()
 
         if not is_v_home:
             st.session_state['strict_mode'] = st.toggle(
@@ -1093,11 +1089,9 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
                     threading.Thread(target=_add_semantic, daemon=True).start()
                     del st.session_state["pending_semantic_add"]
                     st.toast("Đã thêm vào Semantic Intent (chạy ngầm).")
-                    st.rerun()
             with col_b:
                 if st.button("❌ Bỏ qua", key=f"chat_semantic_skip_btn_{chat_mode}"):
                     del st.session_state["pending_semantic_add"]
-                    st.rerun()
 
     # update_data: Xác nhận cuối cùng trước khi ghi Bible / cập nhật (chỉ V Work)
     if not is_v_home and "pending_update_confirm" in st.session_state and can_write:
@@ -1127,13 +1121,11 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
                                 supabase.table("story_bible").insert(payload).execute()
                                 st.toast("Đã ghi nhớ / cập nhật vào Bible.")
                             del st.session_state["pending_update_confirm"]
-                            st.rerun()
                         except Exception as e:
                             st.error(f"Lỗi khi ghi: {e}")
                 with col_no:
                     if st.button("❌ Hủy", key=f"update_confirm_no_{chat_mode}"):
                         del st.session_state["pending_update_confirm"]
-                        st.rerun()
 
     # Rule Mining UI (chỉ V Work; danh sách luật trích từ 1 câu chat, xác nhận từng cái hoặc tất cả)
     if not is_v_home and can_write:
@@ -1189,13 +1181,11 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
                             pending_list.pop(i)
                             if not pending_list:
                                 del st.session_state['pending_new_rules']
-                            st.rerun()
                     with col_b:
                         if st.button("❌ Bỏ qua", key=f"rule_ignore_one_{rule_key}"):
                             pending_list.pop(i)
                             if not pending_list:
                                 del st.session_state['pending_new_rules']
-                            st.rerun()
                     st.divider()
 
             if pending_list:
@@ -1219,8 +1209,6 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
                                     pass
                         st.toast("Đã lưu tất cả luật.")
                         del st.session_state['pending_new_rules']
-                        st.rerun()
                 with col_all_b:
                     if st.button("❌ Bỏ qua tất cả", key=f"rule_ignore_all_{chat_mode}"):
                         del st.session_state['pending_new_rules']
-                        st.rerun()

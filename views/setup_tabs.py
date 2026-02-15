@@ -3,7 +3,7 @@ import streamlit as st
 
 from config import Config, init_services
 from persona import PersonaSystem, PERSONAS
-from utils.cache_helpers import invalidate_cache_and_rerun
+from utils.cache_helpers import invalidate_cache
 
 
 def render_prefix_setup():
@@ -48,7 +48,7 @@ def render_prefix_setup():
                             upd["persona_key"] = None if pk == "(Không)" else pk
                         supabase.table("bible_prefix_config").update(upd).eq("id", row["id"]).execute()
                         st.success("Đã cập nhật.")
-                        invalidate_cache_and_rerun()
+                        invalidate_cache()
                     except Exception as ex:
                         st.error(str(ex))
             with col_del:
@@ -60,7 +60,7 @@ def render_prefix_setup():
                         try:
                             supabase.table("bible_prefix_config").delete().eq("id", row["id"]).execute()
                             st.success("Đã xóa tiền tố.")
-                            invalidate_cache_and_rerun()
+                            invalidate_cache()
                         except Exception as ex:
                             st.error(str(ex))
     st.caption("Prefix đặc biệt (không chỉnh trong bảng): RULE, CHAT, OTHER. OTHER chỉ dùng khi tạo Bible mà không gán được prefix từ danh sách trên.")
@@ -80,7 +80,6 @@ def render_prefix_setup():
                         "sort_order": int(new_order),
                     }).execute()
                     st.success("Đã thêm.")
-                    st.rerun()
                 except Exception as ex:
                     st.error(str(ex))
             else:
@@ -165,7 +164,7 @@ def render_persona_setup():
                             }
                         ).eq("id", row["id"]).execute()
                         st.success("Đã cập nhật.")
-                        invalidate_cache_and_rerun()
+                        invalidate_cache()
                     except Exception as ex:
                         st.error(str(ex))
             with col_pdel:
@@ -175,7 +174,7 @@ def render_persona_setup():
                         try:
                             supabase.table("personas").delete().eq("id", row["id"]).execute()
                             st.success("Đã xóa persona.")
-                            invalidate_cache_and_rerun()
+                            invalidate_cache()
                         except Exception as ex:
                             st.error(str(ex))
     st.markdown("---")
@@ -204,7 +203,6 @@ def render_persona_setup():
                         "is_builtin": False,
                     }).execute()
                     st.success("Đã thêm persona.")
-                    st.rerun()
                 except Exception as ex:
                     st.error(str(ex))
             else:

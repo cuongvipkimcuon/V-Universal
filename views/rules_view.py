@@ -6,7 +6,7 @@ import streamlit as st
 from config import Config, init_services
 from ai_engine import AIService
 from utils.auth_manager import check_permission
-from utils.cache_helpers import get_bible_list_cached, invalidate_cache_and_rerun
+from utils.cache_helpers import get_bible_list_cached, invalidate_cache, full_refresh
 
 
 def render_rules_tab(project_id, persona):
@@ -56,16 +56,15 @@ def render_rules_tab(project_id, persona):
                         st.success("Đã thêm Rule (vector tự tạo).")
                         st.session_state["update_trigger"] = st.session_state.get("update_trigger", 0) + 1
                         st.session_state["rules_adding"] = False
-                        invalidate_cache_and_rerun()
+                        invalidate_cache()
                     except Exception as e:
                         payload.pop("embedding", None)
                         supabase.table("story_bible").insert(payload).execute()
                         st.success("Đã thêm.")
                         st.session_state["rules_adding"] = False
-                        invalidate_cache_and_rerun()
+                        invalidate_cache()
             if st.form_submit_button("Hủy"):
                 st.session_state["rules_adding"] = False
-                st.rerun()
 
     st.markdown("---")
     if not rules_data:
@@ -84,7 +83,7 @@ def render_rules_tab(project_id, persona):
                     try:
                         supabase.table("story_bible").delete().eq("id", entry["id"]).execute()
                         st.success("Đã xóa.")
-                        invalidate_cache_and_rerun()
+                        invalidate_cache()
                     except Exception as e:
                         st.error(str(e))
 
@@ -105,10 +104,9 @@ def render_rules_tab(project_id, persona):
                     supabase.table("story_bible").update(upd).eq("id", e["id"]).execute()
                 st.success("Đã cập nhật.")
                 del st.session_state["rules_editing"]
-                invalidate_cache_and_rerun()
+                invalidate_cache()
             if st.form_submit_button("Hủy"):
                 del st.session_state["rules_editing"]
-                st.rerun()
 
     st.markdown("---")
     with st.expander("💀 Danger Zone", expanded=False):
@@ -120,5 +118,5 @@ def render_rules_tab(project_id, persona):
                 if ids:
                     supabase.table("story_bible").delete().in_("id", ids).execute()
                     st.success("Đã xóa sạch Rules.")
-                    invalidate_cache_and_rerun()
+                    invalidate_cache()
         st.markdown("</div>", unsafe_allow_html=True)

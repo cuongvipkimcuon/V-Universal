@@ -6,7 +6,7 @@ import streamlit as st
 
 from config import init_services
 from utils.auth_manager import check_permission
-from utils.cache_helpers import get_bible_list_cached, invalidate_cache_and_rerun
+from utils.cache_helpers import get_bible_list_cached, invalidate_cache, full_refresh
 
 
 def render_relations_tab(project_id, persona):
@@ -32,7 +32,7 @@ def render_relations_tab(project_id, persona):
     can_delete = check_permission(user_id, user_email, project_id, "delete")
 
     if st.button("🔄 Refresh", key="relations_refresh_btn"):
-        invalidate_cache_and_rerun()
+        full_refresh()
 
     try:
         rel_res = supabase.table("entity_relations").select("*").eq("story_id", project_id).execute()
@@ -72,24 +72,22 @@ def render_relations_tab(project_id, persona):
                                 "description": (new_desc or "").strip(),
                             }).eq("id", rel_id).execute()
                             st.session_state.pop("rel_editing_id", None)
-                            invalidate_cache_and_rerun()
+                            invalidate_cache()
                         except Exception as ex:
                             st.error(f"Lỗi: {ex}")
                 with col_cancel:
                     if st.button("❌ Hủy", key=f"rel_cancel_{rel_id}"):
                         st.session_state.pop("rel_editing_id", None)
-                        st.rerun()
             else:
                 if desc:
                     st.markdown(desc)
                 if can_write and not editing:
                     if st.button("✏️ Sửa", key=f"rel_edit_{rel_id}"):
                         st.session_state["rel_editing_id"] = rel_id
-                        st.rerun()
             if can_delete:
                 if st.button("🗑️ Xóa", key=f"rel_del_{rel_id}"):
                     try:
                         supabase.table("entity_relations").delete().eq("id", rel_id).execute()
-                        invalidate_cache_and_rerun()
+                        invalidate_cache()
                     except Exception as ex:
                         st.error(f"Lỗi xóa: {ex}")
