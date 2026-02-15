@@ -130,7 +130,15 @@ def run_job_worker(job_id: str) -> None:
 
         update_job(job_id, "running")
 
-        if job_type == "data_analyze_bible":
+        if job_type == "data_operation_batch":
+            from core.data_operation_jobs import run_data_operations_batch
+            steps = payload.get("steps") or []
+            run_data_operations_batch(
+                story_id, user_id, steps,
+                payload.get("user_request") or label,
+                job_id=job_id,
+            )
+        elif job_type == "data_analyze_bible":
             _worker_data_analyze_bible(job_id, story_id, user_id, label, payload, post_to_chat, supabase)
         elif job_type == "data_analyze_relation":
             _worker_data_analyze_relation(job_id, story_id, user_id, label, payload, post_to_chat, supabase)
@@ -382,11 +390,22 @@ def _worker_data_analyze_chunk(
         _post_completion_to_chat(project_id, user_id, label, True, summary, None)
 
 
+_embedding_backfill_running = False
+
+
+def is_embedding_backfill_running() -> bool:
+    """True nếu đang chạy backfill embedding (tránh chạy trùng)."""
+    return _embedding_backfill_running
+
+
 def run_embedding_backfill(project_id: str, bible_limit: int = 50, chunks_limit: int = 50) -> Dict[str, int]:
     """
     Tìm story_bible và chunks có embedding null, gọi API embedding batch, cập nhật lại DB.
-    Trả về {"bible_updated": n, "chunks_updated": m}.
+    Trả về {"bible_updated": n, "chunks_updated": m}. Không chạy trùng nếu đang có backfill khác.
     """
+    global _embedding_backfill_running
+    if _embedding_backfill_running:
+        return {"bible_updated": 0, "chunks_updated": 0}
     out = {"bible_updated": 0, "chunks_updated": 0}
     if not project_id:
         return out
@@ -399,34 +418,38 @@ def run_embedding_backfill(project_id: str, bible_limit: int = 50, chunks_limit:
         supabase = services["supabase"]
     except Exception:
         return out
+    _embedding_backfill_running = True
     try:
-        r = supabase.table("story_bible").select("id, description").eq("story_id", project_id).is_("embedding", "NULL").limit(bible_limit).execute()
-        rows_bible = list(r.data or [])
-        if rows_bible:
-            texts_bible = [(row.get("description") or "").strip() or "" for row in rows_bible]
-            vectors_bible = AIService.get_embeddings_batch(texts_bible) if hasattr(AIService, "get_embeddings_batch") else []
-            for i, row in enumerate(rows_bible):
-                if i < len(vectors_bible) and vectors_bible[i]:
-                    try:
-                        supabase.table("story_bible").update({"embedding": vectors_bible[i]}).eq("id", row["id"]).execute()
-                        out["bible_updated"] += 1
-                    except Exception:
-                        pass
-    except Exception:
-        pass
-    try:
-        r = supabase.table("chunks").select("id, content").eq("story_id", project_id).is_("embedding", "NULL").limit(chunks_limit).execute()
-        rows_chunks = list(r.data or [])
-        if rows_chunks:
-            texts_chunks = [(row.get("content") or "").strip() or "" for row in rows_chunks]
-            vectors_chunks = AIService.get_embeddings_batch(texts_chunks) if hasattr(AIService, "get_embeddings_batch") else []
-            for i, row in enumerate(rows_chunks):
-                if i < len(vectors_chunks) and vectors_chunks[i]:
-                    try:
-                        supabase.table("chunks").update({"embedding": vectors_chunks[i]}).eq("id", row["id"]).execute()
-                        out["chunks_updated"] += 1
-                    except Exception:
-                        pass
-    except Exception:
-        pass
+        try:
+            r = supabase.table("story_bible").select("id, description").eq("story_id", project_id).is_("embedding", "NULL").limit(bible_limit).execute()
+            rows_bible = list(r.data or [])
+            if rows_bible:
+                texts_bible = [(row.get("description") or "").strip() or "" for row in rows_bible]
+                vectors_bible = AIService.get_embeddings_batch(texts_bible) if hasattr(AIService, "get_embeddings_batch") else []
+                for i, row in enumerate(rows_bible):
+                    if i < len(vectors_bible) and vectors_bible[i]:
+                        try:
+                            supabase.table("story_bible").update({"embedding": vectors_bible[i]}).eq("id", row["id"]).execute()
+                            out["bible_updated"] += 1
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+        try:
+            r = supabase.table("chunks").select("id, content").eq("story_id", project_id).is_("embedding", "NULL").limit(chunks_limit).execute()
+            rows_chunks = list(r.data or [])
+            if rows_chunks:
+                texts_chunks = [(row.get("content") or "").strip() or "" for row in rows_chunks]
+                vectors_chunks = AIService.get_embeddings_batch(texts_chunks) if hasattr(AIService, "get_embeddings_batch") else []
+                for i, row in enumerate(rows_chunks):
+                    if i < len(vectors_chunks) and vectors_chunks[i]:
+                        try:
+                            supabase.table("chunks").update({"embedding": vectors_chunks[i]}).eq("id", row["id"]).execute()
+                            out["chunks_updated"] += 1
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+    finally:
+        _embedding_backfill_running = False
     return out

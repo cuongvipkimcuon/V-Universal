@@ -486,7 +486,11 @@ def render_bible_tab(project_id, persona):
                     )
 
         for entry in bible_data:
-            with st.expander(f"**{entry['entity_name']}**", expanded=False):
+            has_embedding = bool(entry.get("embedding"))
+            sync_badge = "" if has_embedding else " 🔄 Chưa đồng bộ"
+            with st.expander(f"**{entry['entity_name']}**{sync_badge}", expanded=False):
+                if not has_embedding:
+                    st.caption("🔄 Chưa đồng bộ vector — sẽ được backfill tự động.")
                 st.markdown(entry.get('description', ''))
 
                 col_edit, col_delete, col_vector = st.columns(3)

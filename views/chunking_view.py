@@ -52,6 +52,11 @@ def render_chunking_tab(project_id):
             "id, content, raw_content, source_type, meta_json, arc_id, chapter_id, sort_order"
         ).eq("story_id", project_id).order("sort_order").execute()
         chunks_list = r.data or []
+        try:
+            null_emb = supabase.table("chunks").select("id").eq("story_id", project_id).is_("embedding", "NULL").execute()
+            ids_no_embedding = {row["id"] for row in (null_emb.data or []) if row.get("id")}
+        except Exception:
+            ids_no_embedding = set()
         st.metric("Tổng chunks", len(chunks_list))
         for c in chunks_list:
             cid = c.get("id")
@@ -66,8 +71,11 @@ def render_chunking_tab(project_id):
                 or str(cid or "")[:8]
             )
             short = (content[:60] + "…") if len(content) > 60 else content
+            sync_badge = " 🔄 Chưa đồng bộ" if cid in ids_no_embedding else ""
 
-            with st.expander(f"Chunk: {label} — {short}", expanded=False):
+            with st.expander(f"Chunk: {label} — {short}{sync_badge}", expanded=False):
+                if cid in ids_no_embedding:
+                    st.caption("🔄 Chưa đồng bộ vector — sẽ được backfill tự động.")
                 st.text(content[:500] + ("…" if len(content) > 500 else ""))
 
                 if can_write:

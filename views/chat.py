@@ -140,27 +140,18 @@ def _start_data_operation_background(
                 }).execute()
             _after_save_history_v_work(project_id, user_id, active_persona.get("role", ""))
         if steps:
-            from core.data_operation_jobs import run_data_operations_batch
-            from core.background_jobs import create_job
+            from core.background_jobs import create_job, run_job_worker
+            label = (user_request[:200] if user_request else "Data operation batch")
             job_id = create_job(
                 story_id=project_id,
                 user_id=user_id,
                 job_type="data_operation_batch",
-                label=(user_request[:200] if user_request else "Data operation batch"),
-                payload={},
+                label=label,
+                payload={"steps": steps, "user_request": user_request or label},
                 post_to_chat=False,
             )
-            threading.Thread(
-                target=run_data_operations_batch,
-                kwargs={
-                    "project_id": project_id,
-                    "user_id": user_id,
-                    "steps": steps,
-                    "user_request": user_request,
-                    "job_id": job_id,
-                },
-                daemon=True,
-            ).start()
+            if job_id:
+                threading.Thread(target=run_job_worker, args=(job_id,), daemon=True).start()
         else:
             from core.data_operation_jobs import run_data_operation
             threading.Thread(

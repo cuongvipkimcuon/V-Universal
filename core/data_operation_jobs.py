@@ -1,11 +1,13 @@
 # core/data_operation_jobs.py - Chạy thao tác extract/update/delete Bible, Relation, Timeline, Chunking (ngầm) và gửi tin nhắn hoàn thành vào chat V Work.
 """Chạy trong thread sau khi user xác nhận. Ghi audit vào data_operation_log và tin nhắn hoàn thành vào chat_history."""
+import time
 from datetime import datetime, timezone
 from typing import Optional, List, Tuple
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# Tối đa 7 chương / lô để tránh tràn token khi fetch + xử lý.
+# Tối đa 7 chương / lô (fallback khi không ước lượng được token).
 MAX_CHAPTERS_PER_BATCH = 7
+# Thứ tự chạy target: Bible trước, Relation cuối để relation dựa trên Bible đã có.
+ORDERED_TARGETS = ["bible", "timeline", "chunking", "relation"]
 
 # Lazy imports inside run_data_operation để tránh circular / streamlit khi import top-level.
 
@@ -148,36 +150,96 @@ def run_data_operation_chunk(
         chapters = (ch_rows.data or []) if ch_rows.data else []
         by_num = {int(c["chapter_number"]): c for c in chapters if c.get("chapter_number") is not None}
 
-        for ch_num in chapter_numbers:
-            chapter = by_num.get(ch_num)
-            if not chapter:
-                failed.append(f"{target} ch.{ch_num}: không tìm thấy chương")
-                continue
-            chapter_id = chapter.get("id")
-            content = (chapter.get("content") or "").strip()
-            chapter_label = (chapter.get("title") or "").strip() or f"Chương {ch_num}"
-            arc_id = chapter.get("arc_id")
-            try:
-                if operation_type == "delete":
-                    _do_delete(supabase, project_id, target, ch_num, chapter_id)
-                elif operation_type in ("extract", "update"):
-                    if not content and target in ("bible", "relation", "timeline", "chunking"):
+        # Chia lô theo token để tránh lỗi gói tối đa / lag (chương vượt giới hạn bỏ qua, xử lý lần sau)
+        try:
+            from config import Config
+            from ai_engine import AIService
+            max_tokens = getattr(Config, "DATA_BATCH_MAX_TOKENS", 50000)
+            token_per_ch = {}
+            for ch_num in chapter_numbers:
+                ch = by_num.get(ch_num)
+                if not ch:
+                    continue
+                content = (ch.get("content") or "").strip()
+                token_per_ch[ch_num] = AIService.estimate_tokens(content) if content else 0
+            sub_batches = []
+            current_batch = []
+            current_tokens = 0
+            for ch_num in chapter_numbers:
+                tok = token_per_ch.get(ch_num, 0)
+                if tok > max_tokens:
+                    failed.append(f"{target} ch.{ch_num}: vượt giới hạn token ({tok}), bỏ qua lần sau.")
+                    continue
+                if current_tokens + tok > max_tokens and current_batch:
+                    sub_batches.append(current_batch)
+                    current_batch = []
+                    current_tokens = 0
+                current_batch.append(ch_num)
+                current_tokens += tok
+            if current_batch:
+                sub_batches.append(current_batch)
+        except Exception:
+            sub_batches = [[ch] for ch in chapter_numbers]
+
+        for sub in sub_batches:
+            if target == "bible" and operation_type in ("extract", "update"):
+                contents_list = []
+                for ch_num in sub:
+                    chapter = by_num.get(ch_num)
+                    if not chapter:
+                        failed.append(f"{target} ch.{ch_num}: không tìm thấy chương")
+                        continue
+                    content = (chapter.get("content") or "").strip()
+                    if not content:
                         failed.append(f"{target} ch.{ch_num}: chương không có nội dung")
                         continue
-                    if target == "bible":
-                        _do_extract_bible(supabase, project_id, ch_num, content)
-                    elif target == "relation":
-                        _do_extract_relation(supabase, project_id, ch_num, content)
-                    elif target == "timeline":
-                        _do_extract_timeline(supabase, project_id, chapter_id, ch_num, chapter_label, content)
-                    elif target == "chunking":
-                        _do_extract_chunking(supabase, project_id, chapter_id, arc_id, ch_num, content)
-                    else:
-                        failed.append(f"{target} ch.{ch_num}: đối tượng không hỗ trợ")
-                else:
-                    failed.append(f"ch.{ch_num}: loại thao tác không hỗ trợ {operation_type}")
-            except Exception as e:
-                failed.append(f"{target} ch.{ch_num}: {str(e)[:150]}")
+                    contents_list.append((ch_num, content))
+                if contents_list:
+                    try:
+                        _do_extract_bible_batch(supabase, project_id, contents_list)
+                    except Exception as e:
+                        failed.append(f"bible batch: {str(e)[:150]}")
+            elif target == "chunking" and operation_type in ("extract", "update"):
+                try:
+                    _do_extract_chunking_batch(supabase, project_id, sub, by_num, failed, target)
+                except Exception as e:
+                    failed.append(f"chunking batch: {str(e)[:150]}")
+            else:
+                for ch_num in sub:
+                    chapter = by_num.get(ch_num)
+                    if not chapter:
+                        failed.append(f"{target} ch.{ch_num}: không tìm thấy chương")
+                        continue
+                    chapter_id = chapter.get("id")
+                    content = (chapter.get("content") or "").strip()
+                    chapter_label = (chapter.get("title") or "").strip() or f"Chương {ch_num}"
+                    arc_id = chapter.get("arc_id")
+                    try:
+                        if operation_type == "delete":
+                            _do_delete(supabase, project_id, target, ch_num, chapter_id)
+                        elif operation_type in ("extract", "update"):
+                            if not content and target in ("bible", "relation", "timeline", "chunking"):
+                                failed.append(f"{target} ch.{ch_num}: chương không có nội dung")
+                                continue
+                            if target == "relation":
+                                _do_extract_relation(supabase, project_id, ch_num, content)
+                            elif target == "timeline":
+                                _do_extract_timeline(supabase, project_id, chapter_id, ch_num, chapter_label, content)
+                            else:
+                                failed.append(f"{target} ch.{ch_num}: đối tượng không hỗ trợ")
+                        else:
+                            failed.append(f"ch.{ch_num}: loại thao tác không hỗ trợ {operation_type}")
+                    except Exception as e:
+                        failed.append(f"{target} ch.{ch_num}: {str(e)[:150]}")
+            # Độ trễ theo batch (sau mỗi sub_batch), tránh quá tải API
+            if operation_type in ("extract", "update"):
+                try:
+                    from config import Config
+                    delay = getattr(Config, "DATA_OPERATION_DELAY_SEC", 7)
+                    if delay and delay > 0:
+                        time.sleep(delay)
+                except Exception:
+                    pass
 
         _update_log_status(supabase, log_id, "failed" if failed else "completed", "; ".join(failed[:3]) if failed else None)
         if post_completion_message and not failed:
@@ -337,28 +399,19 @@ def run_data_operations_batch(
 
     all_failed: List[str] = []
     total_ops = 0
-    max_workers = min(4, len(grouped))
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(
-                _run_one_target_sequential,
-                project_id,
-                user_id,
-                op_type,
-                target,
-                list_of_chapter_lists,
-                user_request,
-            ): (op_type, target)
-            for (op_type, target), list_of_chapter_lists in grouped.items()
-        }
-        for future in as_completed(futures):
+    # Chạy theo thứ tự cố định: bible → timeline → chunking → relation (relation cuối để dựa trên Bible đã có)
+    for target in ORDERED_TARGETS:
+        for (op_type, t), list_of_chapter_lists in list(grouped.items()):
+            if t != target:
+                continue
             try:
-                count, failed = future.result()
+                count, failed = _run_one_target_sequential(
+                    project_id, user_id, op_type, t, list_of_chapter_lists, user_request
+                )
                 total_ops += count
                 all_failed.extend(failed)
             except Exception as e:
-                op_type, target = futures[future]
-                all_failed.append(f"{op_type} {target}: {str(e)[:200]}")
+                all_failed.append(f"{op_type} {t}: {str(e)[:200]}")
 
     from config import init_services
     services = init_services()
@@ -417,17 +470,21 @@ def _get_entity_ids_for_chapter(supabase, project_id: str, chap_num: int):
         return []
 
 
-def _do_extract_bible(supabase, project_id: str, chap_num: int, content: str):
-    from views.data_analyze import _run_extract_on_content
+def _get_extract_persona():
     from persona import PersonaSystem
     from config import Config
-
     try:
         personas = PersonaSystem.get_available_personas()
-        ext_persona = PersonaSystem.get_persona(personas[0] if personas else "Writer")
+        return PersonaSystem.get_persona(personas[0] if personas else "Writer")
     except Exception:
-        ext_persona = {"extractor_prompt": "Trích xuất các thực thể quan trọng từ nội dung trên (nhân vật, địa điểm, sự kiện, đồ vật)."}
+        return {"extractor_prompt": "Trích xuất các thực thể quan trọng từ nội dung trên (nhân vật, địa điểm, sự kiện, đồ vật)."}
 
+
+def _do_extract_bible(supabase, project_id: str, chap_num: int, content: str):
+    from views.data_analyze import _run_extract_on_content
+    from config import Config
+
+    ext_persona = _get_extract_persona()
     r = supabase.table("story_bible").select("id").eq("story_id", project_id).eq("source_chapter", chap_num).execute()
     ids = [x["id"] for x in (r.data or []) if x.get("id")]
     if ids:
@@ -455,6 +512,43 @@ def _do_extract_bible(supabase, project_id: str, chap_num: int, content: str):
             "source_chapter": chap_num,
         }
         supabase.table("story_bible").insert(payload).execute()
+
+
+def _do_extract_bible_batch(supabase, project_id: str, contents_list: List[Tuple[int, str]]) -> None:
+    """Một lần gọi API cho nhiều chương; contents_list = [(ch_num, content), ...]."""
+    if not contents_list:
+        return
+    from views.data_analyze import _run_extract_bible_batch
+    from config import Config
+
+    ext_persona = _get_extract_persona()
+    for ch_num, _ in contents_list:
+        r = supabase.table("story_bible").select("id").eq("story_id", project_id).eq("source_chapter", ch_num).execute()
+        ids = [x["id"] for x in (r.data or []) if x.get("id")]
+        if ids:
+            supabase.table("story_bible").delete().in_("id", ids).execute()
+
+    result = _run_extract_bible_batch(contents_list, ext_persona, project_id, supabase)
+    for ch_num, items in result.items():
+        if not items:
+            continue
+        for item in items:
+            desc = (item.get("description") or "").strip()
+            raw_name = (item.get("entity_name") or "Unknown").strip()
+            raw_type_str = (item.get("type") or "OTHER").strip()
+            prefix_key = Config.resolve_prefix_for_bible(raw_type_str)
+            final_name = f"[{prefix_key}] {raw_name}" if not raw_name.startswith("[") else raw_name
+            if desc:
+                payload = {
+                    "story_id": project_id,
+                    "entity_name": final_name,
+                    "description": desc,
+                    "source_chapter": ch_num,
+                }
+                try:
+                    supabase.table("story_bible").insert(payload).execute()
+                except Exception:
+                    pass
 
 
 def _do_extract_relation(supabase, project_id: str, chap_num: int, content: str):
@@ -536,3 +630,59 @@ def _do_extract_chunking(supabase, project_id: str, chapter_id, arc_id, chap_num
             "sort_order": chk.get("order", idx + 1),
         }
         supabase.table("chunks").insert(payload).execute()
+
+
+def _do_extract_chunking_batch(supabase, project_id: str, sub: List[int], by_num: dict, failed: List[str], target: str) -> None:
+    """Một lần gọi LLM (analyze_split_strategy) cho cả sub_batch, rồi execute_split_logic (không LLM) từng chương."""
+    from ai_engine import analyze_split_strategy, execute_split_logic
+
+    if not sub:
+        return
+    first_ch_num = sub[0]
+    first_chapter = by_num.get(first_ch_num)
+    if not first_chapter:
+        failed.append(f"{target} ch.{first_ch_num}: không tìm thấy chương")
+        return
+    first_content = (first_chapter.get("content") or "").strip()
+    if not first_content:
+        failed.append(f"{target} ch.{first_ch_num}: chương không có nội dung")
+        return
+    strategy = analyze_split_strategy(first_content, file_type="story", context_hint="Đoạn văn có ý nghĩa")
+    stype = strategy.get("split_type", "by_length")
+    sval = strategy.get("split_value", "2000")
+
+    for ch_num in sub:
+        chapter = by_num.get(ch_num)
+        if not chapter:
+            failed.append(f"{target} ch.{ch_num}: không tìm thấy chương")
+            continue
+        chapter_id = chapter.get("id")
+        arc_id = chapter.get("arc_id")
+        content = (chapter.get("content") or "").strip()
+        if not content:
+            failed.append(f"{target} ch.{ch_num}: chương không có nội dung")
+            continue
+        r = supabase.table("chunks").select("id").eq("story_id", project_id).eq("chapter_id", chapter_id).execute()
+        ids = [x["id"] for x in (r.data or []) if x.get("id")]
+        if ids:
+            supabase.table("chunks").delete().in_("id", ids).execute()
+        chunks_list = execute_split_logic(content, stype, sval)
+        if not chunks_list:
+            chunks_list = execute_split_logic(content, "by_length", "2000")
+        for idx, chk in enumerate(chunks_list or []):
+            txt = (chk.get("content") or "").strip()
+            if not txt:
+                continue
+            payload = {
+                "story_id": project_id,
+                "chapter_id": chapter_id,
+                "arc_id": arc_id,
+                "content": txt,
+                "raw_content": txt,
+                "meta_json": {"source": "data_operation_jobs", "chapter": ch_num, "title": chk.get("title", "")},
+                "sort_order": chk.get("order", idx + 1),
+            }
+            try:
+                supabase.table("chunks").insert(payload).execute()
+            except Exception as e:
+                failed.append(f"{target} ch.{ch_num}: {str(e)[:100]}")

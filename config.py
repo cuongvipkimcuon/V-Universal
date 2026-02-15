@@ -79,6 +79,10 @@ class Config:
 
     # Context size (token limit) cho Chat - Settings "Context Size"
     CONTEXT_SIZE_TOKENS = {"low": 15000, "medium": 60000, "high": 123000, "max": None}
+    # Token tối đa cho một lô Data Analyze (Bible/Chunk...) — tránh lỗi gói tối đa / lag
+    DATA_BATCH_MAX_TOKENS = 50000
+    # Độ trễ tối thiểu (giây) giữa hai lệnh gọi API khi xử lý theo khoảng chương — tránh quá tải API (5–10s)
+    DATA_OPERATION_DELAY_SEC = 7
 
     @classmethod
     def get_prefixes(cls) -> list:

@@ -126,6 +126,60 @@ Nếu không tìm thấy: {{ "items": [] }}. Chỉ trả về JSON."""
     return list(unique_dict.values())
 
 
+def _run_extract_bible_batch(contents_list, ext_persona, project_id, supabase=None):
+    """
+    Extract Bible cho nhiều chương trong một lần gọi API.
+    contents_list: [(ch_num, content), ...]. Trả về {ch_num: [item, ...]} (mỗi item có entity_name, type, description).
+    """
+    if not contents_list:
+        return {}
+    from ai_engine import AIService
+    allowed_keys = Config.get_allowed_prefix_keys_for_extract()
+    prefix_list_str = ", ".join(allowed_keys) + ", OTHER" if allowed_keys else "OTHER"
+    prompt_parts = [
+        "Nội dung nhiều chương (mỗi chương bắt đầu bằng CHƯƠNG N:). Trích xuất thực thể riêng theo từng chương.",
+        "",
+        ext_persona.get("extractor_prompt", "Trích xuất các thực thể quan trọng: nhân vật, địa điểm, sự kiện, đồ vật."),
+        "",
+        "---",
+    ]
+    for ch_num, content in contents_list:
+        if not (content or str(content).strip()):
+            continue
+        prompt_parts.append(f"CHƯƠNG {ch_num}:")
+        prompt_parts.append(str(content).strip()[:120000])
+        prompt_parts.append("")
+    prompt_parts.append("---")
+    prompt_parts.append(
+        f'⛔️ Trả về ĐÚNG MỘT JSON với key "chapters", value là mảng object: mỗi object có "chapter" (số chương) và "items" (mảng thực thể). '
+        f'Mỗi thực thể: "entity_name", "type" (đúng MỘT trong: {prefix_list_str}), "description" (tóm tắt dưới 50 từ). '
+        'Ví dụ: {"chapters": [{"chapter": 1, "items": [{"entity_name": "A", "type": "CHARACTER", "description": "..."}]}, {"chapter": 2, "items": []}]}. Chỉ trả về JSON.'
+    )
+    full_prompt = "\n".join(prompt_parts)
+    out = {ch_num: [] for ch_num, _ in contents_list}
+    try:
+        resp = AIService.call_openrouter(
+            messages=[{"role": "user", "content": full_prompt}],
+            model=_get_default_tool_model(),
+            temperature=0.0,
+            max_tokens=16000,
+            response_format={"type": "json_object"},
+        )
+        if not resp or not resp.choices:
+            return out
+        raw = resp.choices[0].message.content.strip()
+        obj = json.loads(AIService.clean_json_text(raw))
+        chapters = obj.get("chapters") if isinstance(obj, dict) else []
+        for block in chapters or []:
+            ch = block.get("chapter")
+            items = block.get("items")
+            if ch is not None and isinstance(items, list):
+                out[int(ch)] = items
+    except Exception:
+        pass
+    return out
+
+
 def render_data_analyze_tab(project_id):
     if not project_id:
         st.info("📁 Vui lòng chọn Project ở thanh bên trái.")
@@ -192,12 +246,16 @@ def _render_timeline_section(project_id, content, chap_num, selected_row, supaba
     can_write = check_permission(uid, uem, project_id, "write")
     if st.session_state.get("da_confirm_delete_timeline_chapter") and can_write:
         if st.button("🤖 AI trích xuất timeline từ chương này", type="primary", key="da_timeline_extract_btn"):
+            label = f"Timeline chương {chap_num}"
             job_id = create_job(
                 story_id=project_id,
                 user_id=uid or None,
-                job_type="data_analyze_timeline",
-                label=f"Timeline chương {chap_num}",
-                payload={"chapter_number": chap_num, "chapter_label": chapter_label},
+                job_type="data_operation_batch",
+                label=label,
+                payload={
+                    "steps": [{"operation_type": "extract", "target": "timeline", "chapter_number": chap_num}],
+                    "user_request": label,
+                },
                 post_to_chat=False,
             )
             if job_id:
@@ -210,7 +268,10 @@ def _render_timeline_section(project_id, content, chap_num, selected_row, supaba
 
 
 def _render_extract_bible_relations_chunking(project_id, content, chap_num, selected_row, file_options, selected_file, supabase):
-    """Nội dung tab Extract Bible / Relations / Chunking (giữ nguyên logic cũ)."""
+    """Nội dung tab Extract Bible / Relations / Chunking (thống nhất qua data_operation_batch)."""
+    uid = getattr(st.session_state.get("user"), "id", None) or ""
+    uem = getattr(st.session_state.get("user"), "email", None) or ""
+    can_write = check_permission(uid, uem, project_id, "write")
     # --- Section 1: Extract Bible ---
     st.markdown("---")
     st.subheader("📥 Extract Bible")
@@ -218,21 +279,49 @@ def _render_extract_bible_relations_chunking(project_id, content, chap_num, sele
     da_persona_key = st.selectbox("🎭 Persona cho Extract", personas_avail, key="da_persona_select")
     ext_persona = PersonaSystem.get_persona(da_persona_key)
 
+    st.caption("Chạy đủ 4 bước (Bible → Timeline → Chunk → Relation) cho chương này trong một job; delay theo batch.")
+    if st.session_state.get("da_confirm_delete_bible_chapter") and can_write:
+        if st.button("▶️ Đủ 4 bước cho chương này", type="primary", key="da_full_four_btn"):
+            label = f"Đủ 4 bước chương {chap_num}"
+            job_id = create_job(
+                story_id=project_id,
+                user_id=uid or None,
+                job_type="data_operation_batch",
+                label=label,
+                payload={
+                    "steps": [
+                        {"operation_type": "extract", "target": "bible", "chapter_number": chap_num},
+                        {"operation_type": "extract", "target": "timeline", "chapter_number": chap_num},
+                        {"operation_type": "extract", "target": "chunking", "chapter_number": chap_num},
+                        {"operation_type": "extract", "target": "relation", "chapter_number": chap_num},
+                    ],
+                    "user_request": label,
+                },
+                post_to_chat=False,
+            )
+            if job_id:
+                threading.Thread(target=run_job_worker, args=(job_id,), daemon=True).start()
+                st.toast("Queued. Check Background Jobs tab for status.")
+                st.session_state["update_trigger"] = st.session_state.get("update_trigger", 0) + 1
+                st.rerun()
+            else:
+                st.error("Không tạo được job.")
     st.checkbox(
         "⚠️ Tôi hiểu: Bắt đầu phân tích sẽ **xóa toàn bộ** Bible entries đã gắn với chương này (source_chapter = chương đang chọn) trước khi chạy extract.",
         key="da_confirm_delete_bible_chapter",
     )
-    uid = getattr(st.session_state.get("user"), "id", None) or ""
-    uem = getattr(st.session_state.get("user"), "email", None) or ""
-    can_write = check_permission(uid, uem, project_id, "write")
     if st.session_state.get("da_confirm_delete_bible_chapter") and can_write:
         if st.button("▶️ Bắt đầu phân tích", type="primary", key="da_extract_start_btn"):
+            label = f"Extract Bible chương {chap_num}"
             job_id = create_job(
                 story_id=project_id,
                 user_id=uid or None,
-                job_type="data_analyze_bible",
-                label=f"Extract Bible chương {chap_num}",
-                payload={"chapter_number": chap_num, "persona_key": da_persona_key, "exclude_existing": False},
+                job_type="data_operation_batch",
+                label=label,
+                payload={
+                    "steps": [{"operation_type": "extract", "target": "bible", "chapter_number": chap_num}],
+                    "user_request": label,
+                },
                 post_to_chat=False,
             )
             if job_id:
@@ -271,12 +360,16 @@ def _render_extract_bible_relations_chunking(project_id, content, chap_num, sele
     )
     if st.session_state.get("da_confirm_delete_relation_chapter") and can_write:
         if st.button("🔄 Gợi ý quan hệ từ nội dung chương", key="da_suggest_relations"):
+            label = f"Gợi ý quan hệ chương {chap_num}"
             job_id = create_job(
                 story_id=project_id,
                 user_id=uid or None,
-                job_type="data_analyze_relation",
-                label=f"Gợi ý quan hệ chương {chap_num}",
-                payload={"chapter_number": chap_num, "only_new": False},
+                job_type="data_operation_batch",
+                label=label,
+                payload={
+                    "steps": [{"operation_type": "extract", "target": "relation", "chapter_number": chap_num}],
+                    "user_request": label,
+                },
                 post_to_chat=False,
             )
             if job_id:
@@ -312,12 +405,16 @@ def _render_extract_bible_relations_chunking(project_id, content, chap_num, sele
     )
     if st.session_state.get("da_confirm_delete_chunks_chapter") and can_write:
         if st.button("📄 Phân tích Chunk", type="primary", key="da_chunk_analyze"):
+            label = f"Phân tích Chunk chương {chap_num}"
             job_id = create_job(
                 story_id=project_id,
                 user_id=uid or None,
-                job_type="data_analyze_chunk",
-                label=f"Phân tích Chunk chương {chap_num}",
-                payload={"chapter_number": chap_num},
+                job_type="data_operation_batch",
+                label=label,
+                payload={
+                    "steps": [{"operation_type": "extract", "target": "chunking", "chapter_number": chap_num}],
+                    "user_request": label,
+                },
                 post_to_chat=False,
             )
             if job_id:

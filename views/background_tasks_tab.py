@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 import streamlit as st
 
 from config import init_services
-from core.background_jobs import list_jobs, run_embedding_backfill
+from core.background_jobs import list_jobs, run_embedding_backfill, is_embedding_backfill_running
 
 
 def render_background_tasks_tab(project_id):
@@ -31,7 +31,7 @@ def render_background_tasks_tab(project_id):
     key_last_backfill = "bg_tasks_last_embedding_backfill"
     if key_last_backfill not in st.session_state:
         st.session_state[key_last_backfill] = time.time()
-    if time.time() - st.session_state[key_last_backfill] >= BACKFILL_INTERVAL_SEC:
+    if time.time() - st.session_state[key_last_backfill] >= BACKFILL_INTERVAL_SEC and not is_embedding_backfill_running():
         st.session_state[key_last_backfill] = time.time()
         pid = project_id
 
