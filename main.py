@@ -42,12 +42,18 @@ st.markdown("""
     [data-testid="stTextInput"] input:focus { box-shadow: 0 0 0 2px rgba(124, 58, 237, 0.2); border-color: #7c3aed; }
     .stButton > button { border-radius: 8px; font-weight: 500; transition: opacity 0.2s; }
     .stButton > button:hover { opacity: 0.9; }
-    /* Tab bar: 2 hàng nút giống tab (nền xám, pill, tab chọn màu tím) */
-    #main-tab-row + div, #sub-tab-row + div { gap: 8px !important; background: #f1f5f9 !important; padding: 10px !important; border-radius: 10px !important; margin-bottom: 12px !important; flex-wrap: wrap !important; }
-    #main-tab-row + div .stButton > button, #sub-tab-row + div .stButton > button { border-radius: 8px !important; font-weight: 500 !important; transition: all 0.2s !important; }
-    #main-tab-row + div .stButton > button[kind="primary"], #sub-tab-row + div .stButton > button[kind="primary"] { background: linear-gradient(135deg, #6d28d9 0%, #7c3aed 100%) !important; color: white !important; border: none !important; box-shadow: 0 1px 3px rgba(109,40,217,0.3); }
-    #main-tab-row + div .stButton > button[kind="secondary"], #sub-tab-row + div .stButton > button[kind="secondary"] { background: white !important; color: #475569 !important; border: 1px solid #e2e8f0 !important; }
-    #main-tab-row + div .stButton > button[kind="secondary"]:hover, #sub-tab-row + div .stButton > button[kind="secondary"]:hover { background: #f8fafc !important; border-color: #c4b5fd !important; color: #6d28d9 !important; }
+    /* Tab chính: to, nổi bật, tối đa 4/hàng */
+    #main-tab-row + div { gap: 10px !important; background: linear-gradient(135deg, #4c1d95 0%, #5b21b6 0.5%, #6d28d9 100%) !important; padding: 12px 14px !important; border-radius: 12px !important; margin-bottom: 20px !important; flex-wrap: wrap !important; box-shadow: 0 2px 8px rgba(109,40,217,0.25); }
+    #main-tab-row + div .stButton > button { border-radius: 10px !important; font-weight: 600 !important; font-size: 0.95rem !important; transition: all 0.2s !important; padding: 0.5rem 1rem !important; }
+    #main-tab-row + div .stButton > button[kind="primary"] { background: white !important; color: #5b21b6 !important; border: none !important; box-shadow: 0 1px 4px rgba(0,0,0,0.15); }
+    #main-tab-row + div .stButton > button[kind="secondary"] { background: rgba(255,255,255,0.2) !important; color: rgba(255,255,255,0.95) !important; border: 1px solid rgba(255,255,255,0.4) !important; }
+    #main-tab-row + div .stButton > button[kind="secondary"]:hover { background: rgba(255,255,255,0.35) !important; color: white !important; border-color: rgba(255,255,255,0.6) !important; }
+    /* Tab phụ: nhỏ hơn, tối đa 4/hàng, xuống hàng nếu dư; mỗi hàng cùng style */
+    .sub-tab-row-marker + div { gap: 8px !important; background: #f1f5f9 !important; padding: 10px !important; border-radius: 10px !important; margin-bottom: 8px !important; flex-wrap: wrap !important; }
+    .sub-tab-row-marker + div .stButton > button { border-radius: 8px !important; font-weight: 500 !important; font-size: 0.875rem !important; transition: all 0.2s !important; }
+    .sub-tab-row-marker + div .stButton > button[kind="primary"] { background: linear-gradient(135deg, #6d28d9 0%, #7c3aed 100%) !important; color: white !important; border: none !important; box-shadow: 0 1px 3px rgba(109,40,217,0.3); }
+    .sub-tab-row-marker + div .stButton > button[kind="secondary"] { background: white !important; color: #475569 !important; border: 1px solid #e2e8f0 !important; }
+    .sub-tab-row-marker + div .stButton > button[kind="secondary"]:hover { background: #f8fafc !important; border-color: #c4b5fd !important; color: #6d28d9 !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -187,12 +193,21 @@ def main():
         sub_idx = max(0, min(st.session_state[sub_key], len(subs) - 1))
 
         st.markdown('<div id="sub-tab-row"></div>', unsafe_allow_html=True)
-        cols_sub = st.columns([1] * len(sub_labels))
-        for i, (col, label) in enumerate(zip(cols_sub, sub_labels)):
-            with col:
-                if st.button(label, key="sub_%s_%d" % (main_tab_key, i), type="primary" if sub_idx == i else "secondary", use_container_width=True):
-                    st.session_state[sub_key] = i
-                    st.rerun()
+        TABS_PER_ROW = 4
+        for row_start in range(0, len(sub_labels), TABS_PER_ROW):
+            st.markdown('<div class="sub-tab-row-marker"></div>', unsafe_allow_html=True)
+            cols_sub = st.columns(TABS_PER_ROW)
+            for j in range(TABS_PER_ROW):
+                i = row_start + j
+                if i >= len(sub_labels):
+                    with cols_sub[j]:
+                        st.write("")
+                    continue
+                with cols_sub[j]:
+                    label = sub_labels[i]
+                    if st.button(label, key="sub_%s_%d" % (main_tab_key, i), type="primary" if sub_idx == i else "secondary", use_container_width=True):
+                        st.session_state[sub_key] = i
+                        st.rerun()
 
         sub_id, _, fn_name, needs_persona = subs[sub_idx]
         render_fn = _get_render_fn(fn_name)
