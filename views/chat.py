@@ -982,6 +982,11 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
 
                             if 'user' in st.session_state:
                                 CostManager.update_budget(st.session_state.user.id, cost)
+                                try:
+                                    from utils.cache_helpers import invalidate_cache
+                                    invalidate_cache()
+                                except Exception:
+                                    pass
 
                             if full_response_text:
                                 if is_v_home:

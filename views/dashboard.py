@@ -184,9 +184,9 @@ def render_dashboard_tab(project_id):
                 if st.button("✅ YES, DELETE", type="primary", use_container_width=True):
                     try:
                         supabase.table("stories").delete().eq("id", project_id).execute()
-
+                        from utils.cache_helpers import invalidate_cache
+                        invalidate_cache()
                         st.success("Project deleted! Bấm Refresh (sidebar) để về màn hình chọn project.")
-
                         st.session_state['current_project'] = None
                         st.session_state['project_id'] = None
                         st.session_state['confirm_delete_project'] = False

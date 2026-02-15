@@ -1,10 +1,9 @@
 import time
 import streamlit as st
 
-from config import Config, init_services, CostManager
+from config import Config, init_services
 from persona import PersonaSystem
-from utils.auth_manager import get_user_projects
-from utils.cache_helpers import full_refresh
+from utils.cache_helpers import full_refresh, get_user_projects_cached, get_user_budget_cached, invalidate_cache
 
 
 def render_sidebar(session_manager):
@@ -14,8 +13,8 @@ def render_sidebar(session_manager):
         if 'user' in st.session_state and st.session_state.user:
             user_email = st.session_state.user.email
             st.markdown(f"_{user_email.split('@')[0]}_", unsafe_allow_html=True)
-
-            budget = CostManager.get_user_budget(st.session_state.user.id)
+            _trigger = st.session_state.get("update_trigger", 0)
+            budget = get_user_budget_cached(st.session_state.user.id, _trigger)
             col1, col2 = st.columns(2)
             with col1:
                 st.metric("💰 Credits", f"${budget.get('remaining_credits', 0):.2f}")
@@ -27,9 +26,9 @@ def render_sidebar(session_manager):
         st.subheader("📂 Projects")
         services = init_services()
         supabase = services['supabase']
-
+        _trigger = st.session_state.get("update_trigger", 0)
         if 'user' in st.session_state and st.session_state.user:
-            projects = get_user_projects(st.session_state.user.id, st.session_state.user.email)
+            projects = get_user_projects_cached(st.session_state.user.id, st.session_state.user.email or "", _trigger)
         else:
             projects = []
 
@@ -105,6 +104,7 @@ def render_sidebar(session_manager):
                             "category": "Writer",
                             "user_id": st.session_state.user.id
                         }).execute()
+                        invalidate_cache()
                         st.success("Project created!")
                         st.session_state['show_new_project'] = False
                         st.rerun()

@@ -14,7 +14,7 @@ from ai_engine import (
     _get_default_tool_model,
 )
 from utils.auth_manager import check_permission
-from utils.cache_helpers import get_chapters_cached
+from utils.cache_helpers import get_chapters_cached, get_chapter_content_cached
 from persona import PersonaSystem
 from core.background_jobs import create_job, run_job_worker
 
@@ -208,8 +208,8 @@ def render_data_analyze_tab(project_id):
         key="da_chapter_select",
     )
     chap_num = file_options.get(selected_file, 1)
-    res = supabase.table("chapters").select("*").eq("story_id", project_id).eq("chapter_number", chap_num).limit(1).execute()
-    selected_row = res.data[0] if res.data and len(res.data) > 0 else None
+    _trigger = st.session_state.get("update_trigger", 0)
+    selected_row = get_chapter_content_cached(project_id, chap_num, _trigger)
     content = (selected_row.get("content") or "").strip() if selected_row else ""
 
     if not content:

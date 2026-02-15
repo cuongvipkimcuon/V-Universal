@@ -49,6 +49,32 @@ def get_bible_list_cached(project_id: str, update_trigger: int = 0):
         return []
 
 
+@st.cache_data(ttl=300)
+def get_chapter_content_cached(project_id: str, chapter_number: int, update_trigger: int = 0):
+    """Một chương (chapters row) theo project_id + chapter_number. Cho Review / Data Analyze."""
+    if not project_id or chapter_number is None:
+        return None
+    try:
+        from config import init_services
+        services = init_services()
+        if not services:
+            return None
+        r = (
+            services["supabase"]
+            .table("chapters")
+            .select("*")
+            .eq("story_id", project_id)
+            .eq("chapter_number", chapter_number)
+            .limit(1)
+            .execute()
+        )
+        if r.data and len(r.data) > 0:
+            return dict(r.data[0])
+        return None
+    except Exception:
+        return None
+
+
 def invalidate_cache():
     """Sau khi xóa/ghi DB: chỉ tăng update_trigger (lần chạy sau sẽ cache miss). Không clear cache, không rerun. User bấm Refresh nếu muốn xem ngay."""
     st.session_state["update_trigger"] = st.session_state.get("update_trigger", 0) + 1
@@ -64,6 +90,30 @@ def full_refresh():
     st.cache_data.clear()
     st.session_state["update_trigger"] = st.session_state.get("update_trigger", 0) + 1
     st.rerun()
+
+
+@st.cache_data(ttl=60)
+def get_user_projects_cached(user_id: str, user_email: str, update_trigger: int = 0):
+    """Danh sách project của user (owner + shared). Invalidate khi tạo/xóa project (invalidate_cache)."""
+    if not user_id and not user_email:
+        return []
+    try:
+        from utils.auth_manager import get_user_projects
+        return get_user_projects(user_id or "", user_email or "")
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=60)
+def get_user_budget_cached(user_id: str, update_trigger: int = 0):
+    """Budget user (credits). Invalidate sau khi dùng credit (invalidate_cache) hoặc Refresh."""
+    if not user_id:
+        return {"total_credits": 100.0, "used_credits": 0.0, "remaining_credits": 100.0}
+    try:
+        from config import CostManager
+        return CostManager.get_user_budget(user_id)
+    except Exception:
+        return {"total_credits": 100.0, "used_credits": 0.0, "remaining_credits": 100.0}
 
 
 @st.cache_data(ttl=300)

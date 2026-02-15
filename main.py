@@ -1,34 +1,14 @@
 """
 V-Universe AI Hub Pro Ver 7.0 - Entry point.
-Main tabs: Workspace | Knowledge | Chat | Admin. Sub-tabs trong từng nhóm.
+Tối ưu: lazy import view, chỉ render 1 tab đang chọn, cache sidebar/cost.
 """
+import importlib
 import streamlit as st
 import time
 
-from config import Config, init_services, SessionManager, CostManager
-from views import (
-    render_sidebar,
-    render_dashboard_tab,
-    render_chat_tab,
-    render_workstation_tab,
-    render_data_analyze_tab,
-    render_background_tasks_tab,
-    render_review_tab,
-    render_bible_tab,
-    render_cost_tab,
-    render_settings_tab,
-    render_collaboration_tab,
-    render_data_health_tab,
-    render_rules_tab,
-    render_chat_management_tab,
-    render_relations_tab,
-    render_chunking_tab,
-    render_python_executor_tab,
-    render_arc_tab,
-    render_semantic_intent_tab,
-    render_timeline_tab,
-    render_commands_tab,
-)
+from config import Config, init_services, SessionManager
+from utils.cache_helpers import get_user_budget_cached
+from views.sidebar import render_sidebar
 
 # ==========================================
 # PAGE CONFIG & CSS
@@ -62,6 +42,8 @@ st.markdown("""
     [data-testid="stTextInput"] input:focus { box-shadow: 0 0 0 2px rgba(124, 58, 237, 0.2); border-color: #7c3aed; }
     .stButton > button { border-radius: 8px; font-weight: 500; transition: opacity 0.2s; }
     .stButton > button:hover { opacity: 0.9; }
+    div[data-testid="stHorizontalBlock"] > label[data-testid="stRadio"] > div { gap: 6px; background: #f8fafc; padding: 8px; border-radius: 10px; flex-wrap: wrap; }
+    div[data-testid="stHorizontalBlock"] > label[data-testid="stRadio"] div[role="radiogroup"] { flex-direction: row; gap: 6px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -98,28 +80,37 @@ TAB_STRUCTURE = {
     ],
 }
 
-RENDER_MAP = {
-    "render_dashboard_tab": render_dashboard_tab,
-    "render_workstation_tab": render_workstation_tab,
-    "render_data_analyze_tab": render_data_analyze_tab,
-    "render_background_tasks_tab": render_background_tasks_tab,
-    "render_review_tab": render_review_tab,
-    "render_python_executor_tab": render_python_executor_tab,
-    "render_bible_tab": render_bible_tab,
-    "render_rules_tab": render_rules_tab,
-    "render_chat_management_tab": render_chat_management_tab,
-    "render_relations_tab": render_relations_tab,
-    "render_chunking_tab": render_chunking_tab,
-    "render_arc_tab": render_arc_tab,
-    "render_timeline_tab": render_timeline_tab,
-    "render_commands_tab": render_commands_tab,
-    "render_data_health_tab": render_data_health_tab,
-    "render_semantic_intent_tab": render_semantic_intent_tab,
-    "render_chat_tab": render_chat_tab,
-    "render_collaboration_tab": render_collaboration_tab,
-    "render_cost_tab": render_cost_tab,
-    "render_settings_tab": render_settings_tab,
+# Lazy load: chỉ import view khi cần (giảm lag mỗi run)
+VIEW_MODULES = {
+    "render_dashboard_tab": "views.dashboard",
+    "render_workstation_tab": "views.workstation",
+    "render_data_analyze_tab": "views.data_analyze",
+    "render_background_tasks_tab": "views.background_tasks_tab",
+    "render_review_tab": "views.review",
+    "render_python_executor_tab": "views.python_executor_view",
+    "render_bible_tab": "views.bible",
+    "render_rules_tab": "views.rules_view",
+    "render_chat_management_tab": "views.chat_management_view",
+    "render_relations_tab": "views.relations_view",
+    "render_chunking_tab": "views.chunking_view",
+    "render_arc_tab": "views.arc_view",
+    "render_timeline_tab": "views.timeline_view",
+    "render_commands_tab": "views.commands_tab",
+    "render_data_health_tab": "views.data_health",
+    "render_semantic_intent_tab": "views.semantic_intent_view",
+    "render_chat_tab": "views.chat",
+    "render_collaboration_tab": "views.collaboration",
+    "render_cost_tab": "views.cost",
+    "render_settings_tab": "views.settings",
 }
+
+
+def _get_render_fn(fn_name):
+    """Import view module khi cần, trả về hàm render."""
+    if fn_name not in VIEW_MODULES:
+        return None
+    mod = importlib.import_module(VIEW_MODULES[fn_name])
+    return getattr(mod, fn_name, None)
 
 
 def main():
@@ -161,68 +152,62 @@ def main():
             st.markdown("<p style='text-align: center; color: #64748b; margin-top: 0.25rem; font-size: 0.95rem;'>Select or create a project</p>", unsafe_allow_html=True)
     with col2:
         if 'user' in st.session_state:
-            budget = CostManager.get_user_budget(st.session_state.user.id)
+            _trigger = st.session_state.get("update_trigger", 0)
+            budget = get_user_budget_cached(st.session_state.user.id, _trigger)
             st.metric("Credits", f"${budget.get('remaining_credits', 0):.2f}")
 
-    # Fragment (nếu có): chỉ tab đang tương tác rerun, giảm lag toàn app
-    _fragment = getattr(st, "fragment", None) or getattr(st, "experimental_fragment", None)
+    # Chỉ render 1 tab đang chọn (main + sub) → giảm từ ~20 xuống 1 render mỗi run
+    main_labels = ["📂 Workspace", "📚 Knowledge", "💬 Chat", "⚙️ Admin"]
+    main_keys = ["workspace", "knowledge", "chat", "admin"]
+    st.session_state.setdefault("main_tab_key", "workspace")
+    main_idx = st.radio(
+        "Tab",
+        range(len(main_labels)),
+        format_func=lambda i: main_labels[i],
+        key="main_tab_radio",
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+    main_tab_key = main_keys[max(0, min(int(main_idx) if main_idx is not None else 0, len(main_keys) - 1))]
+    st.session_state["main_tab_key"] = main_tab_key
 
-    # Main tabs
-    main_tab = st.tabs(["📂 Workspace", "📚 Knowledge", "💬 Chat", "⚙️ Admin"])
-
-    for idx, (tab_name, tab_container) in enumerate(zip(
-        ["workspace", "knowledge", "chat", "admin"],
-        main_tab
-    )):
-        with tab_container:
-            subs = TAB_STRUCTURE.get(tab_name, [])
-            if len(subs) == 1:
-                sub_id, _, fn_name, needs_persona = subs[0]
-                render_fn = RENDER_MAP.get(fn_name)
-                if render_fn:
-                    def _run_one(pid=project_id, pers=persona, sid=sub_id, need_p=needs_persona, fn=render_fn):
-                        try:
-                            if need_p:
-                                fn(pid, pers)
-                            elif sid in ("cost", "settings"):
-                                fn()
-                            else:
-                                fn(pid)
-                        except TypeError:
-                            fn(pid) if sid not in ("cost", "settings") else fn()
-                    if _fragment:
-                        _fragment(_run_one)()
+    subs = TAB_STRUCTURE.get(main_tab_key, [])
+    if not subs:
+        st.info("Chọn tab ở trên.")
+    else:
+        sub_labels = [s[1] for s in subs]
+        radio_key = "sub_%s" % main_tab_key
+        sub_idx = st.radio(
+            "Sub",
+            range(len(sub_labels)),
+            format_func=lambda i: sub_labels[i] if i < len(sub_labels) else "",
+            key=radio_key,
+            horizontal=True,
+            label_visibility="collapsed",
+        )
+        sub_idx = max(0, min(int(sub_idx) if sub_idx is not None else 0, len(subs) - 1))
+        sub_id, _, fn_name, needs_persona = subs[sub_idx]
+        render_fn = _get_render_fn(fn_name)
+        if render_fn:
+            try:
+                if sub_id in ("v_work", "v_home"):
+                    render_fn(project_id, persona, sub_id)
+                elif needs_persona:
+                    render_fn(project_id, persona)
+                elif sub_id in ("cost", "settings"):
+                    render_fn()
+                else:
+                    render_fn(project_id)
+            except TypeError:
+                try:
+                    if sub_id in ("v_work", "v_home"):
+                        render_fn(project_id, persona, sub_id)
+                    elif sub_id in ("cost", "settings"):
+                        render_fn()
                     else:
-                        _run_one()
-            else:
-                sub_labels = [s[1] for s in subs]
-                sub_tabs = st.tabs(sub_labels)
-                for j, (sub_id, _, fn_name, needs_persona) in enumerate(subs):
-                    with sub_tabs[j]:
-                        render_fn = RENDER_MAP.get(fn_name)
-                        if render_fn:
-                            def _run_sub(pid=project_id, pers=persona, sid=sub_id, need_p=needs_persona, fn=render_fn):
-                                try:
-                                    if sid in ("v_work", "v_home"):
-                                        fn(pid, pers, sid)
-                                    elif need_p:
-                                        fn(pid, pers)
-                                    elif sid in ("cost", "settings"):
-                                        fn()
-                                    else:
-                                        fn(pid)
-                                except TypeError:
-                                    if sid in ("v_work", "v_home"):
-                                        try:
-                                            fn(pid, pers, sid)
-                                        except TypeError:
-                                            fn(pid, pers)
-                                    else:
-                                        fn(pid) if sid not in ("cost", "settings") else fn()
-                            if _fragment:
-                                _fragment(_run_sub)()
-                            else:
-                                _run_sub()
+                        render_fn(project_id)
+                except TypeError:
+                    render_fn(project_id)
 
     st.markdown("---")
     st.markdown(

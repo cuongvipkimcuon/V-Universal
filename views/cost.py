@@ -1,7 +1,8 @@
 import pandas as pd
 import streamlit as st
 
-from config import Config, init_services, CostManager
+from config import Config, init_services
+from utils.cache_helpers import get_user_budget_cached
 
 
 def render_cost_tab():
@@ -13,7 +14,8 @@ def render_cost_tab():
         return
 
     user_id = st.session_state.user.id
-    budget = CostManager.get_user_budget(user_id)
+    _trigger = st.session_state.get("update_trigger", 0)
+    budget = get_user_budget_cached(user_id, _trigger)
 
     col1, col2, col3 = st.columns(3)
 
