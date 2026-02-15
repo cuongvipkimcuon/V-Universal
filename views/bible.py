@@ -1,6 +1,5 @@
 import re
-import time
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import pandas as pd
 import streamlit as st
@@ -39,20 +38,8 @@ def render_bible_tab(project_id, persona):
         return
     supabase = services["supabase"]
 
-    # Tự rerun 30s để đón dữ liệu tươi (extract/backfill)
-    @st.fragment(run_every=timedelta(seconds=30))
-    def _bible_auto_refresh():
-        _key = "_bible_last_refresh"
-        if _key not in st.session_state:
-            st.session_state[_key] = time.time()
-        if time.time() - st.session_state[_key] >= 30:
-            st.session_state[_key] = time.time()
-            st.rerun()
-
-    _bible_auto_refresh()
-
-    # Trigger cache: update_trigger (sau add/delete) + tick 30s để mỗi 30s refetch khi fragment rerun
-    _cache_trigger = st.session_state.get("update_trigger", 0) + (int(time.time() // 30) * 10000)
+    # Cache trigger: chỉ refetch khi bấm Refresh hoặc sau add/delete
+    _cache_trigger = st.session_state.get("update_trigger", 0)
     raw_bible = get_bible_list_cached(project_id, _cache_trigger)
     # [RULE] và [CHAT] chỉ hiện ở tab Rules và Memory; Bible chỉ hiện các prefix còn lại
     bible_data_all = [
@@ -71,10 +58,35 @@ def render_bible_tab(project_id, persona):
     col_act = st.columns([3, 2, 1])
     with col_act[2]:
         st.markdown("###")
+        if st.button("🔄 Refresh", key="bible_refresh_btn"):
+            invalidate_cache_and_rerun()
         if st.button("➕ Add Entry", type="primary", key="bible_add_btn"):
             st.session_state["adding_bible_entry"] = True
         if st.button("📥 Import Knowledge", type="secondary", key="bible_import_btn"):
             st.session_state["import_knowledge_mode"] = True
+
+    # --- Kiểm tra mục chưa có embedding + Đồng bộ vector (chỉ khi user bấm) ---
+    try:
+        r_null = supabase.table("story_bible").select("id").eq("story_id", project_id).is_("embedding", "NULL").limit(1001).execute()
+        n = len(r_null.data or [])
+        bible_no_vec_count = n if n <= 1000 else 1001
+    except Exception:
+        bible_no_vec_count = 0
+    lbl = "1000+" if bible_no_vec_count > 1000 else str(bible_no_vec_count)
+    st.caption(f"**Vector:** {lbl} mục chưa có embedding.")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("🔄 Kiểm tra mục chưa có embedding", key="bible_check_vec_btn"):
+            st.rerun()
+    with c2:
+        if st.button("🔄 Đồng bộ vector (Bible)", key="bible_sync_vec_btn", disabled=(bible_no_vec_count == 0)):
+            import threading
+            from core.background_jobs import run_embedding_backfill
+            def _run():
+                run_embedding_backfill(project_id, bible_limit=200, chunks_limit=0)
+            threading.Thread(target=_run, daemon=True).start()
+            st.toast("Đã bắt đầu đồng bộ vector. Bấm Refresh sau vài giây để xem kết quả.")
+            st.rerun()
 
     # --- Import Knowledge: upload file -> parse -> gợi ý category -> thêm entry ---
     if st.session_state.get('import_knowledge_mode'):
@@ -490,7 +502,7 @@ def render_bible_tab(project_id, persona):
             sync_badge = "" if has_embedding else " 🔄 Chưa đồng bộ"
             with st.expander(f"**{entry['entity_name']}**{sync_badge}", expanded=False):
                 if not has_embedding:
-                    st.caption("🔄 Chưa đồng bộ vector — sẽ được backfill tự động.")
+                    st.caption("🔄 Chưa đồng bộ vector — bấm **Đồng bộ vector (Bible)** trên để cập nhật.")
                 st.markdown(entry.get('description', ''))
 
                 col_edit, col_delete, col_vector = st.columns(3)

@@ -1,7 +1,5 @@
 # views/chunking_view.py - Danh sách chunks đã lưu: xem, sửa nội dung, vector lại, xóa
 """Chunking: chỉ quản lý chunks đã lưu. Logic tách chunk (Workstation) nằm trong utils.chunk_tools."""
-from datetime import timedelta
-
 import streamlit as st
 
 from config import init_services
@@ -21,7 +19,7 @@ def _ensure_chunks_table(supabase):
 def render_chunking_tab(project_id):
     """Tab Chunking - Chỉ hiển thị và quản lý chunks đã lưu: sửa nội dung, vector lại, xóa."""
     st.subheader("✂️ Chunks đã lưu")
-    st.caption("Chunks được vector hóa để search trong Chat. Sửa nội dung rồi bấm **Cập nhật & Vector lại** để không phải chunk lại từ đầu.")
+    st.caption("Chunks được vector hóa để search trong Chat. Bấm **Refresh** để tải lại. Sửa nội dung rồi bấm **Cập nhật & Vector lại** để không phải chunk lại từ đầu.")
 
     if not project_id:
         st.info("📁 Chọn Project trước.")
@@ -46,19 +44,44 @@ def render_chunking_tab(project_id):
     )
     can_delete = check_permission(str(user_id or ""), user_email or "", project_id, "delete")
 
-    @st.fragment(run_every=timedelta(seconds=30))
-    def _chunks_list_fresh():
-        r = supabase.table("chunks").select(
-            "id, content, raw_content, source_type, meta_json, arc_id, chapter_id, sort_order"
-        ).eq("story_id", project_id).order("sort_order").execute()
-        chunks_list = r.data or []
-        try:
-            null_emb = supabase.table("chunks").select("id").eq("story_id", project_id).is_("embedding", "NULL").execute()
-            ids_no_embedding = {row["id"] for row in (null_emb.data or []) if row.get("id")}
-        except Exception:
-            ids_no_embedding = set()
-        st.metric("Tổng chunks", len(chunks_list))
-        for c in chunks_list:
+    if st.button("🔄 Refresh", key="chunking_refresh_btn"):
+        st.rerun()
+
+    # Kiểm tra chunk chưa có embedding + Đồng bộ vector (chỉ khi user bấm)
+    try:
+        null_emb = supabase.table("chunks").select("id").eq("story_id", project_id).is_("embedding", "NULL").limit(1001).execute()
+        chunks_no_vec = len(null_emb.data or [])
+        if chunks_no_vec > 1000:
+            chunks_no_vec = 1001
+    except Exception:
+        chunks_no_vec = 0
+    lbl = "1000+" if chunks_no_vec > 1000 else str(chunks_no_vec)
+    st.caption(f"**Vector:** {lbl} chunk chưa có embedding.")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("🔄 Kiểm tra chunk chưa có embedding", key="chunking_check_vec_btn"):
+            st.rerun()
+    with c2:
+        if st.button("🔄 Đồng bộ vector (Chunks)", key="chunking_sync_vec_btn", disabled=(chunks_no_vec == 0)):
+            import threading
+            from core.background_jobs import run_embedding_backfill
+            def _run():
+                run_embedding_backfill(project_id, bible_limit=0, chunks_limit=200)
+            threading.Thread(target=_run, daemon=True).start()
+            st.toast("Đã bắt đầu đồng bộ vector. Bấm Refresh sau vài giây để xem kết quả.")
+            st.rerun()
+
+    r = supabase.table("chunks").select(
+        "id, content, raw_content, source_type, meta_json, arc_id, chapter_id, sort_order"
+    ).eq("story_id", project_id).order("sort_order").execute()
+    chunks_list = r.data or []
+    try:
+        null_emb = supabase.table("chunks").select("id").eq("story_id", project_id).is_("embedding", "NULL").execute()
+        ids_no_embedding = {row["id"] for row in (null_emb.data or []) if row.get("id")}
+    except Exception:
+        ids_no_embedding = set()
+    st.metric("Tổng chunks", len(chunks_list))
+    for c in chunks_list:
             cid = c.get("id")
             content = (c.get("content") or c.get("raw_content") or "").strip()
             meta = c.get("meta_json") or {}
@@ -75,7 +98,7 @@ def render_chunking_tab(project_id):
 
             with st.expander(f"Chunk: {label} — {short}{sync_badge}", expanded=False):
                 if cid in ids_no_embedding:
-                    st.caption("🔄 Chưa đồng bộ vector — sẽ được backfill tự động.")
+                    st.caption("🔄 Chưa đồng bộ vector — bấm **Đồng bộ vector (Chunks)** trên để cập nhật.")
                 st.text(content[:500] + ("…" if len(content) > 500 else ""))
 
                 if can_write:
@@ -123,15 +146,13 @@ def render_chunking_tab(project_id):
                     st.success("Đã xóa.")
                     st.rerun()
 
-        st.markdown("---")
-        with st.expander("💀 Danger Zone", expanded=False):
-            st.markdown('<div class="danger-zone">', unsafe_allow_html=True)
-            if can_delete and chunks_list:
-                confirm = st.checkbox("Xóa sạch TẤT CẢ chunks", key="chunk_confirm_clear")
-                if confirm and st.button("🗑️ Xóa sạch Chunks"):
-                    supabase.table("chunks").delete().eq("story_id", project_id).execute()
-                    st.success("Đã xóa sạch.")
-                    st.rerun()
-            st.markdown("</div>", unsafe_allow_html=True)
-
-    _chunks_list_fresh()
+    st.markdown("---")
+    with st.expander("💀 Danger Zone", expanded=False):
+        st.markdown('<div class="danger-zone">', unsafe_allow_html=True)
+        if can_delete and chunks_list:
+            confirm = st.checkbox("Xóa sạch TẤT CẢ chunks", key="chunk_confirm_clear")
+            if confirm and st.button("🗑️ Xóa sạch Chunks"):
+                supabase.table("chunks").delete().eq("story_id", project_id).execute()
+                st.success("Đã xóa sạch.")
+                st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
