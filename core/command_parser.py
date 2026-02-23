@@ -7,15 +7,9 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 # Built-in defaults khi chưa có bảng command_definitions (sau migration sẽ dùng DB)
+# Thao tác dữ liệu theo chương: chỉ còn Unified (1 LLM → Bible + Timeline + Chunks + Relations).
 BUILTIN_TRIGGERS = {
-    "extract_bible": "extract_bible",
-    "extract_relation": "extract_relation",
-    "extract_timeline": "extract_timeline",
-    "extract_chunking": "extract_chunking",
-    "delete_bible": "delete_bible",
-    "delete_relation": "delete_relation",
-    "delete_timeline": "delete_timeline",
-    "delete_chunking": "delete_chunking",
+    "unified": "unified",
     "data_analyze": "data_analyze",
     "summarize": "summarize_chapter",
     "summarize_chapter": "summarize_chapter",
@@ -43,15 +37,8 @@ BUILTIN_TRIGGERS = {
 
 # command_key -> (intent, data_operation_type, data_operation_target) cho update_data
 COMMAND_TO_ROUTER = {
-    "extract_bible": ("update_data", "extract", "bible"),
-    "extract_relation": ("update_data", "extract", "relation"),
-    "extract_timeline": ("update_data", "extract", "timeline"),
-    "extract_chunking": ("update_data", "extract", "chunking"),
-    "delete_bible": ("update_data", "delete", "bible"),
-    "delete_relation": ("update_data", "delete", "relation"),
-    "delete_timeline": ("update_data", "delete", "timeline"),
-    "delete_chunking": ("update_data", "delete", "chunking"),
-    "data_analyze": ("update_data", None, None),  # đặc biệt: 4 bước
+    "unified": ("update_data", "extract", "unified"),
+    "data_analyze": ("update_data", "extract", "unified"),
     "summarize_chapter": ("search_context", None, None),
     "read_chapter": ("search_context", None, None),
     "search_bible": ("search_context", None, None),
@@ -146,16 +133,9 @@ def _get_definitions_and_aliases(story_id: Optional[str], user_id: Optional[str]
 
 
 def _builtin_defs() -> Dict[str, Dict]:
-    """Định nghĩa mặc định (args_schema) khi không có DB."""
+    """Định nghĩa mặc định (args_schema) khi không có DB. Thao tác dữ liệu chương: chỉ Unified."""
     return {
-        "extract_bible": {"args_schema": [{"name": "chapter_range", "required": True, "type": "chapter_range"}]},
-        "extract_relation": {"args_schema": [{"name": "chapter_range", "required": True, "type": "chapter_range"}]},
-        "extract_timeline": {"args_schema": [{"name": "chapter_range", "required": True, "type": "chapter_range"}]},
-        "extract_chunking": {"args_schema": [{"name": "chapter_range", "required": True, "type": "chapter_range"}]},
-        "delete_bible": {"args_schema": [{"name": "chapter_range", "required": True, "type": "chapter_range"}]},
-        "delete_relation": {"args_schema": [{"name": "chapter_range", "required": True, "type": "chapter_range"}]},
-        "delete_timeline": {"args_schema": [{"name": "chapter_range", "required": True, "type": "chapter_range"}]},
-        "delete_chunking": {"args_schema": [{"name": "chapter_range", "required": True, "type": "chapter_range"}]},
+        "unified": {"args_schema": [{"name": "chapter_range", "required": True, "type": "chapter_range"}]},
         "data_analyze": {"args_schema": [{"name": "chapter_range", "required": True, "type": "chapter_range"}]},
         "summarize_chapter": {"args_schema": [{"name": "chapter_range", "required": True, "type": "chapter_range"}]},
         "read_chapter": {"args_schema": [{"name": "chapter_range", "required": True, "type": "chapter_range"}]},
@@ -216,13 +196,12 @@ def _build_router_out(
     if intent == "update_data":
         t = COMMAND_TO_ROUTER.get(command_key, (None, None, None))
         out["data_operation_type"] = t[1] or "extract"
-        out["data_operation_target"] = t[2] or "bible"
+        out["data_operation_target"] = t[2] or "unified"
         if command_key == "remember_rule":
             out["update_summary"] = update_summary or query_text
-        if command_key == "data_analyze":
+        if command_key in ("data_analyze", "unified"):
             out["data_operation_type"] = "extract"
-            out["data_operation_target"] = "bible"
-            out["_data_analyze_full"] = True
+            out["data_operation_target"] = "unified"
     if command_key == "list_chapters":
         out["rewritten_query"] = "Liệt kê danh sách chương"
     return out
@@ -250,13 +229,13 @@ def parse_command(
     if not after_at:
         return ParseResult(
             "incomplete",
-            clarification_message="Bạn gõ @@ nhưng chưa chỉ rõ lệnh. Ví dụ: @@extract_bible 1-3, @@search_bible nhân vật A. Xem tab **Chỉ lệnh** để biết danh sách lệnh và cú pháp."
+            clarification_message="Bạn gõ @@ nhưng chưa chỉ rõ lệnh. Ví dụ: @@unified 1-10, @@search_bible nhân vật A. Xem tab **Chỉ lệnh** để biết danh sách lệnh và cú pháp."
         )
     parts = after_at.split(maxsplit=1)
     trigger_raw = parts[0].strip().lower()
     rest = (parts[1].strip() if len(parts) > 1 else "").strip()
     if not trigger_raw:
-        return ParseResult("incomplete", clarification_message="Sau @@ cần tên lệnh. Ví dụ: @@extract_bible 1")
+        return ParseResult("incomplete", clarification_message="Sau @@ cần tên lệnh. Ví dụ: @@unified 1 hoặc @@unified 1-10")
 
     defs_by_key, alias_to_key = _get_definitions_and_aliases(story_id, user_id)
     command_key = alias_to_key.get(trigger_raw)
@@ -313,15 +292,13 @@ def parse_command(
                 clarification_message="Lệnh **@@mixed** cần số chương và câu hỏi (ví dụ: @@mixed 3 nhân vật A làm gì và quan hệ với B). Bạn muốn hỏi chương nào và nội dung gì?"
             )
 
-    if command_key == "data_analyze" and not chapter_range:
+    if command_key in ("data_analyze", "unified") and not chapter_range:
         return ParseResult(
             "incomplete",
-            clarification_message="Lệnh **@@data_analyze** cần chỉ rõ chương hoặc khoảng chương (ví dụ: @@data_analyze 1-5). Bạn muốn chạy cho chương nào?"
+            clarification_message="Lệnh **@@data_analyze** / **@@unified** cần chỉ rõ chương hoặc khoảng chương (ví dụ: @@unified 1-5). Bạn muốn chạy cho chương nào?"
         )
 
     router_out = _build_router_out(command_key, intent, chapter_range=chapter_range, query_text=query_text, update_summary=update_summary)
-    if command_key == "data_analyze":
-        router_out["_data_analyze_full"] = True
     return ParseResult("ok", parsed=ParsedCommand(command_key=command_key, intent=intent, router_out=router_out, raw_trigger=trigger_raw))
 
 

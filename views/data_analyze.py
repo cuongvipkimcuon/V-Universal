@@ -1,4 +1,4 @@
-# views/data_analyze.py - Tab Data Analyze: chọn chương, gửi tác vụ chạy ngầm (Extract Bible / Relation / Timeline / Chunk)
+# views/data_analyze.py - Tab Data Analyze: chọn chương, Unified analyze (Bible + Timeline + Chunks + Relations + link 1-N), Đồng bộ toàn cục.
 import json
 import threading
 
@@ -9,8 +9,6 @@ from ai_engine import (
     AIService,
     analyze_split_strategy,
     execute_split_logic,
-    suggest_relations,
-    extract_timeline_events_from_content,
     _get_default_tool_model,
 )
 from utils.auth_manager import check_permission
@@ -221,199 +219,56 @@ def render_data_analyze_tab(project_id):
     _render_extract_bible_relations_chunking(
         project_id, content, chap_num, selected_row, file_options, selected_file, supabase
     )
-    _render_timeline_section(project_id, content, chap_num, selected_row, supabase)
 
     st.session_state.setdefault("update_trigger", st.session_state.get("update_trigger", 0))
 
 
-def _render_timeline_section(project_id, content, chap_num, selected_row, supabase):
-    """Timeline: gửi job chạy ngầm; AI trích xuất và lưu trực tiếp. V Work thông báo khi xong."""
-    st.markdown("---")
-    st.subheader("📅 Timeline (trích xuất từ chương)")
-    try:
-        supabase.table("timeline_events").select("id").limit(1).execute()
-    except Exception:
-        st.warning("Bảng timeline_events chưa tồn tại. Chạy schema_v7_migration.sql trên Supabase để dùng tính năng này.")
-        return
-    chapter_label = selected_row.get("title") or f"Chương {chap_num}"
-    st.caption(f"Chương: {chapter_label}. AI trích xuất sự kiện và lưu vào Timeline (xóa events cũ của chương). Chạy ngầm.")
-    st.checkbox(
-        "⚠️ Tôi hiểu: Trích xuất Timeline sẽ **xóa toàn bộ** timeline_events đã gắn với chương này trước khi lưu mới.",
-        key="da_confirm_delete_timeline_chapter",
-    )
-    uid = getattr(st.session_state.get("user"), "id", None) or ""
-    uem = getattr(st.session_state.get("user"), "email", None) or ""
-    can_write = check_permission(uid, uem, project_id, "write")
-    if st.session_state.get("da_confirm_delete_timeline_chapter") and can_write:
-        if st.button("🤖 AI trích xuất timeline từ chương này", type="primary", key="da_timeline_extract_btn"):
-            label = f"Timeline chương {chap_num}"
-            job_id = create_job(
-                story_id=project_id,
-                user_id=uid or None,
-                job_type="data_operation_batch",
-                label=label,
-                payload={
-                    "steps": [{"operation_type": "extract", "target": "timeline", "chapter_number": chap_num}],
-                    "user_request": label,
-                },
-                post_to_chat=False,
-            )
-            if job_id:
-                threading.Thread(target=run_job_worker, args=(job_id,), daemon=True).start()
-                st.toast("Queued. Check Background Jobs tab for status.")
-                st.session_state["update_trigger"] = st.session_state.get("update_trigger", 0) + 1
-            else:
-                st.error("Không tạo được job.")
-
-
 def _render_extract_bible_relations_chunking(project_id, content, chap_num, selected_row, file_options, selected_file, supabase):
-    """Nội dung tab Extract Bible / Relations / Chunking (thống nhất qua data_operation_batch)."""
+    """Chỉ Unified: 1 lần LLM → Bible + Timeline + Chunks + Relations + link 1-N. Đồng bộ toàn cục khi cần."""
     uid = getattr(st.session_state.get("user"), "id", None) or ""
     uem = getattr(st.session_state.get("user"), "email", None) or ""
     can_write = check_permission(uid, uem, project_id, "write")
-    # --- Section 1: Extract Bible ---
-    st.markdown("---")
-    st.subheader("📥 Extract Bible")
-    personas_avail = PersonaSystem.get_available_personas()
-    da_persona_key = st.selectbox("🎭 Persona cho Extract", personas_avail, key="da_persona_select")
-    ext_persona = PersonaSystem.get_persona(da_persona_key)
 
-    st.caption("Chạy đủ 4 bước (Bible → Timeline → Chunk → Relation) cho chương này trong một job; delay theo batch.")
-    if st.session_state.get("da_confirm_delete_bible_chapter") and can_write:
-        if st.button("▶️ Đủ 4 bước cho chương này", type="primary", key="da_full_four_btn"):
-            label = f"Đủ 4 bước chương {chap_num}"
-            job_id = create_job(
-                story_id=project_id,
-                user_id=uid or None,
-                job_type="data_operation_batch",
-                label=label,
-                payload={
-                    "steps": [
-                        {"operation_type": "extract", "target": "bible", "chapter_number": chap_num},
-                        {"operation_type": "extract", "target": "timeline", "chapter_number": chap_num},
-                        {"operation_type": "extract", "target": "chunking", "chapter_number": chap_num},
-                        {"operation_type": "extract", "target": "relation", "chapter_number": chap_num},
-                    ],
-                    "user_request": label,
-                },
-                post_to_chat=False,
-            )
-            if job_id:
-                threading.Thread(target=run_job_worker, args=(job_id,), daemon=True).start()
-                st.toast("Queued. Check Background Jobs tab for status.")
-                st.session_state["update_trigger"] = st.session_state.get("update_trigger", 0) + 1
-            else:
-                st.error("Không tạo được job.")
+    st.markdown("---")
+    st.subheader("📥 Phân tích chương (Unified)")
+    st.caption("**Đồng bộ toàn cục:** Kiểm tra và sửa link rác (chunk_bible, chunk_timeline), relation rác, parent_id Bible, source_chapter. Chạy khi bấm, trong background.")
+    if can_write and st.button("🔄 Đồng bộ dữ liệu toàn cục", type="secondary", key="da_global_sync_btn"):
+        label = "Đồng bộ dữ liệu toàn cục"
+        job_id = create_job(
+            story_id=project_id,
+            user_id=uid or None,
+            job_type="global_data_sync",
+            label=label,
+            payload={},
+            post_to_chat=True,
+        )
+        if job_id:
+            threading.Thread(target=run_job_worker, args=(job_id,), daemon=True).start()
+            st.toast("Đã xếp hàng. Xem tab Background Jobs hoặc chat.")
+            st.session_state["update_trigger"] = st.session_state.get("update_trigger", 0) + 1
+        else:
+            st.error("Không tạo được job.")
+    st.caption("**Unified:** 1 lần LLM → Bible + Timeline + Chunks + Relations + link 1-N. Có retry từng bước; thất bại thì rollback. Bible và Chunk có embedding.")
     st.checkbox(
-        "⚠️ Tôi hiểu: Bắt đầu phân tích sẽ **xóa toàn bộ** Bible entries đã gắn với chương này (source_chapter = chương đang chọn) trước khi chạy extract.",
+        "⚠️ Tôi hiểu: Phân tích sẽ **xóa toàn bộ** Bible, Timeline, Chunks, Relations và link của chương này trước khi chạy.",
         key="da_confirm_delete_bible_chapter",
     )
     if st.session_state.get("da_confirm_delete_bible_chapter") and can_write:
-        if st.button("▶️ Bắt đầu phân tích", type="primary", key="da_extract_start_btn"):
-            label = f"Extract Bible chương {chap_num}"
+        if st.button("▶️ Unified analyze chương này", type="primary", key="da_unified_btn"):
+            label = f"Unified chương {chap_num}"
             job_id = create_job(
                 story_id=project_id,
                 user_id=uid or None,
-                job_type="data_operation_batch",
+                job_type="unified_chapter_analyze",
                 label=label,
-                payload={
-                    "steps": [{"operation_type": "extract", "target": "bible", "chapter_number": chap_num}],
-                    "user_request": label,
-                },
+                payload={"chapter_number": chap_num},
                 post_to_chat=False,
             )
             if job_id:
                 threading.Thread(target=run_job_worker, args=(job_id,), daemon=True).start()
-                st.toast("Queued. Check Background Jobs tab for status.")
+                st.toast("Đã xếp hàng. Xem tab Background Jobs.")
                 st.session_state["update_trigger"] = st.session_state.get("update_trigger", 0) + 1
-            else:
-                st.error("Không tạo được job.")
-    if can_write:
-        if st.button("🔄 Cập nhật (chỉ gợi ý mới)", key="da_extract_update_btn"):
-            job_id = create_job(
-                story_id=project_id,
-                user_id=uid or None,
-                job_type="data_analyze_bible",
-                label=f"Extract Bible chương {chap_num} (chỉ mới)",
-                payload={"chapter_number": chap_num, "persona_key": da_persona_key, "exclude_existing": True},
-                post_to_chat=False,
-            )
-            if job_id:
-                threading.Thread(target=run_job_worker, args=(job_id,), daemon=True).start()
-                st.toast("Queued. Check Background Jobs tab for status.")
             else:
                 st.error("Không tạo được job.")
     if not can_write:
         st.warning("Chỉ thành viên có quyền ghi mới được thực hiện.")
-
-    # --- Section 2: Relation ---
-    st.markdown("---")
-    st.subheader("🔗 Relation")
-    st.info("💡 Run Extract Bible first for better relations. Jobs run in background; see Background Jobs tab.")
-    st.checkbox(
-        "⚠️ Tôi hiểu: Gợi ý quan hệ sẽ **xóa các quan hệ** giữa các thực thể thuộc chương này trước khi gợi ý lại.",
-        key="da_confirm_delete_relation_chapter",
-    )
-    if st.session_state.get("da_confirm_delete_relation_chapter") and can_write:
-        if st.button("🔄 Gợi ý quan hệ từ nội dung chương", key="da_suggest_relations"):
-            label = f"Gợi ý quan hệ chương {chap_num}"
-            job_id = create_job(
-                story_id=project_id,
-                user_id=uid or None,
-                job_type="data_operation_batch",
-                label=label,
-                payload={
-                    "steps": [{"operation_type": "extract", "target": "relation", "chapter_number": chap_num}],
-                    "user_request": label,
-                },
-                post_to_chat=False,
-            )
-            if job_id:
-                threading.Thread(target=run_job_worker, args=(job_id,), daemon=True).start()
-                st.toast("Queued. Check Background Jobs tab for status.")
-            else:
-                st.error("Không tạo được job.")
-    if can_write:
-        if st.button("🔄 Cập nhật (chỉ gợi ý quan hệ mới)", key="da_relation_update_btn"):
-            job_id = create_job(
-                story_id=project_id,
-                user_id=uid or None,
-                job_type="data_analyze_relation",
-                label=f"Cập nhật quan hệ chương {chap_num} (chỉ mới)",
-                payload={"chapter_number": chap_num, "only_new": True},
-                post_to_chat=False,
-            )
-            if job_id:
-                threading.Thread(target=run_job_worker, args=(job_id,), daemon=True).start()
-                st.toast("Queued. Check Background Jobs tab for status.")
-            else:
-                st.error("Không tạo được job.")
-
-    # --- Section 3: Chunking ---
-    st.markdown("---")
-    st.subheader("✂️ Chunking")
-    st.caption("Chunks từ chương được gắn chapter_id + arc_id, meta_json.source = data_analyze. Lưu mới sẽ xóa chunks cũ của chương. Chạy ngầm.")
-    st.checkbox(
-        "⚠️ Tôi hiểu: Phân tích Chunk sẽ **xóa toàn bộ** chunks đã gắn với chương này trước khi lưu mới.",
-        key="da_confirm_delete_chunks_chapter",
-    )
-    if st.session_state.get("da_confirm_delete_chunks_chapter") and can_write:
-        if st.button("📄 Phân tích Chunk", type="primary", key="da_chunk_analyze"):
-            label = f"Phân tích Chunk chương {chap_num}"
-            job_id = create_job(
-                story_id=project_id,
-                user_id=uid or None,
-                job_type="data_operation_batch",
-                label=label,
-                payload={
-                    "steps": [{"operation_type": "extract", "target": "chunking", "chapter_number": chap_num}],
-                    "user_request": label,
-                },
-                post_to_chat=False,
-            )
-            if job_id:
-                threading.Thread(target=run_job_worker, args=(job_id,), daemon=True).start()
-                st.toast("Queued. Check Background Jobs tab for status.")
-                st.session_state["update_trigger"] = st.session_state.get("update_trigger", 0) + 1
-            else:
-                st.error("Không tạo được job.")

@@ -146,6 +146,56 @@ def run_job_worker(job_id: str) -> None:
             _worker_data_analyze_timeline(job_id, story_id, user_id, label, payload, post_to_chat, supabase)
         elif job_type == "data_analyze_chunk":
             _worker_data_analyze_chunk(job_id, story_id, user_id, label, payload, post_to_chat, supabase)
+        elif job_type == "unified_chapter_analyze":
+            chapter_number = int(payload.get("chapter_number", 0))
+            from core.unified_chapter_analyze import run_unified_chapter_analyze
+            out = run_unified_chapter_analyze(
+                story_id,
+                chapter_number,
+                job_id=job_id,
+                update_job_fn=update_job,
+            )
+            if not out.get("success") and not out.get("error"):
+                update_job(job_id, "failed", error_message="Unified analyze thất bại (không rõ lỗi).")
+        elif job_type == "unified_chapter_range":
+            chapter_start = int(payload.get("chapter_start") or payload.get("chapter_range", [0, 0])[0])
+            chapter_end = int(payload.get("chapter_end") or (payload.get("chapter_range") or [0, 0])[1])
+            from core.unified_chapter_analyze import run_unified_chapter_range
+            out = run_unified_chapter_range(
+                story_id,
+                chapter_start,
+                chapter_end,
+                job_id=job_id,
+                update_job_fn=update_job,
+            )
+            if post_to_chat:
+                summary = f"Đã xong {out.get('ok', 0)}/{out.get('total', 0)} chương."
+                if out.get("failed"):
+                    err_detail = "; ".join([f"Chương {ch}" for ch in out.get("failed", [])])
+                    _post_completion_to_chat(story_id, user_id, label, False, summary, f"Lỗi: {err_detail}")
+                else:
+                    _post_completion_to_chat(story_id, user_id, label, True, summary, None)
+        elif job_type == "global_data_sync":
+            from core.global_data_sync import run_global_data_sync
+            out = run_global_data_sync(
+                project_id=story_id,
+                job_id=job_id,
+                update_job_fn=update_job,
+            )
+            if out.get("success"):
+                if post_to_chat:
+                    fixed = out.get("fixed") or {}
+                    msg = (
+                        f"Dọn rác: {fixed.get('chunk_bible_links_deleted', 0)} link bible, {fixed.get('chunk_timeline_links_deleted', 0)} link timeline, {fixed.get('entity_relations_deleted', 0)} relation. "
+                        f"Bible: {fixed.get('bible_parent_id_updated', 0)} parent (tên), {fixed.get('bible_parent_id_by_embedding', 0)} parent (embedding). "
+                        f"Relation: {fixed.get('entity_relations_normalized', 0)} chuẩn hóa, {fixed.get('entity_relations_deduped', 0)} gộp trùng; "
+                        f"CBL: {fixed.get('chunk_bible_links_normalized', 0)} chuẩn hóa, {fixed.get('chunk_bible_links_deduped', 0)} gộp trùng; "
+                        f"source_chapter: {fixed.get('entity_relations_source_chapter_updated', 0)}."
+                    )
+                    _post_completion_to_chat(story_id, user_id, label, True, msg, None)
+            else:
+                if post_to_chat:
+                    _post_completion_to_chat(story_id, user_id, label, False, None, out.get("error") or "Lỗi không xác định.")
         else:
             update_job(job_id, "failed", error_message=f"job_type không hỗ trợ: {job_type}")
             if post_to_chat:

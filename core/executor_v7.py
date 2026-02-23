@@ -80,7 +80,7 @@ def execute_plan(
     """
     Thực thi plan; sau mỗi bước có thể re-plan (đổi phần còn lại nếu bước vừa thất bại).
     Returns: (cumulative_context, sources, step_results, replan_events, data_operation_steps).
-    data_operation_steps: các bước update_data (bible/relation/timeline/chunking) cần xác nhận sau.
+    data_operation_steps: các bước update_data (unified) cần chạy job sau.
     """
     ContextManager, AIService, Config, parse_chapter_range_from_query, _get_default_tool_model = _get_engine()
     try:
@@ -109,24 +109,23 @@ def execute_plan(
         args = step.get("args") or {}
         op_target = (args.get("data_operation_target") or "").strip()
 
-        # Bước update_data (bible/relation/timeline/chunking): thu thập để xác nhận sau, không build context.
-        if intent == "update_data" and op_target in ("bible", "relation", "timeline", "chunking"):
+        # Bước update_data (unified): thu thập để chạy job unified_chapter_range sau, không build context.
+        if intent == "update_data" and op_target == "unified":
             op_type = args.get("data_operation_type") or "extract"
             ch_range = args.get("chapter_range")
             if ch_range and isinstance(ch_range, (list, tuple)) and len(ch_range) >= 2:
                 try:
                     start, end = int(ch_range[0]), int(ch_range[1])
                     start, end = min(start, end), max(start, end)
-                    if start == end:
-                        data_operation_steps.append({"operation_type": op_type, "target": op_target, "chapter_number": start})
-                    else:
-                        data_operation_steps.append({"operation_type": op_type, "target": op_target, "chapter_range": [start, end]})
+                    data_operation_steps.append({"operation_type": op_type, "target": "unified", "chapter_range": [start, end]})
                 except (ValueError, TypeError):
                     if ch_range and len(ch_range) >= 1:
-                        data_operation_steps.append({"operation_type": op_type, "target": op_target, "chapter_number": int(ch_range[0])})
+                        ch_num = int(ch_range[0])
+                        data_operation_steps.append({"operation_type": op_type, "target": "unified", "chapter_range": [ch_num, ch_num]})
             elif ch_range and len(ch_range) >= 1:
-                data_operation_steps.append({"operation_type": op_type, "target": op_target, "chapter_number": int(ch_range[0])})
-            block = f"\n--- [STEP {step_id}: update_data] ---\n(Thao tác {op_type} {op_target} — chờ xác nhận để thực hiện)\n"
+                ch_num = int(ch_range[0])
+                data_operation_steps.append({"operation_type": op_type, "target": "unified", "chapter_range": [ch_num, ch_num]})
+            block = f"\n--- [STEP {step_id}: update_data] ---\n(Unified analyze chương — chờ xác nhận để thực hiện)\n"
             cumulative_parts.append(block)
             step_results.append({"step_id": step_id, "intent": intent, "context_snippet": "", "executor_result": None})
             steps_executed += 1

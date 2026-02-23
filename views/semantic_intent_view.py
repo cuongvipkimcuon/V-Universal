@@ -62,16 +62,17 @@ def render_semantic_intent_tab(project_id):
     can_write = check_permission(str(user_id or ""), user_email or "", project_id, "write")
     can_delete = check_permission(str(user_id or ""), user_email or "", project_id, "delete")
 
-    # Tùy chọn
+    # Tùy chọn (dạng phủ định: bật = tắt hành vi tương ứng trong V Work chat)
+    st.caption("**Tùy chọn phủ định** — bật = tắt hành vi trong V Work chat. Lưu bên dưới có hiệu lực toàn project.")
     opt_no_auto = _get_setting(supabase, "semantic_intent_no_auto_create", False)
     opt_no_use = _get_setting(supabase, "semantic_intent_no_use", False)
     col_opt1, col_opt2 = st.columns(2)
     with col_opt1:
-        no_auto = st.toggle("Không tự tạo semantic_intent từ câu hỏi user", value=opt_no_auto, key="si_no_auto",
-                            help="Bật = Chat sẽ không gợi ý thêm mẫu sau mỗi câu trả lời.")
+        no_auto = st.toggle("Không gợi ý thêm mẫu Semantic sau mỗi câu trả lời", value=opt_no_auto, key="si_no_auto",
+                            help="Bật = V Work chat không hiện 'Thêm vào Semantic Intent?' sau reply.")
     with col_opt2:
         no_use = st.toggle("Không dùng semantic intent để tạo câu trả lời", value=opt_no_use, key="si_no_use",
-                           help="Bật = Chat bỏ qua semantic intent, luôn dùng Router.")
+                           help="Bật = V Work bỏ qua semantic intent, luôn dùng Router.")
     if st.button("💾 Lưu tùy chọn", key="si_save_opts"):
         try:
             for k, v in [("semantic_intent_no_auto_create", 1 if no_auto else 0), ("semantic_intent_no_use", 1 if no_use else 0)]:
