@@ -101,17 +101,19 @@ def _reset_crystallize_count(project_id, user_id):
         pass
 
 
-def _after_save_history_v_work(project_id, user_id, persona_role):
-    """Sau khi lưu tin nhắn V Work: tăng counter, nếu >= 30 thì chạy crystallize (sẽ reset về 0)."""
+def _after_save_history_v_work(project_id, user_id, persona_role, allow_data_changing=False):
+    """Sau khi lưu tin nhắn V Work: tăng counter, nếu >= 30 và allow_data_changing thì chạy crystallize (sẽ reset về 0)."""
     if not project_id or not user_id:
         return
     _increment_crystallize_count(project_id, user_id)
-    if _get_crystallize_count(project_id, user_id) >= 30:
+    if _get_crystallize_count(project_id, user_id) >= 30 and allow_data_changing:
         threading.Thread(
             target=_auto_crystallize_background,
             args=(project_id, user_id, persona_role),
             daemon=True,
         ).start()
+    elif _get_crystallize_count(project_id, user_id) >= 30 and not allow_data_changing:
+        st.session_state["crystallize_blocked_no_allow"] = True
 
 
 def _start_data_operation_background(
@@ -122,14 +124,20 @@ def _start_data_operation_background(
     now_timestamp,
     steps=None,
     single_op=None,
+    unified_range=None,
     insert_user_message=True,
     rerun_after=True,
 ):
     """
-    Chạy thao tác dữ liệu ngầm (không xác nhận): lưu user + tin 'Đang chạy ngầm', start thread,
+    Chạy thao tác dữ liệu ngầm (không xác nhận): lưu user + tin 'Đang chạy ngầm', start thread.
+    unified_range: (chapter_start, chapter_end) hoặc [start, end] → job unified_chapter_range (V7 Planner).
     toast, (optionally) rerun. Khi xong job sẽ tự ghi tin hoàn thành vào chat (data_operation_jobs).
     insert_user_message=False: chỉ insert tin 'Đang chạy ngầm'. rerun_after=False: không rerun (e.g. sau execute_plan để vẫn hiển thị response V7).
+    Cần bật toggle "Cho phép thao tác ảnh hưởng dữ liệu" thì mới thực hiện.
     """
+    if not st.session_state.get("allow_data_changing_actions", False):
+        st.warning("Bật toggle **Cho phép thao tác ảnh hưởng dữ liệu** (sidebar V Work) để thực hiện thao tác extract/update/delete.")
+        return
     steps = steps if isinstance(steps, list) else []
     if steps:
         desc = f"{len(steps)} thao tác (extract/update/delete)."
@@ -138,6 +146,10 @@ def _start_data_operation_background(
         t = single_op.get("target", "bible")
         ch = single_op.get("chapter_number", "")
         desc = f"{op} {t} chương {ch}."
+    elif unified_range and isinstance(unified_range, (list, tuple)) and len(unified_range) >= 2:
+        s, e = int(unified_range[0]), int(unified_range[1])
+        s, e = min(s, e), max(s, e)
+        desc = f"Unified analyze chương {s}–{e} (tuần tự từng chương)."
     else:
         return
     running_msg = f"⏳ Running in background: **{user_request[:100]}**. {desc} Check **Background Jobs** tab for status."
@@ -157,9 +169,32 @@ def _start_data_operation_background(
                 supabase.table("chat_history").insert({
                     "story_id": project_id, "user_id": str(user_id) if user_id else None, "role": "model", "content": running_msg, "created_at": now_timestamp, "metadata": {"data_operation_background": True},
                 }).execute()
-            _after_save_history_v_work(project_id, user_id, active_persona.get("role", ""))
+            _after_save_history_v_work(project_id, user_id, active_persona.get("role", ""), allow_data_changing=True)
+        from core.background_jobs import create_job, run_job_worker
+        # steps toàn bộ là unified -> tạo 1 job unified_chapter_range (từ bước đầu)
+        if steps and len(steps) and all((s.get("target") or "") == "unified" for s in steps) and (steps[0].get("chapter_range") or []):
+            ur = steps[0]["chapter_range"]
+            if isinstance(ur, (list, tuple)) and len(ur) >= 2:
+                s, e = int(ur[0]), int(ur[1])
+                s, e = min(s, e), max(s, e)
+                unified_range = [s, e]
+                desc = f"Unified analyze chương {s}–{e} (tuần tự từng chương)."
+                steps = None
+        if unified_range and isinstance(unified_range, (list, tuple)) and len(unified_range) >= 2:
+            s, e = int(unified_range[0]), int(unified_range[1])
+            s, e = min(s, e), max(s, e)
+            label = (user_request[:200] if user_request else f"Unified chương {s}–{e}")
+            job_id = create_job(
+                story_id=project_id,
+                user_id=user_id,
+                job_type="unified_chapter_range",
+                label=label,
+                payload={"chapter_start": s, "chapter_end": e},
+                post_to_chat=True,
+            )
+            if job_id:
+                threading.Thread(target=run_job_worker, args=(job_id,), daemon=True).start()
         if steps:
-            from core.background_jobs import create_job, run_job_worker
             label = (user_request[:200] if user_request else "Data operation batch")
             job_id = create_job(
                 story_id=project_id,
@@ -171,7 +206,7 @@ def _start_data_operation_background(
             )
             if job_id:
                 threading.Thread(target=run_job_worker, args=(job_id,), daemon=True).start()
-        else:
+        elif single_op:
             from core.data_operation_jobs import run_data_operation
             threading.Thread(
                 target=run_data_operation,
@@ -197,49 +232,68 @@ def _start_data_operation_background(
 V_HOME_CONTEXT_MESSAGES = 10
 
 
-def _v_home_get_current_topic_start(user_id):
-    """Lấy topic_start_at hiện tại của user. Nếu chưa có thì tạo mới (now). Trả về chuỗi ISO."""
+def _v_home_get_current_topic_start(user_id, project_id):
+    """Lấy topic_start_at hiện tại của user cho project. Nếu chưa có thì tạo mới (now). Trả về chuỗi ISO."""
     if not user_id:
         return datetime.utcnow().isoformat()
     try:
         services = init_services()
         if not services:
             return datetime.utcnow().isoformat()
-        r = services["supabase"].table("v_home_current_topic").select("topic_start_at").eq(
-            "user_id", str(user_id)
-        ).limit(1).execute()
+        q = services["supabase"].table("v_home_current_topic").select("topic_start_at").eq("user_id", str(user_id))
+        if project_id and str(project_id).strip() not in ("", "None"):
+            q = q.eq("story_id", project_id)
+        else:
+            q = q.is_("story_id", "null")
+        r = q.limit(1).execute()
         if r.data and len(r.data) > 0:
             raw = r.data[0].get("topic_start_at")
             if raw is not None:
                 return raw if isinstance(raw, str) else getattr(raw, "isoformat", lambda: str(raw))()
         now = datetime.utcnow().isoformat()
-        services["supabase"].table("v_home_current_topic").upsert(
-            {"user_id": str(user_id), "topic_start_at": now},
-            on_conflict="user_id",
-        ).execute()
+        story_id_val = project_id if (project_id and str(project_id).strip() not in ("", "None")) else None
+        q = services["supabase"].table("v_home_current_topic").select("topic_start_at").eq("user_id", str(user_id))
+        if story_id_val:
+            q = q.eq("story_id", story_id_val)
+        else:
+            q = q.is_("story_id", "null")
+        r = q.limit(1).execute()
+        if r.data and len(r.data) > 0:
+            u = services["supabase"].table("v_home_current_topic").update({"topic_start_at": now}).eq("user_id", str(user_id))
+            if story_id_val:
+                u.eq("story_id", story_id_val).execute()
+            else:
+                u.is_("story_id", "null").execute()
+        else:
+            row = {"user_id": str(user_id), "topic_start_at": now}
+            if story_id_val:
+                row["story_id"] = story_id_val
+            services["supabase"].table("v_home_current_topic").insert(row).execute()
         return now
     except Exception:
         return datetime.utcnow().isoformat()
 
 
-def _v_home_load_messages(user_id):
-    """Lấy tin nhắn thuộc topic hiện tại (để hiển thị và làm context)."""
+def _v_home_load_messages(user_id, project_id):
+    """Lấy tin nhắn thuộc topic hiện tại của project (để hiển thị và làm context)."""
     if not user_id:
         return []
     try:
         services = init_services()
         if not services:
             return []
-        topic_start = _v_home_get_current_topic_start(user_id)
-        r = (
+        topic_start = _v_home_get_current_topic_start(user_id, project_id)
+        q = (
             services["supabase"]
             .table("v_home_messages")
             .select("id, role, content, created_at, topic_start_at")
             .eq("user_id", str(user_id))
-            .order("created_at", desc=True)
-            .limit(200)
-            .execute()
         )
+        if project_id and str(project_id).strip() not in ("", "None"):
+            q = q.eq("story_id", project_id)
+        else:
+            q = q.is_("story_id", "null")
+        r = q.order("created_at", desc=True).limit(200).execute()
         out = []
         for m in (r.data or []):
             ts = m.get("topic_start_at")
@@ -252,7 +306,7 @@ def _v_home_load_messages(user_id):
         return []
 
 
-def _v_home_reset_topic(user_id):
+def _v_home_reset_topic(user_id, project_id):
     """Reset topic: đặt topic_start_at = now. Tin nhắn sau chỉ thuộc topic mới."""
     if not user_id:
         return
@@ -261,29 +315,45 @@ def _v_home_reset_topic(user_id):
         if not services:
             return
         now = datetime.utcnow().isoformat()
-        services["supabase"].table("v_home_current_topic").upsert(
-            {"user_id": str(user_id), "topic_start_at": now},
-            on_conflict="user_id",
-        ).execute()
+        story_id_val = project_id if (project_id and str(project_id).strip() not in ("", "None")) else None
+        q = services["supabase"].table("v_home_current_topic").select("topic_start_at").eq("user_id", str(user_id))
+        if story_id_val:
+            q = q.eq("story_id", story_id_val)
+        else:
+            q = q.is_("story_id", "null")
+        r = q.limit(1).execute()
+        if r.data and len(r.data) > 0:
+            if story_id_val:
+                services["supabase"].table("v_home_current_topic").update({"topic_start_at": now}).eq("user_id", str(user_id)).eq("story_id", story_id_val).execute()
+            else:
+                services["supabase"].table("v_home_current_topic").update({"topic_start_at": now}).eq("user_id", str(user_id)).is_("story_id", "null").execute()
+        else:
+            row = {"user_id": str(user_id), "topic_start_at": now}
+            if story_id_val:
+                row["story_id"] = story_id_val
+            services["supabase"].table("v_home_current_topic").insert(row).execute()
     except Exception:
         pass
 
 
-def _v_home_save_message(user_id, role, content, topic_start_at):
-    """Lưu 1 tin nhắn V Home (không ghi chat_history)."""
+def _v_home_save_message(user_id, project_id, role, content, topic_start_at):
+    """Lưu 1 tin nhắn V Home (không ghi chat_history). Gắn với project_id (story_id)."""
     if not user_id:
         return
     try:
         services = init_services()
         if not services:
             return
-        services["supabase"].table("v_home_messages").insert({
+        payload = {
             "user_id": str(user_id),
             "role": role,
             "content": content,
             "created_at": datetime.utcnow().isoformat(),
             "topic_start_at": topic_start_at,
-        }).execute()
+        }
+        if project_id and str(project_id).strip() not in ("", "None"):
+            payload["story_id"] = project_id
+        services["supabase"].table("v_home_messages").insert(payload).execute()
     except Exception:
         pass
 
@@ -392,7 +462,7 @@ def render_chat_tab(project_id, persona, chat_mode=None):
             st.session_state['enable_history'] = False
             st.caption("Chat tự do — không lưu vào DB dự án. Context = 10 tin cuối của topic.")
             if st.button("🔄 Reset topic", use_container_width=True, key=f"chat_btn_reset_topic_{chat_mode}", help="Bắt đầu topic mới: từ giờ chỉ đưa tin nhắn sau thời điểm này vào context."):
-                _v_home_reset_topic(user_id)
+                _v_home_reset_topic(user_id, project_id)
                 st.toast("Đã bắt đầu topic mới.")
         else:
             available = PersonaSystem.get_available_personas()
@@ -427,11 +497,17 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                 help="V sẽ tư duy để tìm câu trả lời tốt nhất.",
                 key=f"chat_toggle_v7_{chat_mode}",
             )
-            st.session_state['auto_extract_rules_chat'] = st.toggle(
-                "🧐 Tự động trích xuất luật từ chat",
-                value=st.session_state.get('auto_extract_rules_chat', False),
-                help="Bật: sau mỗi tin nhắn, AI sẽ tìm luật mới trong hội thoại và hỏi bạn xác nhận. Mặc định tắt.",
-                key=f"chat_toggle_auto_rules_{chat_mode}",
+            st.session_state['allow_data_changing_actions'] = st.toggle(
+                "🔧 Cho phép thao tác ảnh hưởng dữ liệu",
+                value=st.session_state.get('allow_data_changing_actions', False),
+                help="Chỉ áp dụng khi chat (V Work): bật mới cho phép extract/update/delete theo chương, ghi Bible/Rule, Crystallize, thêm Semantic. Tab khác (Data Analyze, Knowledge…) không bị ảnh hưởng. Mặc định tắt.",
+                key=f"chat_toggle_allow_data_{chat_mode}",
+            )
+            st.session_state['extract_rules_from_chat'] = st.toggle(
+                "🧐 Trích xuất luật từ chat",
+                value=st.session_state.get('extract_rules_from_chat', False),
+                help="Bật: sau mỗi câu trả lời, AI tìm luật trong hội thoại; bạn xác nhận Lưu/Bỏ qua thì ghi luật vào Bible (không cần bật toggle Cho phép thao tác ảnh hưởng dữ liệu).",
+                key=f"chat_toggle_extract_rules_{chat_mode}",
             )
             st.divider()
             st.write("### 🕰️ Context cho Router / Planner")
@@ -446,45 +522,56 @@ def render_chat_tab(project_id, persona, chat_mode=None):
             )
             crystallize_count = _get_crystallize_count(project_id, user_id) if project_id and user_id else 0
             st.caption(f"💎 Crystallize: **{crystallize_count} / 30** tin (sau 30 → tóm tắt & lưu Bible [CHAT], xem tại **Knowledge > Bible** hoặc **Memory**).")
+            if st.session_state.get("crystallize_blocked_no_allow"):
+                st.warning("Đã đủ 30 tin để Crystallize nhưng toggle **Cho phép thao tác ảnh hưởng dữ liệu** đang tắt. Bật lên rồi gửi thêm tin để thực hiện.")
+                if st.session_state.get("allow_data_changing_actions", False):
+                    st.session_state.pop("crystallize_blocked_no_allow", None)
         else:
             st.session_state["history_depth"] = st.session_state.get("history_depth", 5)
 
     def _chat_messages_fragment():
         if is_v_home:
-            visible_msgs = _v_home_load_messages(user_id)
+            if not project_id or str(project_id).strip() in ("", "None"):
+                visible_msgs = []
+                st.info("Chọn một project ở sidebar để dùng V Home (tin nhắn gắn với project đó).")
+            else:
+                visible_msgs = _v_home_load_messages(user_id, project_id)
             for m in visible_msgs:
                 role_icon = active_persona["icon"] if m["role"] == "model" else None
                 with st.chat_message(m["role"], avatar=role_icon):
                     st.markdown(m.get("content", ""))
         else:
             visible_msgs = []
-            try:
-                services = init_services()
-                supabase = services["supabase"]
-                q = (
-                    supabase.table("chat_history")
-                    .select("*")
-                    .eq("story_id", project_id)
-                )
-                if user_id:
-                    q = q.eq("user_id", str(user_id))
-                msgs_data = (
-                    q.order("created_at", desc=True)
-                    .limit(50)
-                    .execute()
-                )
-                msgs = msgs_data.data[::-1] if msgs_data.data else []
-                visible_msgs = [m for m in msgs if m["created_at"] > st.session_state.get("chat_cutoff", "1970-01-01")]
-                # Hiển thị càng mới càng ở trên cao (newest first)
-                for m in reversed(visible_msgs):
-                    role_icon = active_persona["icon"] if m["role"] == "model" else None
-                    with st.chat_message(m["role"], avatar=role_icon):
-                        st.markdown(m["content"])
-                        if m.get("metadata"):
-                            with st.expander("📊 Details"):
-                                st.json(m["metadata"], expanded=False)
-            except Exception as e:
-                st.error(f"Error loading history: {e}")
+            if not project_id or str(project_id).strip() in ("", "None"):
+                st.info("Chọn một project ở sidebar để xem và gửi tin nhắn trong V Work.")
+            else:
+                try:
+                    services = init_services()
+                    supabase = services["supabase"]
+                    q = (
+                        supabase.table("chat_history")
+                        .select("*")
+                        .eq("story_id", project_id)
+                    )
+                    if user_id:
+                        q = q.eq("user_id", str(user_id))
+                    msgs_data = (
+                        q.order("created_at", desc=True)
+                        .limit(50)
+                        .execute()
+                    )
+                    msgs = msgs_data.data[::-1] if msgs_data.data else []
+                    visible_msgs = [m for m in msgs if m["created_at"] > st.session_state.get("chat_cutoff", "1970-01-01")]
+                    # Hiển thị càng mới càng ở trên cao (newest first)
+                    for m in reversed(visible_msgs):
+                        role_icon = active_persona["icon"] if m["role"] == "model" else None
+                        with st.chat_message(m["role"], avatar=role_icon):
+                            st.markdown(m["content"])
+                            if m.get("metadata"):
+                                with st.expander("📊 Details"):
+                                    st.json(m["metadata"], expanded=False)
+                except Exception as e:
+                    st.error(f"Error loading history: {e}")
         history_depth = st.session_state.get("history_depth", 5)
         chat_input_key = "chat_input_v_home" if is_v_home else "chat_input_main"
         if prompt := st.chat_input(f"Ask {active_persona['icon']} AI Assistant...", key=chat_input_key):
@@ -531,7 +618,7 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                                         {"story_id": project_id, "user_id": str(user_id) if user_id else None, "role": "user", "content": prompt, "created_at": now_timestamp, "metadata": {"source": "command_fallback", "intent": "ask_user_clarification"}},
                                         {"story_id": project_id, "user_id": str(user_id) if user_id else None, "role": "model", "content": f"[Cần làm rõ] {clarification_message}", "created_at": now_timestamp, "metadata": {"intent": "ask_user_clarification"}},
                                     ]).execute()
-                                    _after_save_history_v_work(project_id, user_id, active_persona.get("role", ""))
+                                    _after_save_history_v_work(project_id, user_id, active_persona.get("role", ""), st.session_state.get("allow_data_changing_actions", False))
                                 except Exception:
                                     pass
                             v7_handled = True
@@ -573,40 +660,35 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                                         {"story_id": project_id, "user_id": str(user_id) if user_id else None, "role": "model", "content": f"[Cần làm rõ] {clarification_question}", "created_at": now_timestamp, "metadata": {"intent": first_intent}},
                                     ]).execute()
                                     if not is_v_home:
-                                        _after_save_history_v_work(project_id, user_id, active_persona.get("role", ""))
+                                        _after_save_history_v_work(project_id, user_id, active_persona.get("role", ""), st.session_state.get("allow_data_changing_actions", False))
                                 except Exception:
                                     pass
                             v7_handled = True
                         elif first_intent == "update_data" and not is_v_home and can_write and (plan or []) and all((s.get("intent") or "") == "update_data" for s in (plan or [])):
-                            # Chỉ xử lý "chỉ update_data" khi toàn bộ plan là update_data; nếu có bước khác thì chạy execute_plan bên dưới.
-                            data_steps = []
+                            # Chỉ xử lý "chỉ update_data" khi toàn bộ plan là update_data. Mọi thao tác theo chương đều qua Unified.
+                            unified_range_v7 = None
                             for s in (plan or []):
                                 if (s.get("intent") or "") != "update_data":
                                     continue
                                 a = s.get("args") or {}
                                 t = (a.get("data_operation_target") or "").strip()
-                                if t not in ("bible", "relation", "timeline", "chunking"):
-                                    continue
-                                op_type = a.get("data_operation_type") or "extract"
                                 ch_range = a.get("chapter_range")
-                                if ch_range and isinstance(ch_range, (list, tuple)) and len(ch_range) >= 2:
-                                    try:
-                                        start, end = int(ch_range[0]), int(ch_range[1])
-                                        start, end = min(start, end), max(start, end)
-                                        if start == end:
-                                            data_steps.append({"operation_type": op_type, "target": t, "chapter_number": start})
-                                        else:
-                                            data_steps.append({"operation_type": op_type, "target": t, "chapter_range": [start, end]})
-                                    except (ValueError, TypeError):
-                                        if ch_range and len(ch_range) >= 1:
-                                            data_steps.append({"operation_type": op_type, "target": t, "chapter_number": int(ch_range[0])})
-                                elif ch_range and len(ch_range) >= 1:
-                                    data_steps.append({"operation_type": op_type, "target": t, "chapter_number": int(ch_range[0])})
-                                else:
+                                if t not in ("unified", "") or not ch_range or not isinstance(ch_range, (list, tuple)):
                                     continue
-                            if data_steps:
+                                try:
+                                    if len(ch_range) >= 2:
+                                        start, end = int(ch_range[0]), int(ch_range[1])
+                                        unified_range_v7 = [min(start, end), max(start, end)]
+                                    elif len(ch_range) >= 1:
+                                        ch_num = int(ch_range[0])
+                                        unified_range_v7 = [ch_num, ch_num]
+                                except (ValueError, TypeError):
+                                    pass
+                                break
+                            if unified_range_v7:
                                 _start_data_operation_background(
-                                    project_id, user_id, prompt, active_persona, now_timestamp, steps=data_steps,
+                                    project_id, user_id, prompt, active_persona, now_timestamp,
+                                    unified_range=unified_range_v7,
                                 )
                                 v7_handled = True
                         if not v7_handled:
@@ -719,12 +801,32 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                                         {"story_id": project_id, "user_id": str(user_id) if user_id else None, "role": "model", "content": final_response, "created_at": now_timestamp, "metadata": {"v7": True, "verification_required": plan_result.get("verification_required")}},
                                     ]).execute()
                                     if not is_v_home:
-                                        _after_save_history_v_work(project_id, user_id, active_persona.get("role", ""))
+                                        _after_save_history_v_work(project_id, user_id, active_persona.get("role", ""), st.session_state.get("allow_data_changing_actions", False))
                                 except Exception:
                                     pass
                             v7_handled = True
                     elif router_out is None:
-                        router_out = SmartAIRouter.ai_router_pro_v2(prompt, recent_history_text, project_id)
+                        # Mô hình 3 bước: (1) Intent only (2) Context planner nếu cần data (3) LLM trả lời
+                        step1 = SmartAIRouter.intent_only_classifier(prompt, recent_history_text, project_id)
+                        intent_step1 = step1.get("intent", "chat_casual")
+                        if step1.get("needs_data"):
+                            router_out = SmartAIRouter.context_planner(
+                                prompt,
+                                intent_step1,
+                                recent_history_text,
+                                project_id,
+                                relevant_rules=step1.get("relevant_rules") or "",
+                            )
+                        else:
+                            router_out = {
+                                "intent": intent_step1,
+                                "rewritten_query": step1.get("rewritten_query", prompt),
+                                "clarification_question": step1.get("clarification_question", ""),
+                                "context_needs": [], "context_priority": [],
+                                "target_files": [], "target_bible_entities": [],
+                                "chapter_range": None, "chapter_range_mode": None, "chapter_range_count": 5,
+                                "query_target": "", "data_operation_type": "", "data_operation_target": "",
+                            }
                     if router_out is not None:
                         debug_notes = [f"Intent: {router_out.get('intent', 'chat_casual')}"] + debug_notes
 
@@ -749,7 +851,7 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                                     {"story_id": project_id, "user_id": str(user_id) if user_id else None, "role": "model", "content": f"[Cần làm rõ] {clarification_question}", "created_at": now_timestamp, "metadata": {"intent": intent}},
                                 ]).execute()
                                 if not is_v_home:
-                                    _after_save_history_v_work(project_id, user_id, active_persona.get("role", ""))
+                                    _after_save_history_v_work(project_id, user_id, active_persona.get("role", ""), st.session_state.get("allow_data_changing_actions", False))
                             except Exception:
                                 pass
                     elif intent == "suggest_v7":
@@ -769,42 +871,81 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                                     {"story_id": project_id, "user_id": str(user_id) if user_id else None, "role": "model", "content": model_msg, "created_at": now_timestamp, "metadata": {"intent": intent}},
                                 ]).execute()
                                 if not is_v_home:
-                                    _after_save_history_v_work(project_id, user_id, active_persona.get("role", ""))
+                                    _after_save_history_v_work(project_id, user_id, active_persona.get("role", ""), st.session_state.get("allow_data_changing_actions", False))
                             except Exception:
                                 pass
+                    elif intent in ("web_search", "chat_casual"):
+                        # Bước 1 (không cần DB): thực thi luôn và trả lời bằng LLM
+                        run_instruction = active_persona["core_instruction"]
+                        system_content = run_instruction + "\n\n- Hữu ích, súc tích. Ưu tiên tiếng Việt.\n- Chế độ: " + (active_persona.get("role") or "assistant")
+                        if intent == "web_search":
+                            try:
+                                from utils.web_search import web_search as do_web_search
+                                search_text = do_web_search(router_out.get("rewritten_query") or prompt, max_results=5)
+                                system_content += "\n\n--- KẾT QUẢ TRA CỨU (Web Search) ---\n" + (search_text or "(Không có kết quả)")
+                            except Exception as ex:
+                                system_content += "\n\n[Web search lỗi: " + str(ex) + ". Trả lời dựa trên kiến thức có sẵn.]"
+                        messages = [
+                            {"role": "system", "content": system_content},
+                            {"role": "user", "content": prompt},
+                        ]
+                        try:
+                            response = AIService.call_openrouter(
+                                messages=messages,
+                                model=st.session_state.get("selected_model", Config.DEFAULT_MODEL),
+                                temperature=st.session_state.get("temperature", 0.7),
+                                max_tokens=active_persona.get("max_tokens", 4000),
+                                stream=True,
+                            )
+                            with st.chat_message("assistant", avatar=active_persona["icon"]):
+                                if debug_notes:
+                                    st.caption(f"🧠 {', '.join(debug_notes)}")
+                                full_response_text = ""
+                                placeholder = st.empty()
+                                for chunk in response:
+                                    if chunk.choices[0].delta.content is not None:
+                                        content = chunk.choices[0].delta.content
+                                        full_response_text += content
+                                        placeholder.markdown(full_response_text + "▌")
+                                placeholder.markdown(full_response_text)
+                            if st.session_state.get("enable_history", True):
+                                try:
+                                    services = init_services()
+                                    supabase = services["supabase"]
+                                    supabase.table("chat_history").insert([
+                                        {"story_id": project_id, "user_id": str(user_id) if user_id else None, "role": "user", "content": prompt, "created_at": now_timestamp, "metadata": {"intent": intent}},
+                                        {"story_id": project_id, "user_id": str(user_id) if user_id else None, "role": "model", "content": full_response_text, "created_at": now_timestamp, "metadata": {"intent": intent}},
+                                    ]).execute()
+                                    if not is_v_home:
+                                        _after_save_history_v_work(project_id, user_id, active_persona.get("role", ""), st.session_state.get("allow_data_changing_actions", False))
+                                except Exception:
+                                    pass
+                        except Exception as ex:
+                            with st.chat_message("assistant", avatar=active_persona["icon"]):
+                                st.error(f"Lỗi khi trả lời: {ex}")
                     elif intent == "update_data" and not is_v_home and can_write:
                         ch_range = router_out.get("chapter_range")
-                        # @data_analyze: 4 bước (bible, relation, timeline, chunking)
-                        if router_out.get("_data_analyze_full") and ch_range and len(ch_range) >= 2:
-                            start, end = int(ch_range[0]), int(ch_range[1])
-                            start, end = min(start, end), max(start, end)
-                            data_steps = [
-                                {"operation_type": "extract", "target": "bible", "chapter_range": [start, end]},
-                                {"operation_type": "extract", "target": "relation", "chapter_range": [start, end]},
-                                {"operation_type": "extract", "target": "timeline", "chapter_range": [start, end]},
-                                {"operation_type": "extract", "target": "chunking", "chapter_range": [start, end]},
-                            ]
-                            _start_data_operation_background(
-                                project_id, user_id, prompt, active_persona, now_timestamp, steps=data_steps,
-                            )
-                        elif (router_out.get("data_operation_target") or "") in ("bible", "relation", "timeline", "chunking"):
-                            op_type = router_out.get("data_operation_type") or "extract"
-                            op_target = router_out.get("data_operation_target") or "bible"
-                            ch_num = int(ch_range[0]) if (ch_range and len(ch_range) >= 1) else None
-                            if ch_range and len(ch_range) >= 2:
+                        op_target = (router_out.get("data_operation_target") or "").strip()
+                        # Thao tác dữ liệu theo chương: chỉ qua Unified (1 LLM → Bible + Timeline + Chunks + Relations).
+                        if ch_range and op_target in ("unified", "") and op_target != "rule":
+                            if len(ch_range) >= 2:
                                 start, end = int(ch_range[0]), int(ch_range[1])
-                                ch_num = min(start, end)
-                            op_label = {"extract": "Trích xuất", "update": "Cập nhật", "delete": "Xóa"}.get(op_type, op_type)
-                            target_label = {"bible": "Bible", "relation": "Relation", "timeline": "Timeline", "chunking": "Chunking"}.get(op_target, op_target)
-                            if ch_num is None:
-                                with st.chat_message("assistant", avatar=active_persona['icon']):
-                                    st.caption("🧠 Intent: update_data (thao tác theo chương)")
-                                    st.warning("Không xác định được chương. Vui lòng nói rõ số chương hoặc tên chương (ví dụ: chương 1, chương Khởi đầu).")
-                            else:
+                                start, end = min(start, end), max(start, end)
                                 _start_data_operation_background(
                                     project_id, user_id, prompt, active_persona, now_timestamp,
-                                    single_op={"operation_type": op_type, "target": op_target, "chapter_number": ch_num},
+                                    unified_range=[start, end],
                                 )
+                            else:
+                                ch_num = int(ch_range[0]) if len(ch_range) >= 1 else None
+                                if ch_num is None:
+                                    with st.chat_message("assistant", avatar=active_persona['icon']):
+                                        st.caption("🧠 Intent: update_data (Unified)")
+                                        st.warning("Không xác định được chương. Vui lòng nói rõ (ví dụ: chương 1, chương 1 đến 10).")
+                                else:
+                                    _start_data_operation_background(
+                                        project_id, user_id, prompt, active_persona, now_timestamp,
+                                        unified_range=[ch_num, ch_num],
+                                    )
                     else:
                         max_context_tokens = Config.CONTEXT_SIZE_TOKENS.get(st.session_state.get("context_size", "medium"))
                         exec_result = None
@@ -990,9 +1131,9 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
 
                             if full_response_text:
                                 if is_v_home:
-                                    topic_start = _v_home_get_current_topic_start(user_id)
-                                    _v_home_save_message(user_id, "user", prompt, topic_start)
-                                    _v_home_save_message(user_id, "model", full_response_text, topic_start)
+                                    topic_start = _v_home_get_current_topic_start(user_id, project_id)
+                                    _v_home_save_message(user_id, project_id, "user", prompt, topic_start)
+                                    _v_home_save_message(user_id, project_id, "model", full_response_text, topic_start)
                                 elif st.session_state.get('enable_history', True):
                                     services = init_services()
                                     supabase = services['supabase']
@@ -1027,7 +1168,7 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
 
                                 # update_data (ghi nhớ quy tắc): lưu pending xác nhận trước khi ghi Bible (chỉ V Work; thao tác theo chương xử lý ở nhánh khác)
                                 op_t = (router_out.get("data_operation_target") or "").strip()
-                                if not is_v_home and intent == "update_data" and can_write and op_t not in ("bible", "relation", "timeline", "chunking"):
+                                if not is_v_home and intent == "update_data" and can_write and op_t not in ("bible", "relation", "timeline", "chunking", "unified"):
                                     st.session_state["pending_update_confirm"] = {
                                         "project_id": project_id,
                                         "prompt": prompt,
@@ -1038,20 +1179,22 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
 
                                 # V Work: tăng counter crystallize và trigger nếu >= 30 (reset về 0 sau crystallize)
                                 if not is_v_home and can_write and user_id:
-                                    _after_save_history_v_work(project_id, user_id, active_persona.get("role", ""))
+                                    _after_save_history_v_work(project_id, user_id, active_persona.get("role", ""), st.session_state.get("allow_data_changing_actions", False))
 
-                                # Rule mining (chỉ V Work, chỉ khi bật toggle)
-                                if not is_v_home and can_write and st.session_state.get('auto_extract_rules_chat', False):
+                                # Trích xuất luật từ chat (chỉ khi bật toggle trong V Work)
+                                if not is_v_home and can_write and st.session_state.get("extract_rules_from_chat", False):
                                     new_rules = RuleMiningSystem.extract_rules_raw(prompt, full_response_text)
                                     if new_rules:
-                                        st.session_state['pending_new_rules'] = [{"content": r, "analysis": None} for r in new_rules]
-                                    # Offer add to Semantic Intent (nếu bật auto-create và không phải chat phiếm)
+                                        st.session_state["pending_new_rules"] = [{"content": r, "analysis": None} for r in new_rules]
+
+                                # Gợi ý thêm Semantic Intent (điều khiển bởi tab Semantic Intent: semantic_intent_no_auto_create = 0 thì mới gợi ý)
+                                if not is_v_home and can_write and intent != "chat_casual":
                                     try:
                                         r = init_services()["supabase"].table("settings").select("value").eq("key", "semantic_intent_no_auto_create").execute()
                                         no_auto = r.data and r.data[0] and int(r.data[0].get("value", 0)) == 1
                                     except Exception:
-                                        no_auto = False
-                                    if not no_auto and intent != "chat_casual":
+                                        no_auto = True
+                                    if not no_auto:
                                         st.session_state["pending_semantic_add"] = {"prompt": prompt, "response": full_response_text, "context": context_text, "intent": intent}
 
                             elif not st.session_state.get('enable_history', True):
@@ -1072,29 +1215,32 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
             col_a, col_b = st.columns(2)
             with col_a:
                 if st.button("✅ Thêm vào Semantic", key=f"chat_semantic_add_btn_{chat_mode}"):
-                    def _add_semantic():
-                        try:
-                            svc = init_services()
-                            if not svc:
-                                return
-                            sb = svc["supabase"]
-                            vec = AIService.get_embedding(p.get("prompt", ""))
-                            ctx = p.get("context", "") or ""
-                            resp = p.get("response", "") or ""
-                            related_data = (ctx.rstrip() + "\n\n--- Câu trả lời ---\n" + resp) if ctx else resp
-                            payload = {"story_id": project_id, "question_sample": p.get("prompt", ""), "intent": "chat_casual", "related_data": related_data}
-                            if vec:
-                                payload["embedding"] = vec
+                    if not st.session_state.get("allow_data_changing_actions", False):
+                        st.warning("Bật toggle **Cho phép thao tác ảnh hưởng dữ liệu** (sidebar V Work) để thêm vào Semantic Intent.")
+                    else:
+                        def _add_semantic():
                             try:
-                                sb.table("semantic_intent").insert(payload).execute()
+                                svc = init_services()
+                                if not svc:
+                                    return
+                                sb = svc["supabase"]
+                                vec = AIService.get_embedding(p.get("prompt", ""))
+                                ctx = p.get("context", "") or ""
+                                resp = p.get("response", "") or ""
+                                related_data = (ctx.rstrip() + "\n\n--- Câu trả lời ---\n" + resp) if ctx else resp
+                                payload = {"story_id": project_id, "question_sample": p.get("prompt", ""), "intent": "chat_casual", "related_data": related_data}
+                                if vec:
+                                    payload["embedding"] = vec
+                                try:
+                                    sb.table("semantic_intent").insert(payload).execute()
+                                except Exception:
+                                    payload.pop("embedding", None)
+                                    sb.table("semantic_intent").insert(payload).execute()
                             except Exception:
-                                payload.pop("embedding", None)
-                                sb.table("semantic_intent").insert(payload).execute()
-                        except Exception:
-                            pass
-                    threading.Thread(target=_add_semantic, daemon=True).start()
-                    del st.session_state["pending_semantic_add"]
-                    st.toast("Đã thêm vào Semantic Intent (chạy ngầm).")
+                                pass
+                        threading.Thread(target=_add_semantic, daemon=True).start()
+                        del st.session_state["pending_semantic_add"]
+                        st.toast("Đã thêm vào Semantic Intent (chạy ngầm).")
             with col_b:
                 if st.button("❌ Bỏ qua", key=f"chat_semantic_skip_btn_{chat_mode}"):
                     del st.session_state["pending_semantic_add"]
@@ -1110,25 +1256,28 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
                 col_ok, col_no = st.columns(2)
                 with col_ok:
                     if st.button("✅ Xác nhận thực hiện", key=f"update_confirm_ok_{chat_mode}"):
-                        try:
-                            services = init_services()
-                            supabase = services["supabase"]
-                            content_to_save = (pu.get("response", "") or pu.get("update_summary", "") or "").strip()
-                            if content_to_save:
-                                vec = AIService.get_embedding(content_to_save[:8000])
-                                payload = {
-                                    "story_id": project_id,
-                                    "entity_name": f"[RULE] {datetime.now().strftime('%Y%m%d_%H%M%S')}",
-                                    "description": content_to_save,
-                                    "source_chapter": 0,
-                                }
-                                if vec:
-                                    payload["embedding"] = vec
-                                supabase.table("story_bible").insert(payload).execute()
-                                st.toast("Đã ghi nhớ / cập nhật vào Bible.")
-                            del st.session_state["pending_update_confirm"]
-                        except Exception as e:
-                            st.error(f"Lỗi khi ghi: {e}")
+                        if not st.session_state.get("allow_data_changing_actions", False):
+                            st.warning("Bật toggle **Cho phép thao tác ảnh hưởng dữ liệu** (sidebar V Work) để ghi vào Bible.")
+                        else:
+                            try:
+                                services = init_services()
+                                supabase = services["supabase"]
+                                content_to_save = (pu.get("response", "") or pu.get("update_summary", "") or "").strip()
+                                if content_to_save:
+                                    vec = AIService.get_embedding(content_to_save[:8000])
+                                    payload = {
+                                        "story_id": project_id,
+                                        "entity_name": f"[RULE] {datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                                        "description": content_to_save,
+                                        "source_chapter": 0,
+                                    }
+                                    if vec:
+                                        payload["embedding"] = vec
+                                    supabase.table("story_bible").insert(payload).execute()
+                                    st.toast("Đã ghi nhớ / cập nhật vào Bible.")
+                                del st.session_state["pending_update_confirm"]
+                            except Exception as e:
+                                st.error(f"Lỗi khi ghi: {e}")
                 with col_no:
                     if st.button("❌ Hủy", key=f"update_confirm_no_{chat_mode}"):
                         del st.session_state["pending_update_confirm"]

@@ -304,10 +304,17 @@ class ContextManager:
             context_parts.append(strict_text)
             total_tokens += AIService.estimate_tokens(strict_text)
 
-        rules_text = ContextManager.get_mandatory_rules(project_id)
-        if rules_text:
+        # Bước 3: Dùng luật đã lọc từ bước 2 (included_rules_text) nếu có; không thì lấy toàn bộ mandatory rules
+        included_rules = (router_result.get("included_rules_text") or "").strip()
+        if included_rules:
+            rules_text = "\n🔥 --- MANDATORY RULES (đã lọc liên quan) ---\n" + included_rules + "\n"
             context_parts.append(rules_text)
             total_tokens += AIService.estimate_tokens(rules_text)
+        else:
+            rules_text = ContextManager.get_mandatory_rules(project_id)
+            if rules_text:
+                context_parts.append(rules_text)
+                total_tokens += AIService.estimate_tokens(rules_text)
 
         intent = router_result.get("intent", "chat_casual")
         target_files = router_result.get("target_files", [])

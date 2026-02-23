@@ -251,6 +251,64 @@ def get_chapter_list_for_router(project_id: str) -> str:
         return "(Trống)"
 
 
+def get_project_overview(project_id: str, bible_max_tokens: int = 2000) -> Dict[str, Any]:
+    """
+    Bức tranh tổng quan DB cho Context Planner (bước 2): project name, arcs, chapters, bible index,
+    số lượng relation / timeline / chunks.
+    """
+    out = {
+        "project_name": "",
+        "arcs_summary": "(Trống)",
+        "chapter_list_str": "(Trống)",
+        "bible_index": "",
+        "relation_summary": "0 quan hệ",
+        "timeline_summary": "0 sự kiện",
+        "chunks_summary": "0 chunks",
+    }
+    if not project_id:
+        return out
+    try:
+        services = init_services()
+        if not services:
+            return out
+        supabase = services["supabase"]
+        # Project name
+        r = supabase.table("stories").select("name, title").eq("id", project_id).limit(1).execute()
+        if r.data and len(r.data) > 0:
+            row = r.data[0]
+            out["project_name"] = (row.get("name") or row.get("title") or "").strip() or "(Không tên)"
+        # Arcs
+        ar = supabase.table("arcs").select("name, title, sort_order").eq("story_id", project_id).order("sort_order").execute()
+        if ar.data:
+            parts = []
+            for a in ar.data:
+                name = (a.get("name") or a.get("title") or "").strip() or "Arc"
+                parts.append(name)
+            out["arcs_summary"] = ", ".join(parts) if parts else "(Trống)"
+        # Chapters & Bible (dùng hàm có sẵn)
+        out["chapter_list_str"] = get_chapter_list_for_router(project_id)
+        out["bible_index"] = get_bible_index(project_id, max_tokens=bible_max_tokens)
+        # Counts: entity_relations, timeline_events, chunks
+        try:
+            rel = supabase.table("entity_relations").select("id", count="exact").eq("story_id", project_id).limit(0).execute()
+            out["relation_summary"] = f"{getattr(rel, 'count', 0) or 0} quan hệ"
+        except Exception:
+            pass
+        try:
+            te = supabase.table("timeline_events").select("id", count="exact").eq("story_id", project_id).limit(0).execute()
+            out["timeline_summary"] = f"{getattr(te, 'count', 0) or 0} sự kiện"
+        except Exception:
+            pass
+        try:
+            ch = supabase.table("chunks").select("id", count="exact").eq("story_id", project_id).limit(0).execute()
+            out["chunks_summary"] = f"{getattr(ch, 'count', 0) or 0} chunks"
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"get_project_overview error: {e}")
+    return out
+
+
 def parse_chapter_range_from_query(query: str) -> Optional[Tuple[int, int]]:
     if not query or not isinstance(query, str) or not query.strip():
         return None
