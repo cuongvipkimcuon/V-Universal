@@ -80,15 +80,15 @@ def _verify_grounding_llm(response: str, context: str, max_context_chars: int = 
     ctx_slice = context[:max_context_chars] if len(context) > max_context_chars else context
     resp_slice = (response[:2500] + "...") if len(response) > 2500 else response
 
-    judge_prompt = f"""Bạn là người kiểm tra. Nhiệm vụ: xác định xem RESPONSE có CHỈ dựa trên thông tin trong CONTEXT không.
+    judge_prompt = f"""Bạn là người kiểm tra chống bịa đặt. Nhiệm vụ: xác định RESPONSE có CHỈ dựa trên thông tin trong CONTEXT không.
 
-CONTEXT:
+CONTEXT (nguồn duy nhất được phép):
 {ctx_slice}
 
 RESPONSE:
 {resp_slice}
 
-Nếu RESPONSE chứa bất kỳ thông tin/claim nào KHÔNG có nguồn trong CONTEXT (bịa đặt, suy diễn ngoài context), trả lời:
+Quy tắc: Mọi sự kiện, tên, số liệu, quan hệ, mô tả trong RESPONSE phải có nguồn rõ trong CONTEXT. Nếu RESPONSE chứa thông tin/claim KHÔNG có trong CONTEXT (bịa đặt, suy diễn thêm, nội dung không có trong context), trả lời:
 VIOLATION: <trích đoạn ngắn vi phạm>
 Nếu RESPONSE chỉ dùng thông tin từ CONTEXT, trả lời:
 OK"""

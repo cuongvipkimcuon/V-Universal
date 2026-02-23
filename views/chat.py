@@ -471,7 +471,7 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                 available,
                 index=idx,
                 key=f"chat_persona_key_{chat_mode}",
-                help="Chọn persona để AI trả lời theo phong cách này."
+                help="Chọn persona để AI trả lời theo phong cách này. Nếu câu trả lời quá cộc lốc, chỉnh system prompt của persona trong Settings sẽ giúp trả lời tự nhiên, đủ ý hơn."
             )
             active_persona = PersonaSystem.get_persona(selected_persona_key)
             st.session_state['enable_history'] = True
@@ -528,12 +528,25 @@ def render_chat_tab(project_id, persona, chat_mode=None):
             st.session_state["history_depth"] = st.session_state.get("history_depth", 5)
 
     def _chat_messages_fragment():
+        # Ô chat cố định trên cùng (form thay st.chat_input để luôn nằm trên)
+        form_key = "chat_form_v_home" if is_v_home else "chat_form_v_work"
+        with st.form(form_key):
+            prompt = st.text_input(
+                "Tin nhắn",
+                placeholder=f"Hỏi {active_persona['icon']} AI Assistant...",
+                key=f"chat_input_field_{'v_home' if is_v_home else 'v_work'}",
+                label_visibility="collapsed",
+            )
+            submitted = st.form_submit_button("Gửi")
+        st.divider()
+
         if is_v_home:
             if not project_id or str(project_id).strip() in ("", "None"):
                 visible_msgs = []
                 st.info("Chọn một project ở sidebar để dùng V Home (tin nhắn gắn với project đó).")
             else:
                 visible_msgs = _v_home_load_messages(user_id, project_id)
+            # Thứ tự thời gian: câu hỏi ở trên, câu trả lời ở dưới từng cặp
             for m in visible_msgs:
                 role_icon = active_persona["icon"] if m["role"] == "model" else None
                 with st.chat_message(m["role"], avatar=role_icon):
@@ -560,8 +573,8 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                     )
                     msgs = msgs_data.data[::-1] if msgs_data.data else []
                     visible_msgs = [m for m in msgs if m["created_at"] > st.session_state.get("chat_cutoff", "1970-01-01")]
-                    # Hiển thị càng mới càng ở trên cao (newest first)
-                    for m in reversed(visible_msgs):
+                    # Thứ tự thời gian: câu hỏi ở trên, câu trả lời ở dưới từng cặp
+                    for m in visible_msgs:
                         role_icon = active_persona["icon"] if m["role"] == "model" else None
                         with st.chat_message(m["role"], avatar=role_icon):
                             st.markdown(m["content"])
@@ -571,8 +584,8 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                 except Exception as e:
                     st.error(f"Error loading history: {e}")
         history_depth = st.session_state.get("history_depth", 5)
-        chat_input_key = "chat_input_v_home" if is_v_home else "chat_input_main"
-        if prompt := st.chat_input(f"Ask {active_persona['icon']} AI Assistant...", key=chat_input_key):
+        prompt = (prompt or "").strip()
+        if submitted and prompt:
             with st.chat_message("user"):
                 st.markdown(prompt)
 
@@ -652,7 +665,8 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                         intent_step1 = step1.get("intent", "chat_casual")
                         needs_data = step1.get("needs_data", False)
                         use_v7 = st.session_state.get("use_v7_planner", False)
-                        want_multi = (intent_step1 == "suggest_v7") or is_multi_intent_request(prompt)
+                        # Chỉ chạy V7 khi RÕ RÀNG cần nhiều bước: router suggest_v7 VÀ câu có cụm đa intent (tránh câu đơn bị ép V7)
+                        want_multi = (intent_step1 == "suggest_v7") and is_multi_intent_request(prompt)
 
                         if use_v7 and want_multi:
                             can_call_plan = max_llm_calls_per_turn == 0 or llm_calls_this_turn[0] < max_llm_calls_per_turn
@@ -740,13 +754,15 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                                     unified_range=unified_range_v7,
                                 )
                                 v7_handled = True
-                        if not v7_handled:
+                        # Chỉ chạy khối V7 (execute_plan + draft + verify) khi có plan thật (từ V7 planner). Plan rỗng = đã đi router -> bỏ qua, xuống dùng router_out.
+                        if not v7_handled and plan:
                             retries_used = 0
                             status_label = "V7 Multi-step"
-                            with st.status(f"📐 {status_label}", expanded=True) as status:
+                            _plan = plan_result or {}
+                            with st.status(f"📐 {status_label}", expanded=False) as status:
                                 st.write("🧠 Planning...")
-                                if plan_result.get("analysis"):
-                                    st.caption(plan_result["analysis"][:500] + ("..." if len(plan_result.get("analysis", "")) > 500 else ""))
+                                if _plan.get("analysis"):
+                                    st.caption(_plan["analysis"][:500] + ("..." if len(_plan.get("analysis", "")) > 500 else ""))
                                 cumulative_context = ""
                                 sources = []
                                 step_results = []
@@ -779,7 +795,7 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                                     if not can_draft:
                                         draft_response = f"(Đã đạt giới hạn {max_llm_calls_per_turn} lần gọi LLM cho lượt này. Có thể tăng trong **Settings → V8 & Observability**.)"
                                     else:
-                                        system_content = (active_persona.get("system_prompt") or "") + "\n\n--- CONTEXT (Các bước đã thực thi) ---\n" + cumulative_context
+                                        system_content = (active_persona.get("system_prompt") or "") + "\n\nQUY TẮC: Chỉ trả lời dựa trên CONTEXT bên dưới. Không bịa đặt, không thêm thông tin ngoài context.\n\n--- CONTEXT (Các bước đã thực thi) ---\n" + cumulative_context
                                         user_content = prompt
                                         draft_resp = AIService.call_openrouter(
                                             messages=[
@@ -794,7 +810,8 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                                         draft_response = (draft_resp.choices[0].message.content or "").strip()
                                         llm_calls_this_turn[0] += 1
                                     st.write("🛡️ Verifying...")
-                                    verification_required = plan_result.get("verification_required", True)
+                                    # Bật Strict mode thì luôn verify để chống bịa dữ liệu
+                                    verification_required = st.session_state.get("strict_mode", False) or _plan.get("verification_required", True)
 
                                     def _llm_generate(system_content: str, user_content: str) -> str:
                                         r = AIService.call_openrouter(
@@ -837,13 +854,13 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                                     _placeholder.markdown(final_response[:_i + _chunk] + "▌")
                                     time.sleep(0.02)
                                 _placeholder.markdown(final_response)
-                                with st.expander("📊 V7 Details"):
+                                with st.expander("📊 V7 Details", expanded=False):
                                     st.caption(f"Steps: {len(step_results)} | Verification retries: {retries_used}")
                                     if replan_events:
                                         st.caption("🔄 Re-plan: " + "; ".join([f"Step {e.get('step_id')} → {e.get('action')}" for e in replan_events]))
                                     st.json({
-                                        "plan": plan_result.get("plan"),
-                                        "verification_required": plan_result.get("verification_required"),
+                                        "plan": _plan.get("plan"),
+                                        "verification_required": _plan.get("verification_required"),
                                         "replan_events": replan_events,
                                     }, expanded=False)
 
@@ -852,8 +869,8 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                                     services = init_services()
                                     supabase = services['supabase']
                                     supabase.table("chat_history").insert([
-                                        {"story_id": project_id, "user_id": str(user_id) if user_id else None, "role": "user", "content": prompt, "created_at": now_timestamp, "metadata": {"v7": True, "plan": plan_result.get("plan")}},
-                                        {"story_id": project_id, "user_id": str(user_id) if user_id else None, "role": "model", "content": final_response, "created_at": now_timestamp, "metadata": {"v7": True, "verification_required": plan_result.get("verification_required")}},
+                                        {"story_id": project_id, "user_id": str(user_id) if user_id else None, "role": "user", "content": prompt, "created_at": now_timestamp, "metadata": {"v7": True, "plan": _plan.get("plan")}},
+                                        {"story_id": project_id, "user_id": str(user_id) if user_id else None, "role": "model", "content": final_response, "created_at": now_timestamp, "metadata": {"v7": True, "verification_required": _plan.get("verification_required")}},
                                     ]).execute()
                                     if not is_v_home:
                                         _after_save_history_v_work(project_id, user_id, active_persona.get("role", ""), st.session_state.get("allow_data_changing_actions", False))
@@ -913,8 +930,9 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                         if not can_call:
                             full_response_text = f"(Đã đạt giới hạn {max_llm_calls_per_turn} lần gọi LLM cho lượt này. Có thể tăng trong **Settings → V8 & Observability**.)"
                             with st.chat_message("assistant", avatar=active_persona["icon"]):
-                                if debug_notes:
-                                    st.caption(f"🧠 {', '.join(debug_notes)}")
+                                with st.expander("📂 Cách V lấy dữ liệu / Chi tiết", expanded=False):
+                                    if debug_notes:
+                                        st.caption(f"🧠 {', '.join(debug_notes)}")
                                 st.markdown(full_response_text)
                         else:
                             run_instruction = active_persona["core_instruction"]
@@ -940,8 +958,9 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                                     stream=True,
                                 )
                                 with st.chat_message("assistant", avatar=active_persona["icon"]):
-                                    if debug_notes:
-                                        st.caption(f"🧠 {', '.join(debug_notes)}")
+                                    with st.expander("📂 Cách V lấy dữ liệu / Chi tiết", expanded=False):
+                                        if debug_notes:
+                                            st.caption(f"🧠 {', '.join(debug_notes)}")
                                     full_response_text = ""
                                     placeholder = st.empty()
                                     for chunk in response:
@@ -1073,7 +1092,7 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
 
             HƯỚNG DẪN:
             - Trả lời dựa trên Context nếu có.
-            - Hữu ích, súc tích, đi thẳng vào vấn đề.
+            - Tự nhiên, đủ ý, thân thiện; tránh cộc lốc. Hữu ích, đi thẳng vào vấn đề nhưng không cắt xén quá mức.
             - Chế độ hiện tại: {active_persona['role']}
             - Ngôn ngữ: Ưu tiên Tiếng Việt (trừ khi User yêu cầu khác hoặc code).
             """
@@ -1101,10 +1120,11 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
                                 full_response_text = f"(Đã đạt giới hạn {max_llm_calls_per_turn} lần gọi LLM cho lượt này. Có thể tăng trong **Settings → V8 & Observability**.)"
                                 model = st.session_state.get('selected_model', Config.DEFAULT_MODEL)
                                 with st.chat_message("assistant", avatar=active_persona['icon']):
-                                    if debug_notes:
-                                        st.caption(f"🧠 {', '.join(debug_notes)}")
-                                    if st.session_state.get('strict_mode'):
-                                        st.caption("🔒 Strict Mode: ON")
+                                    with st.expander("📂 Cách V lấy dữ liệu / Chi tiết", expanded=False):
+                                        if debug_notes:
+                                            st.caption(f"🧠 {', '.join(debug_notes)}")
+                                        if st.session_state.get('strict_mode'):
+                                            st.caption("🔒 Strict Mode: ON")
                                     st.markdown(full_response_text)
                             else:
                                 llm_calls_this_turn[0] += 1
@@ -1119,10 +1139,11 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
                                 )
 
                                 with st.chat_message("assistant", avatar=active_persona['icon']):
-                                    if debug_notes:
-                                        st.caption(f"🧠 {', '.join(debug_notes)}")
-                                    if st.session_state.get('strict_mode'):
-                                        st.caption("🔒 Strict Mode: ON")
+                                    with st.expander("📂 Cách V lấy dữ liệu / Chi tiết", expanded=False):
+                                        if debug_notes:
+                                            st.caption(f"🧠 {', '.join(debug_notes)}")
+                                        if st.session_state.get('strict_mode'):
+                                            st.caption("🔒 Strict Mode: ON")
 
                                     full_response_text = ""
                                     placeholder = st.empty()
