@@ -72,10 +72,10 @@ class Config:
 
     # Default settings
     DEFAULT_MODEL = "anthropic/claude-3.5-haiku"
-    # Model mặc định cho công cụ (Router, Unified extract, Data Analyze...) — :nitro = OpenRouter ưu tiên throughput
-    DEFAULT_TOOL_MODEL = "deepseek/deepseek-v3.1:nitro"
+    # Model mặc định cho công cụ (Router, Unified extract, Data Analyze...) — ưu tiên throughput qua provider.sort trong request
+    DEFAULT_TOOL_MODEL = "deepseek/deepseek-v3.1"
     EMBEDDING_MODEL = "qwen/qwen3-embedding-8b"
-    ROUTER_MODEL = "deepseek/deepseek-v3.1:nitro"
+    ROUTER_MODEL = "deepseek/deepseek-v3.1"
     # Model rẻ cho auto-summary / metadata (Workstation)
     METADATA_MODEL = "google/gemini-2.5-flash"
 

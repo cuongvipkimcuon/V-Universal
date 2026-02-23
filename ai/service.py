@@ -51,13 +51,16 @@ class AIService:
                 }
             )
 
+            # OpenRouter: ưu tiên throughput (provider.sort) khi gọi model
+            extra = {"provider": {"sort": "throughput"}}
             response = client.chat.completions.create(
                 model=model,
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 stream=stream,
-                response_format=response_format
+                response_format=response_format,
+                extra_body=extra,
             )
 
             return response
