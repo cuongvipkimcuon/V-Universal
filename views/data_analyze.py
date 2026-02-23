@@ -79,6 +79,8 @@ NỘI DUNG (Phần {i+1}/{len(chunks)}):
 
 NHIỆM VỤ: {ext_persona.get('extractor_prompt', 'Trích xuất các thực thể quan trọng từ nội dung trên.')}
 
+Ưu tiên trích xuất ĐẦY ĐỦ: nhân vật dù chính hay phụ, địa điểm dù lớn hay nhỏ, sự kiện thoáng qua, đồ vật, khái niệm. Khi nghi ngờ vẫn liệt kê.
+
 ⛔️ YÊU CẦU: Trả về JSON với key "items". Trường "type" phải là đúng MỘT trong: {prefix_list_str}. "description": tóm tắt dưới 50 từ.
 Nếu không tìm thấy: {{ "items": [] }}. Chỉ trả về JSON."""
         try:
@@ -270,5 +272,66 @@ def _render_extract_bible_relations_chunking(project_id, content, chap_num, sele
                 st.session_state["update_trigger"] = st.session_state.get("update_trigger", 0) + 1
             else:
                 st.error("Không tạo được job.")
+    st.markdown("---")
+    st.subheader("➕ Thêm trên nền có sẵn (không xóa)")
+    st.caption("Trích xuất từ chương đã chọn và **thêm** vào dữ liệu hiện có (không xóa Bible/Timeline/Chunks/Relations của chương). Khác với Unified là xóa rồi làm lại.")
+    if can_write:
+        col_b, col_r, col_t, col_c = st.columns(4)
+        with col_b:
+            if st.button("📚 Thêm Bible từ chương", key="da_add_bible_btn"):
+                job_id = create_job(
+                    story_id=project_id,
+                    user_id=uid or None,
+                    job_type="data_analyze_bible",
+                    label=f"Thêm Bible chương {chap_num}",
+                    payload={"chapter_number": chap_num, "exclude_existing": True},
+                    post_to_chat=False,
+                )
+                if job_id:
+                    threading.Thread(target=run_job_worker, args=(job_id,), daemon=True).start()
+                    st.toast("Đã xếp hàng. Xem tab Background Jobs.")
+                    st.session_state["update_trigger"] = st.session_state.get("update_trigger", 0) + 1
+        with col_r:
+            if st.button("🔗 Thêm Relation từ chương", key="da_add_relation_btn"):
+                job_id = create_job(
+                    story_id=project_id,
+                    user_id=uid or None,
+                    job_type="data_analyze_relation",
+                    label=f"Thêm Relation chương {chap_num}",
+                    payload={"chapter_number": chap_num, "only_new": True},
+                    post_to_chat=False,
+                )
+                if job_id:
+                    threading.Thread(target=run_job_worker, args=(job_id,), daemon=True).start()
+                    st.toast("Đã xếp hàng. Xem tab Background Jobs.")
+                    st.session_state["update_trigger"] = st.session_state.get("update_trigger", 0) + 1
+        with col_t:
+            if st.button("📅 Thêm Timeline từ chương", key="da_add_timeline_btn"):
+                job_id = create_job(
+                    story_id=project_id,
+                    user_id=uid or None,
+                    job_type="data_analyze_timeline",
+                    label=f"Thêm Timeline chương {chap_num}",
+                    payload={"chapter_number": chap_num, "append_only": True},
+                    post_to_chat=False,
+                )
+                if job_id:
+                    threading.Thread(target=run_job_worker, args=(job_id,), daemon=True).start()
+                    st.toast("Đã xếp hàng. Xem tab Background Jobs.")
+                    st.session_state["update_trigger"] = st.session_state.get("update_trigger", 0) + 1
+        with col_c:
+            if st.button("✂️ Thêm Chunk từ chương", key="da_add_chunk_btn"):
+                job_id = create_job(
+                    story_id=project_id,
+                    user_id=uid or None,
+                    job_type="data_analyze_chunk",
+                    label=f"Thêm Chunk chương {chap_num}",
+                    payload={"chapter_number": chap_num, "append_only": True},
+                    post_to_chat=False,
+                )
+                if job_id:
+                    threading.Thread(target=run_job_worker, args=(job_id,), daemon=True).start()
+                    st.toast("Đã xếp hàng. Xem tab Background Jobs.")
+                    st.session_state["update_trigger"] = st.session_state.get("update_trigger", 0) + 1
     if not can_write:
         st.warning("Chỉ thành viên có quyền ghi mới được thực hiện.")

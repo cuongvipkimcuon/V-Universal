@@ -37,11 +37,17 @@ def build_logic_context_for_chapter(
     chapter_number: int,
     arc_id: Optional[str] = None,
     include_archived: bool = False,
+    dimensions: Optional[List[str]] = None,
 ) -> str:
     """
     Tạo context soát logic: timeline, bible, relation, chat_crystallize [CHAT], rule [RULE].
-    Dùng chung cho Data Health soát chương và Review (Review có thể gọi hàm này).
+    dimensions: None hoặc rỗng = tất cả; nếu có thì chỉ gồm các dimension trong list (timeline, bible, relation, chat_crystallize, rule).
     """
+    want_all = not dimensions or len(dimensions) == 0
+    want = set((d or "").strip().lower() for d in (dimensions or [])) if dimensions else set(LOGIC_DIMENSIONS)
+    if want_all:
+        want = set(LOGIC_DIMENSIONS)
+
     parts = []
     try:
         services = init_services()
@@ -49,71 +55,80 @@ def build_logic_context_for_chapter(
             return "(Không kết nối được dịch vụ.)"
         supabase = services["supabase"]
 
-        # 1) Timeline: sự kiện liên quan chương này hoặc toàn dự án (rút gọn)
-        events = get_timeline_events(
-            project_id,
-            limit=100,
-            chapter_range=(chapter_number, chapter_number),
-            arc_id=arc_id,
-        )
-        if not events:
-            events = get_timeline_events(project_id, limit=80, arc_id=arc_id)
-        if events:
-            lines = ["[TIMELINE - Sự kiện đã thiết lập]"]
-            for e in events[:80]:
-                order = e.get("event_order", 0)
-                title = (e.get("title") or "").strip()
-                desc = (e.get("description") or "").strip()
-                if len(desc) > 400:
-                    desc = desc[:397] + "..."
-                if title or desc:
-                    lines.append(f"  • #{order}: {title} — {desc}")
-            parts.append("\n".join(lines))
-        else:
-            parts.append("[TIMELINE] Chưa có dữ liệu sự kiện.")
-
-        # 2) Bible (không archive) + 3) Rule + 4) Chat crystallize: từ story_bible
-        bible_entries = _get_bible_for_logic(project_id, include_archived=include_archived)
-        bible_lines = []
-        rule_lines = []
-        chat_lines = []
-        for e in bible_entries[:400]:
-            name = (e.get("entity_name") or "").strip()
-            desc = (e.get("description") or "").strip()
-            if len(desc) > 800:
-                desc = desc[:797] + "..."
-            if not name:
-                continue
-            if name.startswith("[RULE]"):
-                rule_lines.append(f"  • {name}: {desc}")
-            elif name.startswith("[CHAT]"):
-                chat_lines.append(f"  • {name}: {desc}")
+        # 1) Timeline
+        if "timeline" in want:
+            events = get_timeline_events(
+                project_id,
+                limit=100,
+                chapter_range=(chapter_number, chapter_number),
+                arc_id=arc_id,
+            )
+            if not events:
+                events = get_timeline_events(project_id, limit=80, arc_id=arc_id)
+            if events:
+                lines = ["[TIMELINE - Sự kiện đã thiết lập]"]
+                for e in events[:80]:
+                    order = e.get("event_order", 0)
+                    title = (e.get("title") or "").strip()
+                    desc = (e.get("description") or "").strip()
+                    if len(desc) > 400:
+                        desc = desc[:397] + "..."
+                    if title or desc:
+                        lines.append(f"  • #{order}: {title} — {desc}")
+                parts.append("\n".join(lines))
             else:
-                bible_lines.append(f"  • {name}: {desc}")
+                parts.append("[TIMELINE] Chưa có dữ liệu sự kiện.")
 
-        if bible_lines:
-            parts.append("[BIBLE - Nhân vật / khái niệm]\n" + "\n".join(bible_lines))
-        if rule_lines:
-            parts.append("[RULE - Quy tắc đã lưu]\n" + "\n".join(rule_lines))
-        if chat_lines:
-            parts.append("[CHAT CRYSTALLIZE - Điểm nhớ từ hội thoại]\n" + "\n".join(chat_lines))
+        # 2) Bible + 3) Rule + 4) Chat crystallize
+        if "bible" in want or "rule" in want or "chat_crystallize" in want:
+            bible_entries = _get_bible_for_logic(project_id, include_archived=include_archived)
+            bible_lines = []
+            rule_lines = []
+            chat_lines = []
+            for e in bible_entries[:400]:
+                name = (e.get("entity_name") or "").strip()
+                desc = (e.get("description") or "").strip()
+                if len(desc) > 800:
+                    desc = desc[:797] + "..."
+                if not name:
+                    continue
+                if name.startswith("[RULE]"):
+                    if "rule" in want:
+                        rule_lines.append(f"  • {name}: {desc}")
+                elif name.startswith("[CHAT]"):
+                    if "chat_crystallize" in want:
+                        chat_lines.append(f"  • {name}: {desc}")
+                else:
+                    if "bible" in want:
+                        bible_lines.append(f"  • {name}: {desc}")
+
+            if bible_lines:
+                parts.append("[BIBLE - Nhân vật / khái niệm]\n" + "\n".join(bible_lines))
+            if rule_lines:
+                parts.append("[RULE - Quy tắc đã lưu]\n" + "\n".join(rule_lines))
+            if chat_lines:
+                parts.append("[CHAT CRYSTALLIZE - Điểm nhớ từ hội thoại]\n" + "\n".join(chat_lines))
 
         # 5) Relations
-        id_to_name = {str(e.get("id")): (e.get("entity_name") or "").strip() for e in bible_entries if e.get("id")}
-        try:
-            rel_res = supabase.table("entity_relations").select("*").eq("story_id", project_id).execute()
-            if rel_res.data:
-                rel_lines = ["[QUAN HỆ THỰC THỂ]"]
-                for r in rel_res.data[:400]:
-                    src_id = r.get("source_entity_id") or r.get("entity_id")
-                    tgt_id = r.get("target_entity_id")
-                    src_name = id_to_name.get(str(src_id), str(src_id) if src_id else "?")
-                    tgt_name = id_to_name.get(str(tgt_id), str(tgt_id) if tgt_id else "?")
-                    rtype = r.get("relation_type") or r.get("relation") or "liên quan"
-                    rel_lines.append(f"  • {src_name} — {rtype} — {tgt_name}")
-                parts.append("\n".join(rel_lines))
-        except Exception:
-            parts.append("[QUAN HỆ] Chưa có dữ liệu.")
+        if "relation" in want:
+            bible_entries = _get_bible_for_logic(project_id, include_archived=include_archived)
+            id_to_name = {str(e.get("id")): (e.get("entity_name") or "").strip() for e in bible_entries if e.get("id")}
+            try:
+                rel_res = supabase.table("entity_relations").select("*").eq("story_id", project_id).execute()
+                if rel_res.data:
+                    rel_lines = ["[QUAN HỆ THỰC THỂ]"]
+                    for r in rel_res.data[:400]:
+                        src_id = r.get("source_entity_id") or r.get("entity_id")
+                        tgt_id = r.get("target_entity_id")
+                        src_name = id_to_name.get(str(src_id), str(src_id) if src_id else "?")
+                        tgt_name = id_to_name.get(str(tgt_id), str(tgt_id) if tgt_id else "?")
+                        rtype = r.get("relation_type") or r.get("relation") or "liên quan"
+                        rel_lines.append(f"  • {src_name} — {rtype} — {tgt_name}")
+                    parts.append("\n".join(rel_lines))
+                else:
+                    parts.append("[QUAN HỆ] Chưa có dữ liệu.")
+            except Exception:
+                parts.append("[QUAN HỆ] Chưa có dữ liệu.")
 
     except Exception as e:
         print(f"build_logic_context_for_chapter error: {e}")
@@ -175,10 +190,11 @@ def run_chapter_logic_check(
     chapter_content: str,
     arc_id: Optional[str] = None,
     max_content_chars: int = 80000,
+    dimensions: Optional[List[str]] = None,
 ) -> Tuple[List[Dict[str, Any]], int, Optional[int], str]:
     """
     Chạy soát logic 1 chương. Tạo chapter_logic_checks, gọi LLM, ghi chapter_logic_issues.
-    Những issue cũ (active) không còn trong kết quả mới -> đánh dấu resolved.
+    dimensions: None hoặc rỗng = soát cả 5 dimension; nếu có thì chỉ soát các dimension trong list (timeline, bible, relation, chat_crystallize, rule).
     Returns: (new_issues, resolved_count, check_id, error_message).
     """
     check_id = None
@@ -200,13 +216,19 @@ def run_chapter_logic_check(
             return [], 0, None, "Không tạo được bản ghi check."
 
         context_ref = build_logic_context_for_chapter(
-            project_id, chapter_id, chapter_number, arc_id, include_archived=False
+            project_id, chapter_id, chapter_number, arc_id, include_archived=False, dimensions=dimensions
         )
         content_slice = (chapter_content or "")[:max_content_chars]
         if len(chapter_content or "") > max_content_chars:
             content_slice += "\n\n[... (nội dung cắt bớt do giới hạn)]"
 
-        prompt = f"""Bạn là trợ lý kiểm tra tính logic của truyện. Soát nội dung chương dưới đây với 5 nguồn tham chiếu: TIMELINE, BIBLE, RELATION, CHAT_CRYSTALLIZE, RULE.
+        dim_list = [d for d in (dimensions or []) if (d or "").strip() and (d or "").strip().lower() in LOGIC_DIMENSIONS]
+        if not dim_list:
+            dim_list = list(LOGIC_DIMENSIONS)
+        dim_instruction = ", ".join(dim_list)
+        scope_note = f" Chỉ soát các dimension: {dim_instruction}." if dimensions and len(dimensions) > 0 else ""
+
+        prompt = f"""Bạn là trợ lý kiểm tra tính logic của truyện. Soát nội dung chương dưới đây với nguồn tham chiếu đã cung cấp.{scope_note}
 
 DỮ LIỆU THAM CHIẾU (đã thiết lập trong dự án):
 ---
@@ -218,9 +240,9 @@ NỘI DUNG CHƯƠNG CẦN SOÁT (Chương #{chapter_number}: {chapter_title}):
 {content_slice}
 ---
 
-YÊU CẦU: Tìm mâu thuẫn logic, điểm vô lý, plot hole: (1) Timeline: sự kiện trong chương có trái với thứ tự/ mô tả timeline đã có không? (2) Bible: nhân vật/địa điểm/khái niệm có sai lệch với định nghĩa Bible không? (3) Relation: quan hệ giữa nhân vật có đúng với entity_relations không? (4) Chat crystallize: có trái với điểm nhớ [CHAT] không? (5) Rule: có vi phạm quy tắc [RULE] không?
+YÊU CẦU: Tìm mâu thuẫn logic, điểm vô lý, plot hole theo từng nguồn có trong DỮ LIỆU THAM CHIẾU: Timeline (sự kiện trái thứ tự/mô tả?), Bible (nhân vật/địa điểm sai lệch?), Relation (quan hệ đúng entity_relations?), Chat crystallize (trái [CHAT]?), Rule (vi phạm [RULE]?). Chỉ báo lỗi thuộc dimension đã cho.
 
-Trả về ĐÚNG MỘT mảng JSON, mỗi phần tử là object có key: "dimension" (một trong: timeline, bible, relation, chat_crystallize, rule), "message" (mô tả ngắn lỗi), "details" (object tùy chọn). Nếu không có lỗi, trả về mảng rỗng [].
+Trả về ĐÚNG MỘT mảng JSON, mỗi phần tử: "dimension" (một trong: timeline, bible, relation, chat_crystallize, rule), "message" (mô tả ngắn lỗi), "details" (object tùy chọn). Nếu không có lỗi, trả về mảng rỗng [].
 Ví dụ: [{{"dimension": "bible", "message": "Nhân vật A trong chương được mô tả khác với Bible.", "details": {{}}}}]
 Chỉ trả về JSON, không giải thích thêm."""
 

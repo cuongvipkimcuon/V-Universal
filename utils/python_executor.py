@@ -2,14 +2,69 @@
 """
 Sandbox executor: run generated Pandas/NumPy code with restricted globals.
 Workflow: AI writes script from extracted JSON -> System executes -> Returns exact number or result.
+Trước khi execute: allowlist thư viện + kiểm tra từ khóa cấm để giảm rủi ro.
 """
 import json
+import re
 from typing import Any, Dict, Optional, Tuple
 
 # Restricted builtins and modules for exec()
 import math
 import numpy as np
 import pandas as pd
+
+# Allowlist: chỉ cho phép dùng các module này (tên xuất hiện trong code/import)
+ALLOWED_MODULE_NAMES = frozenset({"math", "numpy", "pandas", "np", "pd", "json"})
+
+# Các pattern bị cấm (regex) — không được xuất hiện trong code
+_FORBIDDEN_PATTERNS = [
+    (re.compile(r"\b__import__\s*\("), "__import__"),
+    (re.compile(r"\bopen\s*\("), "open()"),
+    (re.compile(r"\beval\s*\("), "eval()"),
+    (re.compile(r"\bexec\s*\("), "exec()"),
+    (re.compile(r"\bcompile\s*\("), "compile()"),
+    (re.compile(r"\bbreakpoint\s*\("), "breakpoint()"),
+    (re.compile(r"\binput\s*\("), "input()"),
+    (re.compile(r"\bglobals\s*\("), "globals()"),
+    (re.compile(r"\blocals\s*\("), "locals()"),
+    (re.compile(r"\bvars\s*\("), "vars()"),
+    (re.compile(r"\bgetattr\s*\("), "getattr()"),
+    (re.compile(r"\bsetattr\s*\("), "setattr()"),
+    (re.compile(r"\bdelattr\s*\("), "delattr()"),
+    (re.compile(r"\b__builtins__\b"), "__builtins__"),
+    (re.compile(r"\bos\.|import\s+os\b"), "os"),
+    (re.compile(r"\bsubprocess\.|import\s+subprocess\b"), "subprocess"),
+    (re.compile(r"\bsocket\.|import\s+socket\b"), "socket"),
+    (re.compile(r"\bsys\.|import\s+sys\b"), "sys"),
+]
+# Dòng import chỉ được phép: from math/numpy/pandas/json import ... hoặc import math/numpy/pandas/json
+_IMPORT_ALLOWED = re.compile(r"^\s*(?:from\s+(math|numpy|pandas|json)\s+import\s+.+|import\s+(math|numpy|pandas|json)(?:\s+as\s+\w+)?)\s*(?:#.*)?$")
+
+
+def validate_code_safety(code: str) -> Tuple[bool, str]:
+    """
+    Kiểm tra code trước khi execute: cấm từ khóa nguy hiểm, chỉ cho phép import math/numpy/pandas/json.
+    Returns (True, "") nếu an toàn, (False, "lý do") nếu không.
+    """
+    if not code or not code.strip():
+        return False, "Code rỗng."
+    code_lower = code.strip()
+    for pat, name in _FORBIDDEN_PATTERNS:
+        if pat.search(code):
+            return False, "Code không được phép dùng: %s" % name
+    # Cho phép import math, numpy, pandas, json (các dòng import riêng lẻ)
+    for line in code.splitlines():
+        line = line.strip()
+        if line.startswith("import ") or line.startswith("from "):
+            if not _IMPORT_ALLOWED.match(line) and not re.match(r"^\s*#", line):
+                # Kiểm tra cho phép: from numpy import xyz, import pandas as pd, ...
+                allowed_import = re.match(
+                    r"^\s*(?:from\s+(math|numpy|pandas|json)\s+import\s+.+|import\s+(math|numpy|pandas|json)(?:\s+as\s+\w+)?)\s*(?:#.*)?$",
+                    line,
+                )
+                if not allowed_import:
+                    return False, "Chỉ được import math, numpy, pandas, json."
+    return True, ""
 
 
 # Safe builtins (no file I/O, no eval/exec, no open, no __import__)
@@ -69,10 +124,13 @@ class PythonExecutor:
         result_variable: str = "result",
     ) -> Tuple[Optional[Any], Optional[str]]:
         """
-        Execute code in sandbox. Expects code to assign final value to a variable (default `result`).
+        Execute code in sandbox. Trước khi chạy: validate_code_safety (allowlist thư viện, cấm từ khóa nguy hiểm).
+        Expects code to assign final value to a variable (default `result`).
         Returns (value, None) on success, or (None, error_message) on failure.
         """
-        import signal
+        ok, err_msg = validate_code_safety(code)
+        if not ok:
+            return None, "Sandbox: %s" % err_msg
         g = _restricted_globals()
         g["__builtins__"] = _safe_builtins()
         l = {}

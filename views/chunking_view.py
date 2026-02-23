@@ -3,7 +3,6 @@
 import streamlit as st
 
 from config import init_services
-from ai_engine import AIService
 from utils.auth_manager import check_permission
 
 
@@ -35,6 +34,17 @@ def render_chunking_tab(project_id):
         st.warning("Bảng chunks chưa tồn tại. Chạy schema_v6_migration.sql trong Supabase.")
         return
 
+    # Số chunk chưa có embedding — luôn hiển thị lên đầu
+    try:
+        null_emb = supabase.table("chunks").select("id").eq("story_id", project_id).is_("embedding", "NULL").limit(1001).execute()
+        chunks_no_vec = len(null_emb.data or [])
+        if chunks_no_vec > 1000:
+            chunks_no_vec = 1001
+    except Exception:
+        chunks_no_vec = 0
+    lbl = "1000+" if chunks_no_vec > 1000 else str(chunks_no_vec)
+    st.caption(f"**Vector:** {lbl} chunk chưa có embedding.")
+
     user = st.session_state.get("user")
     user_id = getattr(user, "id", None) if user else None
     user_email = getattr(user, "email", None) if user else None
@@ -46,29 +56,27 @@ def render_chunking_tab(project_id):
 
     if st.button("🔄 Refresh", key="chunking_refresh_btn"):
         st.rerun()
-
-    # Kiểm tra chunk chưa có embedding + Đồng bộ vector (chỉ khi user bấm)
-    try:
-        null_emb = supabase.table("chunks").select("id").eq("story_id", project_id).is_("embedding", "NULL").limit(1001).execute()
-        chunks_no_vec = len(null_emb.data or [])
-        if chunks_no_vec > 1000:
-            chunks_no_vec = 1001
-    except Exception:
-        chunks_no_vec = 0
-    lbl = "1000+" if chunks_no_vec > 1000 else str(chunks_no_vec)
-    st.caption(f"**Vector:** {lbl} chunk chưa có embedding.")
+    from core.background_jobs import is_embedding_backfill_running
+    _chunks_running = is_embedding_backfill_running("chunks")
+    if not _chunks_running and st.session_state.get("embedding_sync_clicked_chunks"):
+        st.session_state.pop("embedding_sync_clicked_chunks", None)
+    sync_chunks = _chunks_running or st.session_state.get("embedding_sync_clicked_chunks", False)
+    if sync_chunks:
+        st.caption("⏳ Đang đồng bộ vector (Chunks). Vui lòng đợi xong rồi bấm Refresh.")
     c1, c2 = st.columns(2)
     with c1:
-        if st.button("🔄 Kiểm tra chunk chưa có embedding", key="chunking_check_vec_btn"):
+        if st.button("🔄 Kiểm tra chunk chưa có embedding", key="chunking_check_vec_btn", disabled=sync_chunks):
             st.rerun()
     with c2:
-        if st.button("🔄 Đồng bộ vector (Chunks)", key="chunking_sync_vec_btn", disabled=(chunks_no_vec == 0)):
+        if st.button("🔄 Đồng bộ vector (Chunks)", key="chunking_sync_vec_btn", disabled=(chunks_no_vec == 0 or sync_chunks)):
             import threading
             from core.background_jobs import run_embedding_backfill
+            st.session_state["embedding_sync_clicked_chunks"] = True
             def _run():
                 run_embedding_backfill(project_id, bible_limit=0, chunks_limit=200)
             threading.Thread(target=_run, daemon=True).start()
-            st.toast("Đã bắt đầu đồng bộ vector. Bấm Refresh sau vài giây để xem kết quả.")
+            st.toast("Đã bắt đầu đồng bộ vector (Chunks). Bấm Refresh sau vài giây để xem kết quả.")
+            st.rerun()
 
     r = supabase.table("chunks").select(
         "id, content, raw_content, source_type, meta_json, arc_id, chapter_id, sort_order"
@@ -109,34 +117,19 @@ def render_chunking_tab(project_id):
                         height=120,
                         key=edit_key,
                     )
-                    if st.button("🔄 Cập nhật & Vector lại", key=update_key, type="primary"):
+                    if st.button("🔄 Cập nhật nội dung", key=update_key, type="primary"):
                         if not (new_content and new_content.strip()):
                             st.warning("Nội dung không được để trống.")
                         else:
-                            with st.spinner("Đang tạo embedding mới..."):
-                                vec = AIService.get_embedding(new_content.strip())
-                                if vec:
-                                    try:
-                                        supabase.table("chunks").update({
-                                            "content": new_content.strip(),
-                                            "raw_content": new_content.strip(),
-                                            "embedding": vec,
-                                        }).eq("id", cid).execute()
-                                        st.success("Đã cập nhật nội dung và vector.")
-                                    except Exception as e:
-                                        if "embedding" in str(e).lower() or "vector" in str(e).lower():
-                                            try:
-                                                supabase.table("chunks").update({
-                                                    "content": new_content.strip(),
-                                                    "raw_content": new_content.strip(),
-                                                }).eq("id", cid).execute()
-                                                st.success("Đã cập nhật nội dung (embedding bỏ qua do lỗi DB).")
-                                            except Exception as e2:
-                                                st.error(str(e2))
-                                        else:
-                                            st.error(str(e))
-                                else:
-                                    st.warning("Không tạo được embedding.")
+                            try:
+                                supabase.table("chunks").update({
+                                    "content": new_content.strip(),
+                                    "raw_content": new_content.strip(),
+                                    "embedding": None,
+                                }).eq("id", cid).execute()
+                                st.success("Đã cập nhật. Bấm **Đồng bộ vector (Chunks)** trên để cập nhật embedding.")
+                            except Exception as e:
+                                st.error(str(e))
 
                 if can_delete and st.button("🗑️ Xóa", key=f"chunk_del_{cid}"):
                     supabase.table("chunks").delete().eq("id", cid).execute()

@@ -18,6 +18,8 @@ from ai.context_helpers import get_related_chapter_nums
 from ai_verifier import run_verification_loop
 from core.executor_v7 import execute_plan
 from core.command_parser import is_command_message, parse_command, get_fallback_clarification
+from core.observability import log_chat_turn
+from ai.router import is_multi_intent_request
 from persona import PersonaSystem
 from utils.auth_manager import check_permission, submit_pending_change
 from utils.python_executor import PythonExecutor
@@ -377,9 +379,6 @@ def _auto_crystallize_background(project_id, user_id, persona_role):
         summary = RuleMiningSystem.crystallize_session(to_crystallize, persona_role)
         if not summary or summary == "NO_INFO":
             return
-        vec = AIService.get_embedding(summary)
-        if not vec:
-            return
         today = datetime.utcnow().strftime("%Y-%m-%d")
         try:
             log_r = supabase.table("chat_crystallize_log").select("serial_in_day").eq(
@@ -393,7 +392,6 @@ def _auto_crystallize_background(project_id, user_id, persona_role):
             "story_id": project_id,
             "entity_name": entity_name,
             "description": summary,
-            "embedding": vec,
             "source_chapter": 0,
         }
         ins = supabase.table("story_bible").insert(payload).execute()
@@ -602,6 +600,8 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                     debug_notes = ["Intent: chat_casual", "🌐 Chat tự do"]
                 else:
                     debug_notes = []
+                    max_llm_calls_per_turn = Config.get_max_llm_calls_per_turn()
+                    llm_calls_this_turn = [0]
                     # Chỉ lệnh @: parse trước; fallback ask_user_clarification nếu thiếu/sai (không đoán ý)
                     if not is_v_home and is_command_message(prompt):
                         parse_result = parse_command(prompt, project_id, str(user_id) if user_id else None)
@@ -641,11 +641,60 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                         if semantic_match.get("related_data"):
                             router_out["_semantic_data"] = semantic_match["related_data"]
                         debug_notes.append(f"🎯 Semantic match {int(semantic_match.get('similarity',0)*100)}%")
-                    elif router_out is None and not is_v_home and st.session_state.get('use_v7_planner', False):
-                        plan_result = SmartAIRouter.get_plan_v7(prompt, recent_history_text, project_id)
-                        plan = plan_result.get("plan") or []
-                        first_intent = (plan[0].get("intent", "") if plan else "") or "chat_casual"
-                        if first_intent == "ask_user_clarification":
+                    elif router_out is None and not is_v_home:
+                        # Mô hình 3 bước (chung Router & Planner): (1) Intent (2) Plan hoặc context_planner (3) Execute + trả lời. Giới hạn LLM/turn (verification không tính).
+                        can_call = max_llm_calls_per_turn == 0 or llm_calls_this_turn[0] < max_llm_calls_per_turn
+                        if can_call:
+                            step1 = SmartAIRouter.intent_only_classifier(prompt, recent_history_text, project_id)
+                            llm_calls_this_turn[0] += 1
+                        else:
+                            step1 = {"intent": "chat_casual", "needs_data": False, "rewritten_query": prompt, "clarification_question": "", "relevant_rules": ""}
+                        intent_step1 = step1.get("intent", "chat_casual")
+                        needs_data = step1.get("needs_data", False)
+                        use_v7 = st.session_state.get("use_v7_planner", False)
+                        want_multi = (intent_step1 == "suggest_v7") or is_multi_intent_request(prompt)
+
+                        if use_v7 and want_multi:
+                            can_call_plan = max_llm_calls_per_turn == 0 or llm_calls_this_turn[0] < max_llm_calls_per_turn
+                            if can_call_plan:
+                                plan_result = SmartAIRouter.get_plan_v7_light(prompt, recent_history_text, project_id, intent_from_step1=intent_step1)
+                                llm_calls_this_turn[0] += 1
+                            else:
+                                plan_result = SmartAIRouter._single_intent_to_plan({
+                                    "intent": intent_step1, "rewritten_query": step1.get("rewritten_query", prompt),
+                                    "context_needs": [], "context_priority": [], "target_files": [], "target_bible_entities": [],
+                                    "chapter_range": None, "chapter_range_mode": None, "chapter_range_count": 5,
+                                    "query_target": "", "data_operation_type": "", "data_operation_target": "",
+                                    "clarification_question": step1.get("clarification_question", ""), "reason": "",
+                                }, prompt)
+                            plan = plan_result.get("plan") or []
+                            first_intent = (plan[0].get("intent", "") if plan else "") or "chat_casual"
+                        else:
+                            plan_result = None
+                            plan = []
+                            first_intent = intent_step1
+                            if needs_data:
+                                can_call_ctx = max_llm_calls_per_turn == 0 or llm_calls_this_turn[0] < max_llm_calls_per_turn
+                                if can_call_ctx:
+                                    router_out = SmartAIRouter.context_planner(
+                                        prompt, intent_step1, recent_history_text, project_id,
+                                        relevant_rules=step1.get("relevant_rules") or "",
+                                    )
+                                    llm_calls_this_turn[0] += 1
+                                else:
+                                    router_out = {"intent": intent_step1, "rewritten_query": step1.get("rewritten_query", prompt),
+                                        "clarification_question": step1.get("clarification_question", ""),
+                                        "context_needs": [], "context_priority": [], "target_files": [], "target_bible_entities": [],
+                                        "chapter_range": None, "chapter_range_mode": None, "chapter_range_count": 5,
+                                        "query_target": "", "data_operation_type": "", "data_operation_target": ""}
+                            else:
+                                router_out = {"intent": intent_step1, "rewritten_query": step1.get("rewritten_query", prompt),
+                                    "clarification_question": step1.get("clarification_question", ""),
+                                    "context_needs": [], "context_priority": [], "target_files": [], "target_bible_entities": [],
+                                    "chapter_range": None, "chapter_range_mode": None, "chapter_range_count": 5,
+                                    "query_target": "", "data_operation_type": "", "data_operation_target": ""}
+
+                        if plan_result and plan and first_intent == "ask_user_clarification":
                             clarification_question = (plan[0].get("args") or {}).get("clarification_question", "") or "Bạn có thể nói rõ hơn câu hỏi hoặc chủ đề bạn muốn hỏi?"
                             with st.chat_message("assistant", avatar=active_persona['icon']):
                                 st.caption("🧠 V7 Planner — Cần làm rõ")
@@ -715,6 +764,7 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                                         free_chat_mode=False,
                                         max_context_tokens=Config.CONTEXT_SIZE_TOKENS.get(st.session_state.get("context_size", "medium")),
                                         run_numerical_executor=True,
+                                        llm_budget_ref=llm_calls_this_turn + [max_llm_calls_per_turn],
                                     )
                                     if data_operation_steps:
                                         _start_data_operation_background(
@@ -725,19 +775,24 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                                         for ev in replan_events:
                                             st.caption(f"🔄 Re-plan (sau step {ev.get('step_id')}): {ev.get('reason', '')[:80]}... → {ev.get('action', '')}")
                                     st.write("📝 Generating draft...")
-                                    system_content = (active_persona.get("system_prompt") or "") + "\n\n--- CONTEXT (Các bước đã thực thi) ---\n" + cumulative_context
-                                    user_content = prompt
-                                    draft_resp = AIService.call_openrouter(
-                                        messages=[
-                                            {"role": "system", "content": system_content},
-                                            {"role": "user", "content": user_content},
-                                        ],
-                                        model=st.session_state.get('selected_model', Config.DEFAULT_MODEL),
-                                        temperature=0.0 if st.session_state.get('strict_mode') else 0.7,
-                                        max_tokens=4096,
-                                        stream=False,
-                                    )
-                                    draft_response = (draft_resp.choices[0].message.content or "").strip()
+                                    can_draft = max_llm_calls_per_turn == 0 or llm_calls_this_turn[0] < max_llm_calls_per_turn
+                                    if not can_draft:
+                                        draft_response = f"(Đã đạt giới hạn {max_llm_calls_per_turn} lần gọi LLM cho lượt này. Có thể tăng trong **Settings → V8 & Observability**.)"
+                                    else:
+                                        system_content = (active_persona.get("system_prompt") or "") + "\n\n--- CONTEXT (Các bước đã thực thi) ---\n" + cumulative_context
+                                        user_content = prompt
+                                        draft_resp = AIService.call_openrouter(
+                                            messages=[
+                                                {"role": "system", "content": system_content},
+                                                {"role": "user", "content": user_content},
+                                            ],
+                                            model=st.session_state.get('selected_model', Config.DEFAULT_MODEL),
+                                            temperature=0.0 if st.session_state.get('strict_mode') else 0.7,
+                                            max_tokens=4096,
+                                            stream=False,
+                                        )
+                                        draft_response = (draft_resp.choices[0].message.content or "").strip()
+                                        llm_calls_this_turn[0] += 1
                                     st.write("🛡️ Verifying...")
                                     verification_required = plan_result.get("verification_required", True)
 
@@ -805,28 +860,6 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                                 except Exception:
                                     pass
                             v7_handled = True
-                    elif router_out is None:
-                        # Mô hình 3 bước: (1) Intent only (2) Context planner nếu cần data (3) LLM trả lời
-                        step1 = SmartAIRouter.intent_only_classifier(prompt, recent_history_text, project_id)
-                        intent_step1 = step1.get("intent", "chat_casual")
-                        if step1.get("needs_data"):
-                            router_out = SmartAIRouter.context_planner(
-                                prompt,
-                                intent_step1,
-                                recent_history_text,
-                                project_id,
-                                relevant_rules=step1.get("relevant_rules") or "",
-                            )
-                        else:
-                            router_out = {
-                                "intent": intent_step1,
-                                "rewritten_query": step1.get("rewritten_query", prompt),
-                                "clarification_question": step1.get("clarification_question", ""),
-                                "context_needs": [], "context_priority": [],
-                                "target_files": [], "target_bible_entities": [],
-                                "chapter_range": None, "chapter_range_mode": None, "chapter_range_count": 5,
-                                "query_target": "", "data_operation_type": "", "data_operation_target": "",
-                            }
                     if router_out is not None:
                         debug_notes = [f"Intent: {router_out.get('intent', 'chat_casual')}"] + debug_notes
 
@@ -875,54 +908,64 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                             except Exception:
                                 pass
                     elif intent in ("web_search", "chat_casual"):
-                        # Bước 1 (không cần DB): thực thi luôn và trả lời bằng LLM
-                        run_instruction = active_persona["core_instruction"]
-                        system_content = run_instruction + "\n\n- Hữu ích, súc tích. Ưu tiên tiếng Việt.\n- Chế độ: " + (active_persona.get("role") or "assistant")
-                        if intent == "web_search":
-                            try:
-                                from utils.web_search import web_search as do_web_search
-                                search_text = do_web_search(router_out.get("rewritten_query") or prompt, max_results=5)
-                                system_content += "\n\n--- KẾT QUẢ TRA CỨU (Web Search) ---\n" + (search_text or "(Không có kết quả)")
-                            except Exception as ex:
-                                system_content += "\n\n[Web search lỗi: " + str(ex) + ". Trả lời dựa trên kiến thức có sẵn.]"
-                        messages = [
-                            {"role": "system", "content": system_content},
-                            {"role": "user", "content": prompt},
-                        ]
-                        try:
-                            response = AIService.call_openrouter(
-                                messages=messages,
-                                model=st.session_state.get("selected_model", Config.DEFAULT_MODEL),
-                                temperature=st.session_state.get("temperature", 0.7),
-                                max_tokens=active_persona.get("max_tokens", 4000),
-                                stream=True,
-                            )
+                        # Bước 1 (không cần DB): thực thi luôn và trả lời bằng LLM. Giới hạn LLM/turn.
+                        can_call = max_llm_calls_per_turn == 0 or llm_calls_this_turn[0] < max_llm_calls_per_turn
+                        if not can_call:
+                            full_response_text = f"(Đã đạt giới hạn {max_llm_calls_per_turn} lần gọi LLM cho lượt này. Có thể tăng trong **Settings → V8 & Observability**.)"
                             with st.chat_message("assistant", avatar=active_persona["icon"]):
                                 if debug_notes:
                                     st.caption(f"🧠 {', '.join(debug_notes)}")
-                                full_response_text = ""
-                                placeholder = st.empty()
-                                for chunk in response:
-                                    if chunk.choices[0].delta.content is not None:
-                                        content = chunk.choices[0].delta.content
-                                        full_response_text += content
-                                        placeholder.markdown(full_response_text + "▌")
-                                placeholder.markdown(full_response_text)
-                            if st.session_state.get("enable_history", True):
+                                st.markdown(full_response_text)
+                        else:
+                            run_instruction = active_persona["core_instruction"]
+                            system_content = run_instruction + "\n\n- Hữu ích, súc tích. Ưu tiên tiếng Việt.\n- Chế độ: " + (active_persona.get("role") or "assistant")
+                            if intent == "web_search":
                                 try:
-                                    services = init_services()
-                                    supabase = services["supabase"]
-                                    supabase.table("chat_history").insert([
-                                        {"story_id": project_id, "user_id": str(user_id) if user_id else None, "role": "user", "content": prompt, "created_at": now_timestamp, "metadata": {"intent": intent}},
-                                        {"story_id": project_id, "user_id": str(user_id) if user_id else None, "role": "model", "content": full_response_text, "created_at": now_timestamp, "metadata": {"intent": intent}},
-                                    ]).execute()
-                                    if not is_v_home:
-                                        _after_save_history_v_work(project_id, user_id, active_persona.get("role", ""), st.session_state.get("allow_data_changing_actions", False))
-                                except Exception:
-                                    pass
-                        except Exception as ex:
-                            with st.chat_message("assistant", avatar=active_persona["icon"]):
-                                st.error(f"Lỗi khi trả lời: {ex}")
+                                    from utils.web_search import web_search as do_web_search
+                                    search_text = do_web_search(router_out.get("rewritten_query") or prompt, max_results=5)
+                                    system_content += "\n\n--- KẾT QUẢ TRA CỨU (Web Search) ---\n" + (search_text or "(Không có kết quả)")
+                                except Exception as ex:
+                                    system_content += "\n\n[Web search lỗi: " + str(ex) + ". Trả lời dựa trên kiến thức có sẵn.]"
+                            messages = [
+                                {"role": "system", "content": system_content},
+                                {"role": "user", "content": prompt},
+                            ]
+                            try:
+                                llm_calls_this_turn[0] += 1
+                                response = AIService.call_openrouter(
+                                    messages=messages,
+                                    model=st.session_state.get("selected_model", Config.DEFAULT_MODEL),
+                                    temperature=st.session_state.get("temperature", 0.7),
+                                    max_tokens=active_persona.get("max_tokens", 4000),
+                                    stream=True,
+                                )
+                                with st.chat_message("assistant", avatar=active_persona["icon"]):
+                                    if debug_notes:
+                                        st.caption(f"🧠 {', '.join(debug_notes)}")
+                                    full_response_text = ""
+                                    placeholder = st.empty()
+                                    for chunk in response:
+                                        if chunk.choices[0].delta.content is not None:
+                                            content = chunk.choices[0].delta.content
+                                            full_response_text += content
+                                            placeholder.markdown(full_response_text + "▌")
+                                    placeholder.markdown(full_response_text)
+                            except Exception as ex:
+                                with st.chat_message("assistant", avatar=active_persona["icon"]):
+                                    st.error(f"Lỗi khi trả lời: {ex}")
+                                full_response_text = ""
+                        if intent in ("web_search", "chat_casual") and st.session_state.get("enable_history", True):
+                            try:
+                                services = init_services()
+                                supabase = services["supabase"]
+                                supabase.table("chat_history").insert([
+                                    {"story_id": project_id, "user_id": str(user_id) if user_id else None, "role": "user", "content": prompt, "created_at": now_timestamp, "metadata": {"intent": intent}},
+                                    {"story_id": project_id, "user_id": str(user_id) if user_id else None, "role": "model", "content": full_response_text, "created_at": now_timestamp, "metadata": {"intent": intent}},
+                                ]).execute()
+                                if not is_v_home:
+                                    _after_save_history_v_work(project_id, user_id, active_persona.get("role", ""), st.session_state.get("allow_data_changing_actions", False))
+                            except Exception:
+                                pass
                     elif intent == "update_data" and not is_v_home and can_write:
                         ch_range = router_out.get("chapter_range")
                         op_target = (router_out.get("data_operation_target") or "").strip()
@@ -963,17 +1006,22 @@ Context có sẵn:
 
 Nhiệm vụ: Tạo code Python (pandas/numpy) để trả lời. Gán kết quả cuối vào biến result.
 Chỉ trả về code trong block ```python ... ```, không giải thích."""
+                            can_num = max_llm_calls_per_turn == 0 or llm_calls_this_turn[0] < max_llm_calls_per_turn
                             try:
-                                code_resp = AIService.call_openrouter(
-                                    messages=[{"role": "user", "content": code_prompt}],
-                                    model=st.session_state.get('selected_model', Config.DEFAULT_MODEL),
-                                    temperature=0.1,
-                                    max_tokens=2000,
-                                )
-                                raw = (code_resp.choices[0].message.content or "").strip()
+                                if can_num:
+                                    llm_calls_this_turn[0] += 1
+                                    code_resp = AIService.call_openrouter(
+                                        messages=[{"role": "user", "content": code_prompt}],
+                                        model=st.session_state.get('selected_model', Config.DEFAULT_MODEL),
+                                        temperature=0.1,
+                                        max_tokens=2000,
+                                    )
+                                else:
+                                    code_resp = None
+                                raw = (code_resp.choices[0].message.content or "").strip() if code_resp else ""
                                 import re
-                                m = re.search(r'```(?:python)?\s*(.*?)```', raw, re.DOTALL)
-                                code = m.group(1).strip() if m else raw
+                                m = re.search(r'```(?:python)?\s*(.*?)```', raw, re.DOTALL) if raw else None
+                                code = (m.group(1).strip() if m else raw) if raw else ""
                                 if code:
                                     val, err = PythonExecutor.execute(code, result_variable="result")
                                     if err:
@@ -1036,32 +1084,56 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
                         messages.append({"role": "user", "content": prompt})
 
                         try:
-                            model = st.session_state.get('selected_model', Config.DEFAULT_MODEL)
-
-                            response = AIService.call_openrouter(
-                                messages=messages,
-                                model=model,
-                                temperature=run_temperature,
-                                max_tokens=active_persona.get('max_tokens', 4000),
-                                stream=True
+                            log_chat_turn(
+                                story_id=project_id,
+                                user_id=str(user_id) if user_id else None,
+                                intent=intent,
+                                context_needs=router_out.get("context_needs") if isinstance(router_out.get("context_needs"), list) else None,
+                                context_tokens=context_tokens,
+                                llm_calls_count=llm_calls_this_turn[0],
                             )
+                        except Exception:
+                            pass
 
-                            with st.chat_message("assistant", avatar=active_persona['icon']):
-                                if debug_notes:
-                                    st.caption(f"🧠 {', '.join(debug_notes)}")
-                                if st.session_state.get('strict_mode'):
-                                    st.caption("🔒 Strict Mode: ON")
+                        can_answer = max_llm_calls_per_turn == 0 or llm_calls_this_turn[0] < max_llm_calls_per_turn
+                        try:
+                            if not can_answer:
+                                full_response_text = f"(Đã đạt giới hạn {max_llm_calls_per_turn} lần gọi LLM cho lượt này. Có thể tăng trong **Settings → V8 & Observability**.)"
+                                model = st.session_state.get('selected_model', Config.DEFAULT_MODEL)
+                                with st.chat_message("assistant", avatar=active_persona['icon']):
+                                    if debug_notes:
+                                        st.caption(f"🧠 {', '.join(debug_notes)}")
+                                    if st.session_state.get('strict_mode'):
+                                        st.caption("🔒 Strict Mode: ON")
+                                    st.markdown(full_response_text)
+                            else:
+                                llm_calls_this_turn[0] += 1
+                                model = st.session_state.get('selected_model', Config.DEFAULT_MODEL)
 
-                                full_response_text = ""
-                                placeholder = st.empty()
+                                response = AIService.call_openrouter(
+                                    messages=messages,
+                                    model=model,
+                                    temperature=run_temperature,
+                                    max_tokens=active_persona.get('max_tokens', 4000),
+                                    stream=True
+                                )
 
-                                for chunk in response:
-                                    if chunk.choices[0].delta.content is not None:
-                                        content = chunk.choices[0].delta.content
-                                        full_response_text += content
-                                        placeholder.markdown(full_response_text + "▌")
+                                with st.chat_message("assistant", avatar=active_persona['icon']):
+                                    if debug_notes:
+                                        st.caption(f"🧠 {', '.join(debug_notes)}")
+                                    if st.session_state.get('strict_mode'):
+                                        st.caption("🔒 Strict Mode: ON")
 
-                                placeholder.markdown(full_response_text)
+                                    full_response_text = ""
+                                    placeholder = st.empty()
+
+                                    for chunk in response:
+                                        if chunk.choices[0].delta.content is not None:
+                                            content = chunk.choices[0].delta.content
+                                            full_response_text += content
+                                            placeholder.markdown(full_response_text + "▌")
+
+                                    placeholder.markdown(full_response_text)
 
                             # search_context: thẩm định câu trả lời; nếu chưa đủ ý thì fallback đọc full content các chương reverse lookup
                             if (
@@ -1224,18 +1296,11 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
                                 if not svc:
                                     return
                                 sb = svc["supabase"]
-                                vec = AIService.get_embedding(p.get("prompt", ""))
                                 ctx = p.get("context", "") or ""
                                 resp = p.get("response", "") or ""
                                 related_data = (ctx.rstrip() + "\n\n--- Câu trả lời ---\n" + resp) if ctx else resp
                                 payload = {"story_id": project_id, "question_sample": p.get("prompt", ""), "intent": "chat_casual", "related_data": related_data}
-                                if vec:
-                                    payload["embedding"] = vec
-                                try:
-                                    sb.table("semantic_intent").insert(payload).execute()
-                                except Exception:
-                                    payload.pop("embedding", None)
-                                    sb.table("semantic_intent").insert(payload).execute()
+                                sb.table("semantic_intent").insert(payload).execute()
                             except Exception:
                                 pass
                         threading.Thread(target=_add_semantic, daemon=True).start()
@@ -1264,17 +1329,14 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
                                 supabase = services["supabase"]
                                 content_to_save = (pu.get("response", "") or pu.get("update_summary", "") or "").strip()
                                 if content_to_save:
-                                    vec = AIService.get_embedding(content_to_save[:8000])
                                     payload = {
                                         "story_id": project_id,
                                         "entity_name": f"[RULE] {datetime.now().strftime('%Y%m%d_%H%M%S')}",
                                         "description": content_to_save,
                                         "source_chapter": 0,
                                     }
-                                    if vec:
-                                        payload["embedding"] = vec
                                     supabase.table("story_bible").insert(payload).execute()
-                                    st.toast("Đã ghi nhớ / cập nhật vào Bible.")
+                                    st.toast("Đã ghi nhớ vào Bible. Bấm **Đồng bộ vector (Bible)** trong tab Bible để tạo embedding.")
                                 del st.session_state["pending_update_confirm"]
                             except Exception as e:
                                 st.error(f"Lỗi khi ghi: {e}")
@@ -1323,14 +1385,13 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
                     with col_a:
                         if st.button("✅ Lưu", key=f"rule_save_one_{rule_key}"):
                             final_content = (analysis.get('merged_content') if analysis and analysis.get('status') == "MERGE" else rule_content) or rule_content
-                            vec = AIService.get_embedding(final_content)
                             services = init_services()
                             supabase = services.get("supabase")
                             if supabase:
-                                payload = {"story_id": project_id, "entity_name": f"[RULE] {datetime.now().strftime('%Y%m%d_%H%M%S')}", "description": final_content, "embedding": vec, "source_chapter": 0}
+                                payload = {"story_id": project_id, "entity_name": f"[RULE] {datetime.now().strftime('%Y%m%d_%H%M%S')}", "description": final_content, "source_chapter": 0}
                                 try:
                                     supabase.table("story_bible").insert(payload).execute()
-                                    st.toast("Đã lưu luật.")
+                                    st.toast("Đã lưu luật. Bấm **Đồng bộ vector (Bible)** trong tab Bible để tạo embedding.")
                                 except Exception as e:
                                     st.error(str(e))
                             pending_list.pop(i)
@@ -1353,12 +1414,11 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
                             rule_content = item.get("content") or ""
                             analysis = item.get("analysis")
                             final_content = (analysis.get('merged_content') if analysis and analysis.get('status') == "MERGE" else rule_content) or rule_content
-                            vec = AIService.get_embedding(final_content)
                             if supabase:
                                 try:
                                     supabase.table("story_bible").insert({
                                         "story_id": project_id, "entity_name": f"[RULE] {datetime.now().strftime('%Y%m%d_%H%M%S')}",
-                                        "description": final_content, "embedding": vec, "source_chapter": 0
+                                        "description": final_content, "source_chapter": 0
                                     }).execute()
                                 except Exception:
                                     pass

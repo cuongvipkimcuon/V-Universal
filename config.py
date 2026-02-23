@@ -84,6 +84,25 @@ class Config:
     # Độ trễ tối thiểu (giây) giữa hai lệnh gọi API khi xử lý theo khoảng chương — tránh quá tải API (5–10s)
     DATA_OPERATION_DELAY_SEC = 7
 
+    # Giới hạn số lần gọi LLM "chính" mỗi turn (intent, planner, draft, numerical). Verification/check không tính. 0 = không giới hạn.
+    DEFAULT_MAX_LLM_CALLS_PER_TURN = 5
+
+    @classmethod
+    def get_max_llm_calls_per_turn(cls) -> int:
+        """Số lần gọi LLM tối đa mỗi turn (chỉ tính intent, planner, draft, numerical; không tính verification/check). 0 = không giới hạn."""
+        try:
+            services = init_services()
+            if services:
+                r = services["supabase"].table("settings").select("value").eq("key", "max_llm_calls_per_turn").execute()
+                if r.data and r.data[0] is not None:
+                    v = r.data[0].get("value")
+                    if v is not None:
+                        n = int(v) if isinstance(v, (int, float)) else int(str(v).strip() or "0")
+                        return max(0, n)
+        except Exception:
+            pass
+        return cls.DEFAULT_MAX_LLM_CALLS_PER_TURN
+
     @classmethod
     def get_prefixes(cls) -> list:
         """Lấy danh sách prefix dạng [X] từ DB: ưu tiên bảng bible_prefix_config (get_prefix_setup), rồi settings. Không set cứng; không có dữ liệu thì trả về []."""

@@ -65,9 +65,9 @@ def _verify_timeline(response: str, context: str) -> Tuple[bool, str]:
     return True, ""
 
 
-def _verify_grounding_llm(response: str, context: str, max_context_chars: int = 10000) -> Tuple[bool, str]:
+def _verify_grounding_llm(response: str, context: str, max_context_chars: int = 6000) -> Tuple[bool, str]:
     """
-    LLM-as-judge: kiểm tra response chỉ dựa trên context.
+    LLM-as-judge: kiểm tra response chỉ dựa trên context. Tối ưu: slice context/response ngắn, max_tokens nhỏ (không tính vào giới hạn LLM/turn).
     Returns (is_valid, error_msg). error_msg rỗng nếu valid.
     """
     try:
@@ -78,7 +78,7 @@ def _verify_grounding_llm(response: str, context: str, max_context_chars: int = 
     if not response or not context:
         return True, ""
     ctx_slice = context[:max_context_chars] if len(context) > max_context_chars else context
-    resp_slice = (response[:4000] + "...") if len(response) > 4000 else response
+    resp_slice = (response[:2500] + "...") if len(response) > 2500 else response
 
     judge_prompt = f"""Bạn là người kiểm tra. Nhiệm vụ: xác định xem RESPONSE có CHỈ dựa trên thông tin trong CONTEXT không.
 
@@ -98,7 +98,7 @@ OK"""
             messages=[{"role": "user", "content": judge_prompt}],
             model=_get_default_tool_model(),
             temperature=0.0,
-            max_tokens=200,
+            max_tokens=150,
         )
         content = (r.choices[0].message.content or "").strip().upper()
         if content.startswith("OK") or content.startswith("VIOLATION:"):

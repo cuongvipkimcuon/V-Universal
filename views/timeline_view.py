@@ -6,6 +6,7 @@ from config import init_services
 from ai_engine import get_timeline_events
 from utils.auth_manager import check_permission
 from utils.cache_helpers import full_refresh
+from core.user_data_save_pipeline import run_logic_check_then_save_timeline
 
 
 def render_timeline_tab(project_id):
@@ -28,12 +29,40 @@ def render_timeline_tab(project_id):
         st.warning("Bảng timeline_events chưa tồn tại. Chạy migration schema_v7_migration.sql trên Supabase.")
         return
 
+    timeline_no_vec_count = 0
+    try:
+        r = supabase.table("timeline_events").select("id").eq("story_id", project_id).is_("embedding", "NULL").limit(1001).execute()
+        timeline_no_vec_count = len(r.data or [])
+        if timeline_no_vec_count > 1000:
+            timeline_no_vec_count = 1001
+    except Exception:
+        pass
+    lbl_tl = "1000+" if timeline_no_vec_count > 1000 else str(timeline_no_vec_count)
+    st.caption(f"**Vector:** {lbl_tl} sự kiện chưa có embedding.")
+
     user_id = getattr(st.session_state.get("user"), "id", None) or ""
     user_email = getattr(st.session_state.get("user"), "email", None) or ""
     can_write = check_permission(user_id, user_email, project_id, "write")
 
+    from core.background_jobs import is_embedding_backfill_running
+    _timeline_running = is_embedding_backfill_running("timeline")
+    if not _timeline_running and st.session_state.get("embedding_sync_clicked_timeline"):
+        st.session_state.pop("embedding_sync_clicked_timeline", None)
+    sync_timeline = _timeline_running or st.session_state.get("embedding_sync_clicked_timeline", False)
+    if sync_timeline:
+        st.caption("⏳ Đang đồng bộ vector (Timeline). Vui lòng đợi xong rồi bấm Refresh.")
     if st.button("🔄 Refresh", key="timeline_refresh_btn"):
         full_refresh()
+    if can_write:
+        if st.button("🔄 Đồng bộ vector (Timeline)", key="timeline_sync_vec_btn", disabled=(timeline_no_vec_count == 0 or sync_timeline)):
+            import threading
+            from core.background_jobs import run_embedding_backfill
+            st.session_state["embedding_sync_clicked_timeline"] = True
+            def _run():
+                run_embedding_backfill(project_id, bible_limit=0, chunks_limit=0, relations_limit=0, timeline_limit=200)
+            threading.Thread(target=_run, daemon=True).start()
+            st.toast("Đã bắt đầu đồng bộ vector (Timeline). Bấm Refresh sau vài giây.")
+            st.rerun()
 
     events = get_timeline_events(project_id, limit=200)
     events_sorted = sorted(events, key=lambda x: (x.get("event_order", 0), x.get("title", "")))
@@ -91,19 +120,27 @@ def render_timeline_tab(project_id):
         c1, c2 = st.columns(2)
         with c1:
             if st.button("💾 Lưu thay đổi", key="tl_edit_save"):
-                try:
-                    supabase.table("timeline_events").update({
-                        "title": new_title.strip() or "Sự kiện",
-                        "description": new_desc.strip(),
-                        "raw_date": new_date.strip(),
-                        "event_type": new_type,
-                        "event_order": new_order,
-                    }).eq("id", edit_id).execute()
-                    for k in ["tl_editing_id", "tl_edit_title", "tl_edit_description", "tl_edit_raw_date", "tl_edit_event_type", "tl_edit_event_order"]:
-                        st.session_state.pop(k, None)
-                    st.toast("Đã lưu.")
-                except Exception as e:
-                    st.error(str(e))
+                payload = {
+                    "story_id": project_id,
+                    "title": new_title.strip() or "Sự kiện",
+                    "description": new_desc.strip(),
+                    "raw_date": new_date.strip(),
+                    "event_type": new_type,
+                    "event_order": new_order,
+                }
+                ok, errs, payload_ready = run_logic_check_then_save_timeline(project_id, payload, supabase)
+                if not ok:
+                    st.error("Check logic lỗi:\n" + "\n".join(errs))
+                else:
+                    try:
+                        update_fields = {k: v for k, v in payload_ready.items() if k not in ("id", "story_id")}
+                        update_fields["embedding"] = None  # Chỉnh sửa tay → xóa embed để lần đồng bộ vector sau sẽ embed lại
+                        supabase.table("timeline_events").update(update_fields).eq("id", edit_id).execute()
+                        for k in ["tl_editing_id", "tl_edit_title", "tl_edit_description", "tl_edit_raw_date", "tl_edit_event_type", "tl_edit_event_order"]:
+                            st.session_state.pop(k, None)
+                        st.toast("Đã lưu.")
+                    except Exception as e:
+                        st.error(str(e))
         with c2:
             if st.button("❌ Hủy sửa", key="tl_edit_cancel"):
                 for k in ["tl_editing_id", "tl_edit_title", "tl_edit_description", "tl_edit_raw_date", "tl_edit_event_type", "tl_edit_event_order"]:
@@ -124,17 +161,22 @@ def render_timeline_tab(project_id):
             new_order = st.number_input("Thứ tự (event_order)", min_value=0, value=_ev_count + 1, key="tl_new_order")
             if st.form_submit_button("Thêm"):
                 if new_title and new_title.strip():
-                    try:
-                        supabase.table("timeline_events").insert({
-                            "story_id": project_id,
-                            "event_order": new_order,
-                            "title": new_title.strip(),
-                            "description": (new_desc or "").strip(),
-                            "raw_date": (new_date or "").strip(),
-                            "event_type": new_type,
-                        }).execute()
-                        st.toast("Đã thêm sự kiện.")
-                    except Exception as e:
-                        st.error(str(e))
+                    payload = {
+                        "story_id": project_id,
+                        "event_order": new_order,
+                        "title": new_title.strip(),
+                        "description": (new_desc or "").strip(),
+                        "raw_date": (new_date or "").strip(),
+                        "event_type": new_type,
+                    }
+                    ok, errs, payload_ready = run_logic_check_then_save_timeline(project_id, payload, supabase)
+                    if not ok:
+                        st.error("Check logic lỗi:\n" + "\n".join(errs))
+                    else:
+                        try:
+                            supabase.table("timeline_events").insert(payload_ready).execute()
+                            st.toast("Đã thêm sự kiện.")
+                        except Exception as e:
+                            st.error(str(e))
                 else:
                     st.warning("Nhập tiêu đề.")

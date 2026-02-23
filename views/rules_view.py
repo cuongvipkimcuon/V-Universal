@@ -42,7 +42,6 @@ def render_rules_tab(project_id, persona):
             rule_content = st.text_area("Nội dung Rule", height=100, key="new_rule_content")
             if st.form_submit_button("💾 Lưu"):
                 if rule_content and rule_content.strip():
-                    vec = AIService.get_embedding(rule_content)
                     try:
                         payload = {
                             "story_id": project_id,
@@ -50,19 +49,13 @@ def render_rules_tab(project_id, persona):
                             "description": rule_content.strip(),
                             "source_chapter": 0,
                         }
-                        if vec:
-                            payload["embedding"] = vec
                         supabase.table("story_bible").insert(payload).execute()
-                        st.success("Đã thêm Rule (vector tự tạo).")
+                        st.success("Đã thêm Rule. Bấm **Đồng bộ vector (Bible)** trong tab Bible để tạo embedding.")
                         st.session_state["update_trigger"] = st.session_state.get("update_trigger", 0) + 1
                         st.session_state["rules_adding"] = False
                         invalidate_cache()
                     except Exception as e:
-                        payload.pop("embedding", None)
-                        supabase.table("story_bible").insert(payload).execute()
-                        st.success("Đã thêm.")
-                        st.session_state["rules_adding"] = False
-                        invalidate_cache()
+                        st.error(str(e))
             if st.form_submit_button("Hủy"):
                 st.session_state["rules_adding"] = False
 
@@ -92,19 +85,15 @@ def render_rules_tab(project_id, persona):
         st.markdown("---")
         with st.form("edit_rule_form"):
             new_desc = st.text_area("Nội dung", value=e.get("description", ""), height=100)
-            if st.form_submit_button("💾 Cập nhật (tự tạo vector mới)"):
-                vec = AIService.get_embedding(new_desc)
-                upd = {"description": new_desc}
-                if vec:
-                    upd["embedding"] = vec
+            if st.form_submit_button("💾 Cập nhật"):
+                upd = {"description": new_desc, "embedding": None}
                 try:
                     supabase.table("story_bible").update(upd).eq("id", e["id"]).execute()
-                except Exception:
-                    upd.pop("embedding", None)
-                    supabase.table("story_bible").update(upd).eq("id", e["id"]).execute()
-                st.success("Đã cập nhật.")
-                del st.session_state["rules_editing"]
-                invalidate_cache()
+                    st.success("Đã cập nhật. Bấm **Đồng bộ vector (Bible)** trong tab Bible nếu cần cập nhật embedding.")
+                    del st.session_state["rules_editing"]
+                    invalidate_cache()
+                except Exception as ex:
+                    st.error(str(ex))
             if st.form_submit_button("Hủy"):
                 del st.session_state["rules_editing"]
 

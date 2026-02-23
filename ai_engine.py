@@ -10,10 +10,16 @@ import streamlit as st
 from config import Config, init_services
 
 from ai.service import AIService, _get_default_tool_model
-from ai.context_helpers import get_mandatory_rules as _get_mandatory_rules, resolve_chapter_range as _resolve_chapter_range, get_entity_relations as _get_entity_relations
+from ai.context_helpers import (
+    get_mandatory_rules as _get_mandatory_rules,
+    resolve_chapter_range as _resolve_chapter_range,
+    get_entity_relations as _get_entity_relations,
+    get_top_relations_by_query,
+    get_top_timeline_by_query,
+)
 from ai.hybrid_search import HybridSearch, check_semantic_intent, search_chunks_vector
 from ai.query_sql import VALID_QUERY_TARGETS, build_query_sql_context, infer_query_target
-from ai.router import get_v7_reminder_message, is_multi_intent_request, is_multi_step_update_data_request, SmartAIRouter
+from ai.router import get_v7_reminder_message, is_multi_intent_request, is_multi_step_update_data_request, SmartAIRouter, INTENT_HANDLER_MAP
 from ai.evaluate import evaluate_step_outcome, replan_after_step
 from ai.content import (
     suggest_relations,
@@ -30,6 +36,7 @@ from ai.context_schema import (
     normalize_context_needs,
     infer_default_context_needs,
     normalize_context_priority,
+    FULL_CONTEXT_NEEDS_V8,
 )
 from ai.utils import (
     cap_context_to_tokens,
@@ -53,6 +60,364 @@ try:
 except ImportError:
     ArcService = None
     ReverseLookupAssembler = None
+
+
+# ---------- Intent context handlers (dispatch by INTENT_HANDLER_MAP) ----------
+def _intent_handle_clarification(router_result: Dict, ctx: Dict) -> None:
+    """Handler: clarification — chỉ thêm block làm rõ, không gather context."""
+    clarification_question = router_result.get("clarification_question", "") or "Bạn có thể nói rõ hơn câu hỏi hoặc chủ đề bạn muốn hỏi?"
+    ctx["context_parts"].append(
+        f"[CẦN LÀM RÕ]\nHệ thống cần thêm thông tin: {clarification_question}\nTrả lời ngắn gọn, lịch sự yêu cầu user làm rõ theo gợi ý trên (không đoán bừa)."
+    )
+    ctx["sources"].append("❓ Clarification")
+    ctx["total_tokens"] += AIService.estimate_tokens(ctx["context_parts"][-1])
+
+
+def _intent_handle_template(router_result: Dict, ctx: Dict) -> None:
+    """Handler: template (suggest_v7) — không thêm block đặc biệt; LLM sẽ dùng plan."""
+    pass
+
+
+def _intent_handle_llm_casual(router_result: Dict, ctx: Dict) -> None:
+    """Handler: llm_casual — web_search hoặc chat_casual."""
+    intent = router_result.get("intent", "chat_casual")
+    if intent == "web_search":
+        try:
+            from utils.web_search import web_search as do_web_search
+            search_text = do_web_search(router_result.get("rewritten_query") or "", max_results=5)
+        except Exception as ex:
+            search_text = f"[WEB SEARCH] Lỗi: {ex}. Trả lời dựa trên kiến thức có sẵn."
+        ctx["context_parts"].append(search_text)
+        ctx["total_tokens"] += AIService.estimate_tokens(search_text)
+        ctx["sources"].append("🌐 Web Search")
+
+
+def _intent_handle_data_operation(router_result: Dict, ctx: Dict) -> None:
+    """Handler: data_operation — update_data."""
+    op_type = router_result.get("data_operation_type") or ""
+    op_target = router_result.get("data_operation_target") or ""
+    if op_target in ("bible", "relation", "timeline", "chunking"):
+        ch_range = router_result.get("chapter_range")
+        ch_desc = f"chương {ch_range[0]}" if (ch_range and len(ch_range) >= 1) else "chương"
+        ctx["context_parts"].append(
+            f"[CẬP NHẬT DỮ LIỆU - CẦN XÁC NHẬN]\n"
+            f"User yêu cầu: {op_type} {op_target} cho {ch_desc}. "
+            "Thao tác này chỉ thực hiện sau khi user xác nhận. Trả lời ngắn gọn: nêu rõ thao tác và đối tượng cùng chương, nhắc user xác nhận (sẽ chạy ngầm và xem như đã chấp nhận)."
+        )
+        ctx["sources"].append("📦 Update data (thao tác theo chương, pending confirm)")
+    else:
+        update_summary = router_result.get("update_summary", "") or "Ghi nhớ / cập nhật dữ liệu theo yêu cầu user."
+        ctx["context_parts"].append(
+            f"[CẬP NHẬT DỮ LIỆU - CẦN XÁC NHẬN]\n{update_summary}\n\nThao tác này chỉ thực hiện sau khi user xác nhận. Trả lời tóm tắt nội dung sẽ được ghi và nhắc user xác nhận trước khi thực hiện."
+        )
+        ctx["sources"].append("✏️ Update data (ghi nhớ quy tắc, pending confirm)")
+    ctx["total_tokens"] += AIService.estimate_tokens(ctx["context_parts"][-1])
+
+
+def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
+    """Handler: llm_with_context — query_Sql, check_chapter_logic, rồi search_context/numerical gathering."""
+    intent = router_result.get("intent", "chat_casual")
+    project_id = ctx["project_id"]
+    session_state = ctx.get("session_state") or {}
+    context_parts = ctx["context_parts"]
+    sources = ctx["sources"]
+    total_tokens = ctx["total_tokens"]
+    max_context_tokens = ctx.get("max_context_tokens")
+    context_needs = ctx["context_needs"]
+    context_priority = ctx["context_priority"]
+    current_arc_id = session_state.get("current_arc_id")
+    chapter_range_mode = ctx.get("chapter_range_mode")
+    chapter_range_count = ctx.get("chapter_range_count", 5)
+    chapter_range = ctx.get("chapter_range")
+    target_files = ctx.get("target_files") or []
+    target_bible_entities = ctx.get("target_bible_entities") or []
+
+    # query_Sql
+    if intent == "query_Sql":
+        arc_id = current_arc_id
+        block, source_label = build_query_sql_context(router_result, project_id, arc_id=arc_id)
+        if block:
+            context_parts.append(block)
+            total_tokens += AIService.estimate_tokens(block)
+            sources.append(source_label)
+        else:
+            router_result["intent"] = "search_context"
+            ctx["context_needs"] = ["bible", "relation"]
+            context_needs = ctx["context_needs"]
+            context_priority = ctx["context_priority"] = list(context_needs)
+            intent = "search_context"
+
+    # check_chapter_logic
+    if intent == "check_chapter_logic":
+        try:
+            from core.chapter_logic_check import run_chapter_logic_check
+            ch_range = router_result.get("chapter_range")
+            ch_num = int(ch_range[0]) if (ch_range and len(ch_range) >= 1) else None
+            if ch_num is None:
+                context_parts.append("[SOÁT LOGIC CHƯƠNG] Chưa xác định được chương. Hãy nêu rõ số chương (vd: chương 3).")
+                sources.append("🔍 Logic check")
+            else:
+                services = init_services()
+                supabase = services.get("supabase") if services else None
+                if not supabase:
+                    context_parts.append("[SOÁT LOGIC CHƯƠNG] Không kết nối được dịch vụ.")
+                    sources.append("🔍 Logic check")
+                else:
+                    r = supabase.table("chapters").select("id, chapter_number, title, content, arc_id").eq(
+                        "story_id", project_id
+                    ).eq("chapter_number", ch_num).limit(1).execute()
+                    row = (r.data or [None])[0] if r.data else None
+                    if not row:
+                        context_parts.append("[SOÁT LOGIC CHƯƠNG] Không tìm thấy chương %s." % ch_num)
+                        sources.append("🔍 Logic check")
+                    else:
+                        dimensions = ctx.get("logic_check_dimensions")  # optional filter from Data Health
+                        issues, resolved_count, _check_id, err = run_chapter_logic_check(
+                            project_id,
+                            row["id"],
+                            row.get("chapter_number") or ch_num,
+                            row.get("title") or ("Chương %s" % ch_num),
+                            row.get("content") or "",
+                            arc_id=row.get("arc_id"),
+                            dimensions=dimensions,
+                        )
+                        if err:
+                            context_parts.append("[SOÁT LOGIC CHƯƠNG] Lỗi: %s" % err)
+                        else:
+                            lines = ["[KẾT QUẢ SOÁT LOGIC - Chương %s]" % ch_num]
+                            if not issues:
+                                lines.append("Không phát hiện lỗi logic (timeline, bible, relation, chat crystallize, rule).")
+                            else:
+                                for i, it in enumerate(issues, 1):
+                                    lines.append("%s. [%s] %s" % (i, it.get("dimension", ""), it.get("message", "")))
+                            if resolved_count:
+                                lines.append("(Đã đánh dấu khắc phục %s lỗi cũ từ lần soát trước.)" % resolved_count)
+                            lines.append("Xem chi tiết tại **Data Health**.")
+                            context_parts.append("\n".join(lines))
+                        sources.append("🔍 Logic check (Data Health)")
+            total_tokens = sum(AIService.estimate_tokens(p) for p in context_parts)
+        except Exception as ex:
+            context_parts.append("[SOÁT LOGIC CHƯƠNG] Lỗi: %s" % str(ex))
+            sources.append("🔍 Logic check")
+        ctx["total_tokens"] = total_tokens
+        return
+
+    # search_context / numerical_calculation: full context gathering
+    intent = router_result.get("intent", "chat_casual")
+    if intent not in ("search_context", "numerical_calculation"):
+        ctx["total_tokens"] = total_tokens
+        return
+
+    range_bounds_bible = ContextManager._resolve_chapter_range(
+        project_id, chapter_range_mode, chapter_range_count, chapter_range
+    )
+
+    def _over_budget() -> bool:
+        if max_context_tokens is None:
+            return False
+        return total_tokens >= max_context_tokens * 0.92
+
+    for need in context_priority:
+        if _over_budget():
+            break
+        if need == "chapter":
+            full_text, source_names = "", []
+            if range_bounds_bible is not None:
+                cap = (min(ContextManager.DEFAULT_CHAPTER_TOKEN_LIMIT, (max_context_tokens - total_tokens) // max(1, len(context_priority))) if max_context_tokens else ContextManager.DEFAULT_CHAPTER_TOKEN_LIMIT)
+                full_text, source_names = ContextManager.load_chapters_by_range(
+                    project_id, range_bounds_bible[0], range_bounds_bible[1],
+                    token_limit=cap,
+                )
+            if not full_text and target_files:
+                full_text, source_names = ContextManager.load_full_content(
+                    target_files, project_id,
+                    token_limit=ContextManager.DEFAULT_CHAPTER_TOKEN_LIMIT,
+                )
+            if full_text:
+                context_parts.append(f"\n--- TARGET CONTENT ---\n{full_text}")
+                sources.extend(source_names)
+                total_tokens += AIService.estimate_tokens(full_text)
+
+    need_bible_or_relation = ("bible" in context_needs or "relation" in context_needs) and not _over_budget()
+    if need_bible_or_relation:
+        raw_inferred = router_result.get("inferred_prefixes") or []
+        valid_keys = Config.get_valid_prefix_keys()
+        inferred_prefixes = [
+            p for p in raw_inferred
+            if p and str(p).strip().upper().replace(" ", "_") in valid_keys
+        ] if valid_keys else raw_inferred
+        bible_context = ""
+        for entity in target_bible_entities:
+            raw_list = HybridSearch.smart_search_hybrid_raw(
+                entity, project_id, top_k=7, inferred_prefixes=inferred_prefixes
+            )
+            if range_bounds_bible:
+                raw_list = _filter_bible_by_chapter_range(raw_list, range_bounds_bible, max_items=10)
+            if raw_list:
+                for item in raw_list:
+                    try:
+                        eid = item.get("id")
+                        if eid is not None:
+                            HybridSearch.update_lookup_stats(eid)
+                    except Exception:
+                        pass
+                main_id = raw_list[0].get("id") if raw_list else None
+                rel_block = ""
+                if main_id:
+                    rel_text = ContextManager.get_entity_relations(main_id, project_id)
+                    if rel_text:
+                        rel_block = f"> [RELATION]:\n{rel_text}\n\n"
+                part = format_bible_context_by_sections(raw_list)
+                bible_context += f"\n--- {entity.upper()} ---\n{rel_block}{part}\n"
+
+        if not bible_context and router_result.get("rewritten_query"):
+            raw_list = HybridSearch.smart_search_hybrid_raw(
+                router_result["rewritten_query"],
+                project_id,
+                top_k=10,
+                inferred_prefixes=inferred_prefixes,
+            )
+            if range_bounds_bible:
+                raw_list = _filter_bible_by_chapter_range(raw_list, range_bounds_bible, max_items=12)
+            if raw_list:
+                for item in raw_list:
+                    try:
+                        eid = item.get("id")
+                        if eid is not None:
+                            HybridSearch.update_lookup_stats(eid)
+                    except Exception:
+                        pass
+                main_id = raw_list[0].get("id") if raw_list else None
+                rel_block = ""
+                if main_id:
+                    rel_text = ContextManager.get_entity_relations(main_id, project_id)
+                    if rel_text:
+                        rel_block = f"> [RELATION]:\n{rel_text}\n\n"
+                part = format_bible_context_by_sections(raw_list)
+                bible_context = f"\n--- KNOWLEDGE BASE ---\n{rel_block}{part}\n"
+
+        if bible_context:
+            context_parts.append(bible_context)
+            total_tokens += AIService.estimate_tokens(bible_context)
+            sources.append("📚 Bible Search")
+
+        try:
+            services = init_services()
+            supabase = services["supabase"]
+            related_chapter_nums = set()
+            if target_bible_entities:
+                for entity in target_bible_entities:
+                    res = supabase.table("story_bible").select("source_chapter").eq("story_id", project_id).ilike("entity_name", f"%{entity}%").execute()
+                    if res.data:
+                        for row in res.data:
+                            if row.get("source_chapter") and row["source_chapter"] > 0:
+                                related_chapter_nums.add(row["source_chapter"])
+            if related_chapter_nums:
+                chap_res = supabase.table("chapters").select("title").eq("story_id", project_id).in_("chapter_number", list(related_chapter_nums)).execute()
+                if chap_res.data:
+                    auto_files = [c["title"] for c in chap_res.data if c.get("title")]
+                    if auto_files:
+                        extra_text, extra_sources = ContextManager.load_full_content(auto_files, project_id)
+                        if extra_text:
+                            context_parts.append(f"\n--- 🕵️ AUTO-DETECTED CONTEXT (REVERSE LOOKUP) ---\n{extra_text}")
+                            sources.extend([f"{s} (Auto)" for s in extra_sources])
+                            total_tokens += AIService.estimate_tokens(extra_text)
+        except Exception as e:
+            print(f"Reverse lookup error: {e}")
+
+    if "timeline" in context_needs and not _over_budget():
+        events = get_timeline_events(
+            project_id,
+            limit=30,
+            chapter_range=range_bounds_bible,
+            arc_id=current_arc_id,
+        )
+        if events:
+            lines = ["[TIMELINE EVENTS - Thứ tự sự kiện / mốc thời gian]"]
+            for e in events:
+                order = e.get("event_order", 0)
+                title = e.get("title", "")
+                desc = (e.get("description") or "")[:400]
+                raw_date = e.get("raw_date", "")
+                etype = e.get("event_type", "event")
+                lines.append(f"- #{order} [{etype}] {title}" + (f" (Thời điểm: {raw_date})" if raw_date else "") + f"\n  {desc}")
+            block = "\n".join(lines)
+            context_parts.append(block)
+            total_tokens += AIService.estimate_tokens(block)
+            sources.append("📅 Timeline Events")
+        else:
+            context_parts.append("[TIMELINE] Chưa có dữ liệu timeline_events. Trả lời dựa trên Bible/chương nếu có.")
+            sources.append("📅 Timeline (empty)")
+
+    query_for_vec = (router_result.get("rewritten_query") or "").strip()
+    if query_for_vec and ("relation" in context_needs or "timeline" in context_needs) and not _over_budget():
+        if "relation" in context_needs:
+            rel_vec = get_top_relations_by_query(project_id, query_for_vec, top_k=5)
+            if rel_vec:
+                context_parts.append(f"\n--- 🔗 {rel_vec}")
+                total_tokens += AIService.estimate_tokens(rel_vec)
+                sources.append("🔗 Relations (vector)")
+        if "timeline" in context_needs:
+            tl_vec = get_top_timeline_by_query(project_id, query_for_vec, top_k=5)
+            if tl_vec:
+                context_parts.append(f"\n--- 📅 {tl_vec}")
+                total_tokens += AIService.estimate_tokens(tl_vec)
+                sources.append("📅 Timeline (vector)")
+
+    if "chunk" in context_needs and not _over_budget():
+        query_for_chunk = (router_result.get("rewritten_query") or "").strip() or "nội dung"
+        chunk_rows = search_chunks_vector(query_for_chunk, project_id, arc_id=current_arc_id, top_k=20)
+        if not chunk_rows and current_arc_id:
+            chunk_rows = search_chunks_vector(query_for_chunk, project_id, arc_id=None, top_k=20)
+        if chunk_rows and ReverseLookupAssembler:
+            chunk_ids = [str(c.get("id")) for c in chunk_rows if c.get("id")]
+            if chunk_ids:
+                chunk_ctx, chunk_sources, chunk_tokens = ContextManager.build_context_with_chunk_reverse_lookup(
+                    project_id, chunk_ids, current_arc_id, token_limit=6000
+                )
+                if chunk_ctx:
+                    context_parts.append(chunk_ctx)
+                    total_tokens += chunk_tokens
+                    sources.extend(chunk_sources)
+                    sources.append("📦 Chunks")
+        chapter_range_from_query = parse_chapter_range_from_query(query_for_chunk or router_result.get("rewritten_query") or "")
+        if chapter_range_from_query and "chapter" not in context_needs:
+            full_text, source_names = ContextManager.load_chapters_by_range(
+                project_id, chapter_range_from_query[0], chapter_range_from_query[1],
+                token_limit=8000,
+            )
+            if full_text:
+                context_parts.append(f"\n--- 📄 NỘI DUNG CHƯƠNG (fallback) ---\n{full_text}")
+                total_tokens += AIService.estimate_tokens(full_text)
+                sources.extend(source_names)
+                sources.append("📄 Chapter fallback")
+
+    if intent == "search_context" and range_bounds_bible is not None and not _over_budget():
+        try:
+            _budget_pct = (max_context_tokens or 0) * 0.35
+            if _budget_pct > 0 and total_tokens < _budget_pct:
+                extra_chap, extra_src = ContextManager.load_chapters_by_range(
+                    project_id, range_bounds_bible[0], range_bounds_bible[1],
+                    token_limit=min(12000, (max_context_tokens or 12000) - total_tokens),
+                )
+                if extra_chap:
+                    context_parts.append(f"\n--- 📄 NỘI DUNG CHƯƠNG (V8 bổ sung toàn văn khi context còn thiếu) ---\n{extra_chap}")
+                    total_tokens += AIService.estimate_tokens(extra_chap)
+                    sources.extend(extra_src or [])
+                    sources.append("📄 Chapter full (V8)")
+        except Exception as _e:
+            print(f"V8 full chapter fallback error: {_e}")
+
+    ctx["total_tokens"] = total_tokens
+
+
+INTENT_CONTEXT_HANDLERS = {
+    "clarification": _intent_handle_clarification,
+    "template": _intent_handle_template,
+    "llm_casual": _intent_handle_llm_casual,
+    "data_operation": _intent_handle_data_operation,
+    "llm_with_context": _intent_handle_llm_with_context,
+}
 
 
 # ==========================================
@@ -339,287 +704,53 @@ class ContextManager:
             intent = "search_context"
         if not context_needs and intent == "search_context":
             context_needs = infer_default_context_needs(router_result)
-        context_priority = normalize_context_priority(
-            router_result.get("context_priority"), context_needs
-        ) or list(context_needs)
-
-        if intent == "web_search":
-            try:
-                from utils.web_search import web_search as do_web_search
-                search_text = do_web_search(router_result.get("rewritten_query") or "", max_results=5)
-            except Exception as ex:
-                search_text = f"[WEB SEARCH] Lỗi: {ex}. Trả lời dựa trên kiến thức có sẵn."
-            context_parts.append(search_text)
-            total_tokens += AIService.estimate_tokens(search_text)
-            sources.append("🌐 Web Search")
-
-        elif intent == "ask_user_clarification":
-            clarification_question = router_result.get("clarification_question", "") or "Bạn có thể nói rõ hơn câu hỏi hoặc chủ đề bạn muốn hỏi?"
-            context_parts.append(f"[CẦN LÀM RÕ]\nHệ thống cần thêm thông tin: {clarification_question}\nTrả lời ngắn gọn, lịch sự yêu cầu user làm rõ theo gợi ý trên (không đoán bừa).")
-            sources.append("❓ Clarification")
-
-        elif intent == "update_data":
-            op_type = router_result.get("data_operation_type") or ""
-            op_target = router_result.get("data_operation_target") or ""
-            if op_target in ("bible", "relation", "timeline", "chunking"):
-                ch_range = router_result.get("chapter_range")
-                ch_desc = f"chương {ch_range[0]}" if (ch_range and len(ch_range) >= 1) else "chương"
-                context_parts.append(
-                    f"[CẬP NHẬT DỮ LIỆU - CẦN XÁC NHẬN]\n"
-                    f"User yêu cầu: {op_type} {op_target} cho {ch_desc}. "
-                    "Thao tác này chỉ thực hiện sau khi user xác nhận. Trả lời ngắn gọn: nêu rõ thao tác và đối tượng cùng chương, nhắc user xác nhận (sẽ chạy ngầm và xem như đã chấp nhận)."
-                )
-                sources.append("📦 Update data (thao tác theo chương, pending confirm)")
-            else:
-                update_summary = router_result.get("update_summary", "") or "Ghi nhớ / cập nhật dữ liệu theo yêu cầu user."
-                context_parts.append(f"[CẬP NHẬT DỮ LIỆU - CẦN XÁC NHẬN]\n{update_summary}\n\nThao tác này chỉ thực hiện sau khi user xác nhận. Trả lời tóm tắt nội dung sẽ được ghi và nhắc user xác nhận trước khi thực hiện.")
-                sources.append("✏️ Update data (ghi nhớ quy tắc, pending confirm)")
-
-        elif intent == "query_Sql":
-            arc_id = (session_state or {}).get("current_arc_id")
-            block, source_label = build_query_sql_context(router_result, project_id, arc_id=arc_id)
-            if block:
-                context_parts.append(block)
-                total_tokens += AIService.estimate_tokens(block)
-                sources.append(source_label)
-            else:
-                intent = "search_context"
-                context_needs = ["bible", "relation"]
-
-        elif intent == "check_chapter_logic":
-            try:
-                from core.chapter_logic_check import run_chapter_logic_check
-                ch_range = router_result.get("chapter_range")
-                ch_num = int(ch_range[0]) if (ch_range and len(ch_range) >= 1) else None
-                if ch_num is None:
-                    context_parts.append("[SOÁT LOGIC CHƯƠNG] Chưa xác định được chương. Hãy nêu rõ số chương (vd: chương 3).")
-                    sources.append("🔍 Logic check")
-                else:
-                    services = init_services()
-                    supabase = services.get("supabase") if services else None
-                    if not supabase:
-                        context_parts.append("[SOÁT LOGIC CHƯƠNG] Không kết nối được dịch vụ.")
-                        sources.append("🔍 Logic check")
-                    else:
-                        r = supabase.table("chapters").select("id, chapter_number, title, content, arc_id").eq(
-                            "story_id", project_id
-                        ).eq("chapter_number", ch_num).limit(1).execute()
-                        row = (r.data or [None])[0] if r.data else None
-                        if not row:
-                            context_parts.append("[SOÁT LOGIC CHƯƠNG] Không tìm thấy chương %s." % ch_num)
-                            sources.append("🔍 Logic check")
-                        else:
-                            issues, resolved_count, _check_id, err = run_chapter_logic_check(
-                                project_id,
-                                row["id"],
-                                row.get("chapter_number") or ch_num,
-                                row.get("title") or ("Chương %s" % ch_num),
-                                row.get("content") or "",
-                                arc_id=row.get("arc_id"),
-                            )
-                            if err:
-                                context_parts.append("[SOÁT LOGIC CHƯƠNG] Lỗi: %s" % err)
-                            else:
-                                lines = ["[KẾT QUẢ SOÁT LOGIC - Chương %s]" % ch_num]
-                                if not issues:
-                                    lines.append("Không phát hiện lỗi logic (timeline, bible, relation, chat crystallize, rule).")
-                                else:
-                                    for i, it in enumerate(issues, 1):
-                                        lines.append("%s. [%s] %s" % (i, it.get("dimension", ""), it.get("message", "")))
-                                if resolved_count:
-                                    lines.append("(Đã đánh dấu khắc phục %s lỗi cũ từ lần soát trước.)" % resolved_count)
-                                lines.append("Xem chi tiết tại **Data Health**.")
-                                context_parts.append("\n".join(lines))
-                            sources.append("🔍 Logic check (Data Health)")
-            except Exception as ex:
-                context_parts.append("[SOÁT LOGIC CHƯƠNG] Lỗi: %s" % str(ex))
-                sources.append("🔍 Logic check")
-
+        # V8: intent search_context — nếu bật v8_full_context_search (mặc định bật) thì gather đủ tất cả nguồn
+        _v8_full = True
         if intent == "search_context":
-            range_bounds_bible = ContextManager._resolve_chapter_range(
-                project_id, chapter_range_mode, chapter_range_count, chapter_range
-            )
-            def _over_budget() -> bool:
-                if max_context_tokens is None:
-                    return False
-                return total_tokens >= max_context_tokens * 0.92
+            try:
+                services = init_services()
+                if services and services.get("supabase"):
+                    r = services["supabase"].table("settings").select("value").eq("key", "v8_full_context_search").execute()
+                    if r.data and r.data[0] and str(r.data[0].get("value") or "").strip() == "0":
+                        _v8_full = False
+            except Exception:
+                pass
+            if _v8_full:
+                context_needs = list(FULL_CONTEXT_NEEDS_V8)
+                context_priority = list(FULL_CONTEXT_NEEDS_V8)
+            else:
+                context_priority = normalize_context_priority(
+                    router_result.get("context_priority"), context_needs
+                ) or list(context_needs)
+        else:
+            context_priority = normalize_context_priority(
+                router_result.get("context_priority"), context_needs
+            ) or list(context_needs)
 
-            for need in context_priority:
-                if _over_budget():
-                    break
-                if need == "chapter":
-                    full_text, source_names = "", []
-                    if range_bounds_bible is not None:
-                        cap = (min(ContextManager.DEFAULT_CHAPTER_TOKEN_LIMIT, (max_context_tokens - total_tokens) // max(1, len(context_priority))) if max_context_tokens else ContextManager.DEFAULT_CHAPTER_TOKEN_LIMIT)
-                        full_text, source_names = ContextManager.load_chapters_by_range(
-                            project_id, range_bounds_bible[0], range_bounds_bible[1],
-                            token_limit=cap,
-                        )
-                    if not full_text and target_files:
-                        full_text, source_names = ContextManager.load_full_content(
-                            target_files, project_id,
-                            token_limit=ContextManager.DEFAULT_CHAPTER_TOKEN_LIMIT,
-                        )
-                    if full_text:
-                        context_parts.append(f"\n--- TARGET CONTENT ---\n{full_text}")
-                        sources.extend(source_names)
-                        total_tokens += AIService.estimate_tokens(full_text)
-
-            need_bible_or_relation = ("bible" in context_needs or "relation" in context_needs) and not _over_budget()
-            if need_bible_or_relation:
-                raw_inferred = router_result.get("inferred_prefixes") or []
-                valid_keys = Config.get_valid_prefix_keys()
-                inferred_prefixes = [
-                    p for p in raw_inferred
-                    if p and str(p).strip().upper().replace(" ", "_") in valid_keys
-                ] if valid_keys else raw_inferred
-                bible_context = ""
-                for entity in target_bible_entities:
-                    raw_list = HybridSearch.smart_search_hybrid_raw(
-                        entity, project_id, top_k=7, inferred_prefixes=inferred_prefixes
-                    )
-                    if range_bounds_bible:
-                        raw_list = _filter_bible_by_chapter_range(raw_list, range_bounds_bible, max_items=10)
-                    if raw_list:
-                        for item in raw_list:
-                            try:
-                                eid = item.get("id")
-                                if eid is not None:
-                                    HybridSearch.update_lookup_stats(eid)
-                            except Exception:
-                                pass
-                        main_id = raw_list[0].get("id") if raw_list else None
-                        rel_block = ""
-                        if main_id:
-                            rel_text = ContextManager.get_entity_relations(main_id, project_id)
-                            if rel_text:
-                                rel_block = f"> [RELATION]:\n{rel_text}\n\n"
-                        part = format_bible_context_by_sections(raw_list)
-                        bible_context += f"\n--- {entity.upper()} ---\n{rel_block}{part}\n"
-
-                if not bible_context and router_result.get("rewritten_query"):
-                    raw_list = HybridSearch.smart_search_hybrid_raw(
-                        router_result["rewritten_query"],
-                        project_id,
-                        top_k=10,
-                        inferred_prefixes=inferred_prefixes,
-                    )
-                    if range_bounds_bible:
-                        raw_list = _filter_bible_by_chapter_range(raw_list, range_bounds_bible, max_items=12)
-                    if raw_list:
-                        for item in raw_list:
-                            try:
-                                eid = item.get("id")
-                                if eid is not None:
-                                    HybridSearch.update_lookup_stats(eid)
-                            except Exception:
-                                pass
-                        main_id = raw_list[0].get("id") if raw_list else None
-                        rel_block = ""
-                        if main_id:
-                            rel_text = ContextManager.get_entity_relations(main_id, project_id)
-                            if rel_text:
-                                rel_block = f"> [RELATION]:\n{rel_text}\n\n"
-                        part = format_bible_context_by_sections(raw_list)
-                        bible_context = f"\n--- KNOWLEDGE BASE ---\n{rel_block}{part}\n"
-
-                if bible_context:
-                    context_parts.append(bible_context)
-                    total_tokens += AIService.estimate_tokens(bible_context)
-                    sources.append("📚 Bible Search")
-
-                try:
-                    services = init_services()
-                    supabase = services['supabase']
-                    related_chapter_nums = set()
-
-                    if target_bible_entities:
-                        for entity in target_bible_entities:
-                            res = supabase.table("story_bible") \
-                                .select("source_chapter") \
-                                .eq("story_id", project_id) \
-                                .ilike("entity_name", f"%{entity}%") \
-                                .execute()
-
-                            if res.data:
-                                for row in res.data:
-                                    if row.get('source_chapter') and row['source_chapter'] > 0:
-                                        related_chapter_nums.add(row['source_chapter'])
-
-                    if related_chapter_nums:
-                        chap_res = supabase.table("chapters") \
-                            .select("title") \
-                            .eq("story_id", project_id) \
-                            .in_("chapter_number", list(related_chapter_nums)) \
-                            .execute()
-
-                        if chap_res.data:
-                            auto_files = [c['title'] for c in chap_res.data if c.get('title')]
-
-                            if auto_files:
-                                extra_text, extra_sources = ContextManager.load_full_content(auto_files, project_id)
-
-                                if extra_text:
-                                    context_parts.append(f"\n--- 🕵️ AUTO-DETECTED CONTEXT (REVERSE LOOKUP) ---\n{extra_text}")
-                                    sources.extend([f"{s} (Auto)" for s in extra_sources])
-                                    total_tokens += AIService.estimate_tokens(extra_text)
-
-                except Exception as e:
-                    print(f"Reverse lookup error: {e}")
-                    pass
-
-            if "timeline" in context_needs and not _over_budget():
-                events = get_timeline_events(
-                    project_id,
-                    limit=20,
-                    chapter_range=range_bounds_bible,
-                    arc_id=current_arc_id,
-                )
-                if events:
-                    lines = ["[TIMELINE EVENTS - Thứ tự sự kiện / mốc thời gian]"]
-                    for e in events:
-                        order = e.get("event_order", 0)
-                        title = e.get("title", "")
-                        desc = (e.get("description") or "")[:400]
-                        raw_date = e.get("raw_date", "")
-                        etype = e.get("event_type", "event")
-                        lines.append(f"- #{order} [{etype}] {title}" + (f" (Thời điểm: {raw_date})" if raw_date else "") + f"\n  {desc}")
-                    block = "\n".join(lines)
-                    context_parts.append(block)
-                    total_tokens += AIService.estimate_tokens(block)
-                    sources.append("📅 Timeline Events")
-                else:
-                    context_parts.append("[TIMELINE] Chưa có dữ liệu timeline_events. Trả lời dựa trên Bible/chương nếu có.")
-                    sources.append("📅 Timeline (empty)")
-
-            if "chunk" in context_needs and not _over_budget():
-                query_for_chunk = (router_result.get("rewritten_query") or "").strip() or "nội dung"
-                chunk_rows = search_chunks_vector(query_for_chunk, project_id, arc_id=current_arc_id, top_k=10)
-                if not chunk_rows and current_arc_id:
-                    chunk_rows = search_chunks_vector(query_for_chunk, project_id, arc_id=None, top_k=10)
-                if chunk_rows and ReverseLookupAssembler:
-                    chunk_ids = [str(c.get("id")) for c in chunk_rows if c.get("id")]
-                    if chunk_ids:
-                        chunk_ctx, chunk_sources, chunk_tokens = ContextManager.build_context_with_chunk_reverse_lookup(
-                            project_id, chunk_ids, current_arc_id, token_limit=5000
-                        )
-                        if chunk_ctx:
-                            context_parts.append(chunk_ctx)
-                            total_tokens += chunk_tokens
-                            sources.extend(chunk_sources)
-                            sources.append("📦 Chunks")
-                # Fallback: có số chương trong query mà chưa load chapter từ context_needs
-                chapter_range_from_query = parse_chapter_range_from_query(query_for_chunk or router_result.get("rewritten_query") or "")
-                if chapter_range_from_query and "chapter" not in context_needs:
-                    full_text, source_names = ContextManager.load_chapters_by_range(
-                        project_id, chapter_range_from_query[0], chapter_range_from_query[1],
-                        token_limit=8000,
-                    )
-                    if full_text:
-                        context_parts.append(f"\n--- 📄 NỘI DUNG CHƯƠNG (fallback) ---\n{full_text}")
-                        total_tokens += AIService.estimate_tokens(full_text)
-                        sources.extend(source_names)
-                        sources.append("📄 Chapter fallback")
+        # Dispatch theo INTENT_HANDLER_MAP (clarification, template, llm_casual, data_operation, llm_with_context)
+        handler_type = INTENT_HANDLER_MAP.get(intent, "llm_with_context")
+        handler_fn = INTENT_CONTEXT_HANDLERS.get(handler_type, _intent_handle_llm_with_context)
+        ctx = {
+            "context_parts": context_parts,
+            "sources": sources,
+            "total_tokens": total_tokens,
+            "project_id": project_id,
+            "session_state": session_state,
+            "max_context_tokens": max_context_tokens,
+            "context_needs": context_needs,
+            "context_priority": context_priority,
+            "router_result": router_result,
+            "chapter_range_mode": chapter_range_mode,
+            "chapter_range_count": chapter_range_count,
+            "chapter_range": chapter_range,
+            "target_files": target_files,
+            "target_bible_entities": target_bible_entities,
+            "logic_check_dimensions": None,  # Data Health có thể truyền khi gọi từ tab soát
+        }
+        handler_fn(router_result, ctx)
+        context_parts = ctx["context_parts"]
+        sources = ctx["sources"]
+        total_tokens = ctx["total_tokens"]
 
         context_str = "\n".join(context_parts)
         if max_context_tokens is not None and total_tokens > max_context_tokens:

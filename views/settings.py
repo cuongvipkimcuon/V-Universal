@@ -9,12 +9,13 @@ def render_settings_tab():
     st.header("⚙️ Settings")
     st.caption("Ver 7.0: Tất cả tùy chỉnh AI chuyển vào đây.")
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "👤 Account",
         "🤖 AI Model",
         "⚙️ Cấu hình AI",
         "🎨 Giao diện",
         "📋 Bible & Personas",
+        "🚀 V8 & Observability",
     ])
 
     with tab1:
@@ -116,3 +117,62 @@ def render_settings_tab():
             render_prefix_setup()
         with st.expander("🎭 Cấu hình Personas", expanded=False):
             render_persona_setup()
+
+    with tab6:
+        st.subheader("🚀 V8 & Observability")
+        st.caption("V8.3: Search context luôn gather đủ Bible, chunk, relation, timeline, chapter (+ bổ sung toàn văn chương khi context thiếu).")
+        try:
+            services = init_services()
+            supabase = services.get("supabase") if services else None
+        except Exception:
+            supabase = None
+        if supabase:
+            try:
+                r = supabase.table("settings").select("value").eq("key", "v8_full_context_search").execute()
+                current = (r.data and r.data[0] and str(r.data[0].get("value") or "") == "1")
+            except Exception:
+                current = True
+            v8_full = st.toggle(
+                "V8 Full context search (search_context)",
+                value=current,
+                key="v8_full_context_toggle",
+                help="Bật: intent search_context luôn lấy đủ bible, relation, timeline, chunk, chapter. Tắt: dùng lại context_needs từ Router (có thể thiếu ý).",
+            )
+            if st.button("💾 Lưu V8 Full context", key="save_v8_full"):
+                try:
+                    val = "1" if v8_full else "0"
+                    supabase.table("settings").upsert({"key": "v8_full_context_search", "value": val}, on_conflict="key").execute()
+                    st.toast("Đã lưu.")
+                except Exception as e:
+                    st.error(str(e))
+            st.divider()
+            try:
+                r2 = supabase.table("settings").select("value").eq("key", "max_llm_calls_per_turn").execute()
+                max_llm_val = 5
+                if r2.data and r2.data[0] is not None:
+                    v = r2.data[0].get("value")
+                    if v is not None:
+                        max_llm_val = max(0, int(v) if isinstance(v, (int, float)) else int(str(v).strip() or "5"))
+            except Exception:
+                max_llm_val = 5
+            max_llm_calls = st.number_input(
+                "Số lần gọi LLM tối đa mỗi turn (chỉ tính intent, planner, draft, numerical; verification/check không tính). 0 = không giới hạn.",
+                min_value=0,
+                max_value=20,
+                value=max_llm_val,
+                step=1,
+                key="max_llm_calls_per_turn_input",
+            )
+            if st.button("💾 Lưu giới hạn LLM/turn", key="save_max_llm"):
+                try:
+                    supabase.table("settings").upsert(
+                        {"key": "max_llm_calls_per_turn", "value": max_llm_calls},
+                        on_conflict="key",
+                    ).execute()
+                    st.toast("Đã lưu.")
+                except Exception as e:
+                    st.error(str(e))
+            st.divider()
+            st.caption("Observability: mỗi turn chat ghi log vào bảng **chat_turn_logs** (intent, context_needs, context_tokens, llm_calls_count). Chạy migration V8.3 để tạo bảng.")
+        else:
+            st.warning("Chưa kết nối Supabase. Không thể lưu cài đặt V8.")

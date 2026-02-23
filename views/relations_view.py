@@ -23,6 +23,18 @@ def render_relations_tab(project_id, persona):
         st.warning("Không kết nối được dịch vụ.")
         return
     supabase = services["supabase"]
+
+    relations_no_vec_count = 0
+    try:
+        r = supabase.table("entity_relations").select("id").eq("story_id", project_id).is_("embedding", "NULL").limit(1001).execute()
+        relations_no_vec_count = len(r.data or [])
+        if relations_no_vec_count > 1000:
+            relations_no_vec_count = 1001
+    except Exception:
+        pass
+    lbl_rel = "1000+" if relations_no_vec_count > 1000 else str(relations_no_vec_count)
+    st.caption(f"**Vector:** {lbl_rel} quan hệ chưa có embedding.")
+
     bible_data_all = get_bible_list_cached(project_id, st.session_state.get("update_trigger", 0))
     id_to_name = {e["id"]: e.get("entity_name", "") for e in bible_data_all}
 
@@ -31,8 +43,25 @@ def render_relations_tab(project_id, persona):
     can_write = check_permission(user_id, user_email, project_id, "write")
     can_delete = check_permission(user_id, user_email, project_id, "delete")
 
+    from core.background_jobs import is_embedding_backfill_running
+    _relations_running = is_embedding_backfill_running("relations")
+    if not _relations_running and st.session_state.get("embedding_sync_clicked_relations"):
+        st.session_state.pop("embedding_sync_clicked_relations", None)
+    sync_relations = _relations_running or st.session_state.get("embedding_sync_clicked_relations", False)
+    if sync_relations:
+        st.caption("⏳ Đang đồng bộ vector (Relations). Vui lòng đợi xong rồi bấm Refresh.")
     if st.button("🔄 Refresh", key="relations_refresh_btn"):
         full_refresh()
+    if can_write:
+        if st.button("🔄 Đồng bộ vector (Relations)", key="relations_sync_vec_btn", disabled=(relations_no_vec_count == 0 or sync_relations)):
+            import threading
+            from core.background_jobs import run_embedding_backfill
+            st.session_state["embedding_sync_clicked_relations"] = True
+            def _run():
+                run_embedding_backfill(project_id, bible_limit=0, chunks_limit=0, relations_limit=200, timeline_limit=0)
+            threading.Thread(target=_run, daemon=True).start()
+            st.toast("Đã bắt đầu đồng bộ vector (Relations). Bấm Refresh sau vài giây.")
+            st.rerun()
 
     try:
         rel_res = supabase.table("entity_relations").select("*").eq("story_id", project_id).execute()
@@ -70,6 +99,7 @@ def render_relations_tab(project_id, persona):
                             supabase.table("entity_relations").update({
                                 "relation_type": (new_type or "").strip() or "liên quan",
                                 "description": (new_desc or "").strip(),
+                                "embedding": None,
                             }).eq("id", rel_id).execute()
                             st.session_state.pop("rel_editing_id", None)
                             invalidate_cache()

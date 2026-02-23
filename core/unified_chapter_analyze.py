@@ -4,12 +4,23 @@ import json
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-# Max ký tự nội dung đưa vào 1 lần LLM (tránh vượt context).
-UNIFIED_MAX_CONTENT_CHARS = 60_000
+from core.user_data_save_pipeline import (
+    validate_and_prepare_bible,
+    validate_and_prepare_timeline,
+    validate_and_prepare_relation,
+    validate_and_prepare_chunk,
+)
+
+# Max ký tự nội dung đưa vào 1 lần LLM (tránh vượt context). Tăng để trích nhiều dữ liệu hơn.
+UNIFIED_MAX_CONTENT_CHARS = 75_000
 
 # Chunk fallback: kích thước mục tiêu và overlap (câu)
 CHUNK_TARGET_SIZE = 2000
 CHUNK_OVERLAP_SENTENCES = 2
+
+# Batch size cho insert/delete (tránh vượt giới hạn PostgREST)
+BATCH_INSERT_SIZE = 200
+BATCH_DELETE_IDS = 500
 
 
 def _fallback_semantic_chunks(content: str) -> List[Dict[str, Any]]:
@@ -68,13 +79,15 @@ def _llm_unified_extract(content: str, chapter_label: str, persona: dict) -> Dic
     from config import Config
     allowed = Config.get_allowed_prefix_keys_for_extract() if hasattr(Config, "get_allowed_prefix_keys_for_extract") else ["CHARACTER", "LOCATION", "EVENT", "OTHER"]
     prefix_list = ", ".join(allowed) + ", OTHER"
-    prompt = f"""Bạn là trợ lý phân tích văn bản. Từ NỘI DUNG CHƯƠNG dưới, trích xuất ĐỒNG THỜI:
-1) Bible: thực thể (nhân vật, địa điểm, sự kiện, đồ vật...) - type phải là MỘT trong: {prefix_list}.
-2) Timeline: sự kiện theo thứ tự thời gian - event_type: event|flashback|milestone|timeskip|other.
-3) Chunks: chia nội dung thành các đoạn có ý nghĩa (theo scene/hành động), mỗi đoạn có title ngắn và content.
-4) Relations: cặp thực thể có quan hệ (dùng đúng entity_name đã liệt kê trong bible).
-5) chunk_bible: với mỗi chunk, thực thể bible nào xuất hiện (chunk_index 0-based, bible_index 0-based).
+    prompt = f"""Bạn là trợ lý phân tích văn bản. Từ NỘI DUNG CHƯƠNG dưới, trích xuất ĐỒNG THỜI (ưu tiên ĐẦY ĐỦ, không bỏ sót):
+1) Bible: MỌI thực thể (nhân vật dù chính hay phụ, địa điểm dù lớn hay nhỏ, sự kiện, đồ vật, khái niệm) - type là MỘT trong: {prefix_list}. Khi nghi ngờ vẫn liệt kê.
+2) Timeline: MỌI sự kiện theo thứ tự thời gian (kể cả thoáng qua, flashback, mốc) - event_type: event|flashback|milestone|timeskip|other.
+3) Chunks: chia nội dung thành các đoạn có ý nghĩa (theo scene/hành động/dialog), mỗi đoạn có title ngắn và content. Tách đủ nhỏ để dễ tra cứu.
+4) Relations: MỌI cặp thực thể có quan hệ (trực tiếp hay gián tiếp; dùng đúng entity_name đã liệt kê trong bible).
+5) chunk_bible: với mỗi chunk, thực thể bible nào xuất hiện (chunk_index 0-based, bible_index 0-based). Liệt kê hết có nhắc.
 6) chunk_timeline: với mỗi chunk, sự kiện timeline nào được nhắc (chunk_index, timeline_index 0-based).
+
+NGƯỠNG: Trích xuất NHIỀU NHẤT có thể. Chỉ bỏ qua khi chắc chắn không liên quan đến chương.
 
 CHƯƠNG: {chapter_label}
 NỘI DUNG:
@@ -95,8 +108,8 @@ Nếu không có: mảng rỗng []. Chỉ trả về JSON, không giải thích.
         resp = AIService.call_openrouter(
             messages=[{"role": "user", "content": prompt}],
             model=_get_default_tool_model(),
-            temperature=0.2,
-            max_tokens=16000,
+            temperature=0.15,
+            max_tokens=20000,
             response_format={"type": "json_object"},
         )
         raw = (resp.choices[0].message.content or "").strip()
@@ -226,43 +239,47 @@ def run_unified_chapter_analyze(
             except Exception:
                 pass
 
-    # Delete existing data for this chapter
+    # Delete existing data for this chapter (bulk: ít round-trip)
     try:
         r = supabase.table("story_bible").select("id").eq("story_id", project_id).eq("source_chapter", chapter_number).execute()
         entity_ids_chapter = [row["id"] for row in (r.data or []) if row.get("id")]
-        for bid in entity_ids_chapter:
-            supabase.table("story_bible").delete().eq("id", bid).execute()
         if entity_ids_chapter:
-            rels = supabase.table("entity_relations").select("id, source_entity_id, target_entity_id").eq("story_id", project_id).execute()
-            to_del = [x["id"] for x in (rels.data or []) if x.get("id") and (x.get("source_entity_id") in entity_ids_chapter or x.get("target_entity_id") in entity_ids_chapter)]
-            for rid in to_del:
-                supabase.table("entity_relations").delete().eq("id", rid).execute()
-        r = supabase.table("timeline_events").select("id").eq("story_id", project_id).eq("chapter_id", chapter_id).execute()
-        for row in (r.data or []):
-            if row.get("id"):
-                supabase.table("timeline_events").delete().eq("id", row["id"]).execute()
+            for i in range(0, len(entity_ids_chapter), BATCH_DELETE_IDS):
+                batch = entity_ids_chapter[i : i + BATCH_DELETE_IDS]
+                supabase.table("entity_relations").delete().in_("source_entity_id", batch).execute()
+                supabase.table("entity_relations").delete().in_("target_entity_id", batch).execute()
+        supabase.table("story_bible").delete().eq("story_id", project_id).eq("source_chapter", chapter_number).execute()
+        supabase.table("timeline_events").delete().eq("story_id", project_id).eq("chapter_id", chapter_id).execute()
         r = supabase.table("chunks").select("id").eq("story_id", project_id).eq("chapter_id", chapter_id).execute()
-        for row in (r.data or []):
-            cid = row.get("id")
-            if cid:
-                try:
-                    supabase.table("chunk_bible_links").delete().eq("chunk_id", cid).execute()
-                except Exception:
-                    pass
-                try:
-                    supabase.table("chunk_timeline_links").delete().eq("chunk_id", cid).execute()
-                except Exception:
-                    pass
-                supabase.table("chunks").delete().eq("id", cid).execute()
+        chunk_ids_old = [row["id"] for row in (r.data or []) if row.get("id")]
+        for i in range(0, len(chunk_ids_old), BATCH_DELETE_IDS):
+            batch = chunk_ids_old[i : i + BATCH_DELETE_IDS]
+            try:
+                supabase.table("chunk_bible_links").delete().in_("chunk_id", batch).execute()
+            except Exception:
+                pass
+            try:
+                supabase.table("chunk_timeline_links").delete().in_("chunk_id", batch).execute()
+            except Exception:
+                pass
+        supabase.table("chunks").delete().eq("story_id", project_id).eq("chapter_id", chapter_id).execute()
     except Exception as e:
         result["error"] = f"Xóa dữ liệu cũ thất bại: {e}"
         if job_id and update_job_fn:
             update_job_fn(job_id, "failed", result_summary="Unified: xóa dữ liệu cũ lỗi.", error_message=result["error"])
         return result
 
-    # Step 2: Save Bible (no embedding). Giữ thứ tự theo bible_items để chunk_bible link đúng index.
-    bible_ids_by_index: List[Any] = [None] * max(len(bible_items), 1)  # bible_index từ LLM -> id
+    # Step 2: Save Bible (batch insert, 1 query existing_bible_rows thay vì N)
+    bible_ids_by_index: List[Any] = [None] * max(len(bible_items), 1)
+    existing_bible_rows: List[Dict[str, Any]] = []
+    try:
+        r = supabase.table("story_bible").select("id, entity_name").eq("story_id", project_id).execute()
+        existing_bible_rows = list(r.data or [])
+    except Exception:
+        pass
+
     def save_bible():
+        payloads_with_index: List[Tuple[int, Dict[str, Any]]] = []
         for i, item in enumerate(bible_items):
             name = (item.get("entity_name") or "").strip()
             if not name:
@@ -271,19 +288,30 @@ def run_unified_chapter_analyze(
             prefix = Config.resolve_prefix_for_bible(raw_type) if hasattr(Config, "resolve_prefix_for_bible") else "OTHER"
             final_name = f"[{prefix}] {name}" if not name.startswith("[") else name
             desc = (item.get("description") or "").strip()[:2000]
-            ins = supabase.table("story_bible").insert({
+            payload = {
                 "story_id": project_id,
                 "entity_name": final_name,
                 "description": desc or final_name,
                 "source_chapter": chapter_number,
-            }).execute()
-            if ins.data and ins.data[0].get("id"):
-                bid = ins.data[0]["id"]
-                inserted_bible_ids.append(bid)
-                if i < len(bible_ids_by_index):
-                    bible_ids_by_index[i] = bid
-                else:
-                    bible_ids_by_index.append(bid)
+            }
+            ok, _, payload_ready = validate_and_prepare_bible(
+                project_id, payload, supabase, existing_bible_rows=existing_bible_rows
+            )
+            if not ok or not payload_ready:
+                continue
+            payloads_with_index.append((i, payload_ready))
+        for start in range(0, len(payloads_with_index), BATCH_INSERT_SIZE):
+            batch = payloads_with_index[start : start + BATCH_INSERT_SIZE]
+            rows = [p for _, p in batch]
+            ins = supabase.table("story_bible").insert(rows).execute()
+            for (idx, _), row in zip(batch, ins.data or []):
+                if row.get("id"):
+                    bid = row["id"]
+                    inserted_bible_ids.append(bid)
+                    if idx < len(bible_ids_by_index):
+                        bible_ids_by_index[idx] = bid
+                    else:
+                        bible_ids_by_index.append(bid)
 
     ok, err = _step_with_retry(save_bible)
     result["steps"]["bible"] = ok
@@ -295,27 +323,12 @@ def run_unified_chapter_analyze(
             update_job_fn(job_id, "failed", result_summary="Unified: bước Bible thất bại.", error_message=result["error"])
         return result
 
-    # Step 2b: Bible embedding (để đồng bộ toàn cục phát hiện cùng thực thể khác tên)
-    def save_bible_embedding():
-        from ai.service import AIService
-        if not inserted_bible_ids or not hasattr(AIService, "get_embeddings_batch"):
-            return
-        r = supabase.table("story_bible").select("id, description").in_("id", inserted_bible_ids).execute()
-        rows = list(r.data or [])
-        texts = [(row.get("description") or "").strip() or (row.get("id") or "") for row in rows]
-        vectors = AIService.get_embeddings_batch(texts) or []
-        for i, row in enumerate(rows):
-            if i < len(vectors) and vectors[i]:
-                try:
-                    supabase.table("story_bible").update({"embedding": vectors[i]}).eq("id", row["id"]).execute()
-                except Exception:
-                    pass
+    # Embedding: không tự embed khi tạo dữ liệu. User bấm "Đồng bộ vector (Bible)" trong tab Bible.
 
-    _step_with_retry(save_bible_embedding)  # Không rollback nếu lỗi; Bible đã lưu
-
-    # Step 3: Save Timeline (giữ thứ tự cho chunk_timeline_links)
+    # Step 3: Save Timeline (batch insert, giữ thứ tự)
     timeline_ids_by_index: List[Any] = [None] * max(len(timeline_items), 1)
     def save_timeline():
+        payloads_with_index: List[Tuple[int, Dict[str, Any]]] = []
         for i, ev in enumerate(timeline_items):
             order = int(ev.get("event_order", i + 1))
             title = (ev.get("title") or "").strip() or f"Sự kiện {order}"
@@ -324,7 +337,7 @@ def run_unified_chapter_analyze(
             etype = (ev.get("event_type") or "event").lower()
             if etype not in ("event", "flashback", "milestone", "timeskip", "other"):
                 etype = "event"
-            ins = supabase.table("timeline_events").insert({
+            payload = {
                 "story_id": project_id,
                 "chapter_id": chapter_id,
                 "arc_id": arc_id,
@@ -333,14 +346,23 @@ def run_unified_chapter_analyze(
                 "description": desc,
                 "raw_date": raw_date,
                 "event_type": etype,
-            }).execute()
-            if ins.data and ins.data[0].get("id"):
-                tid = ins.data[0]["id"]
-                inserted_timeline_ids.append(tid)
-                if i < len(timeline_ids_by_index):
-                    timeline_ids_by_index[i] = tid
-                else:
-                    timeline_ids_by_index.append(tid)
+            }
+            ok, _, payload_ready = validate_and_prepare_timeline(project_id, payload, supabase)
+            if not ok or not payload_ready:
+                continue
+            payloads_with_index.append((i, payload_ready))
+        for start in range(0, len(payloads_with_index), BATCH_INSERT_SIZE):
+            batch = payloads_with_index[start : start + BATCH_INSERT_SIZE]
+            rows = [p for _, p in batch]
+            ins = supabase.table("timeline_events").insert(rows).execute()
+            for (idx, _), row in zip(batch, ins.data or []):
+                if row.get("id"):
+                    tid = row["id"]
+                    inserted_timeline_ids.append(tid)
+                    if idx < len(timeline_ids_by_index):
+                        timeline_ids_by_index[idx] = tid
+                    else:
+                        timeline_ids_by_index.append(tid)
 
     ok, err = _step_with_retry(save_timeline)
     result["steps"]["timeline"] = ok
@@ -352,24 +374,15 @@ def run_unified_chapter_analyze(
             update_job_fn(job_id, "failed", result_summary="Unified: bước Timeline thất bại.", error_message=result["error"])
         return result
 
-    # Step 4: Chunks + embedding (chunk only, no bible)
+    # Step 4: Chunks (batch insert)
     def save_chunks():
-        from ai.service import AIService
-        texts = []
-        for c in chunks_data:
-            txt = (c.get("content") or "").strip()
-            if txt:
-                texts.append(txt)
-        vectors = []
-        if texts and hasattr(AIService, "get_embeddings_batch"):
-            vectors = AIService.get_embeddings_batch(texts) or []
+        payloads_order: List[Tuple[int, Dict[str, Any]]] = []
         for i, ch in enumerate(chunks_data):
             txt = (ch.get("content") or "").strip()
             if not txt:
                 continue
             title = (ch.get("title") or "").strip() or f"Phần {i+1}"
             order = int(ch.get("order", i + 1))
-            vec = vectors[i] if i < len(vectors) else None
             row = {
                 "story_id": project_id,
                 "chapter_id": chapter_id,
@@ -379,11 +392,17 @@ def run_unified_chapter_analyze(
                 "meta_json": {"source": "unified_chapter_analyze", "chapter": chapter_number, "title": title},
                 "sort_order": order,
             }
-            if vec:
-                row["embedding"] = vec
-            ins = supabase.table("chunks").insert(row).execute()
-            if ins.data and ins.data[0].get("id"):
-                inserted_chunk_ids.append(ins.data[0]["id"])
+            ok, _, payload_ready = validate_and_prepare_chunk(project_id, row, supabase)
+            if not ok or not payload_ready:
+                continue
+            payloads_order.append((i, payload_ready))
+        for start in range(0, len(payloads_order), BATCH_INSERT_SIZE):
+            batch = payloads_order[start : start + BATCH_INSERT_SIZE]
+            rows = [p for _, p in batch]
+            ins = supabase.table("chunks").insert(rows).execute()
+            for _, row in zip(batch, ins.data or []):
+                if row.get("id"):
+                    inserted_chunk_ids.append(row["id"])
 
     ok, err = _step_with_retry(save_chunks)
     result["steps"]["chunks"] = ok
@@ -407,8 +426,9 @@ def run_unified_chapter_analyze(
                 if rest:
                     name_to_bible_id[rest] = row["id"]
 
-    # Step 5: Relations (resolve source/target to bible ids)
+    # Step 5: Relations (batch insert; ids đã có từ name_to_bible_id)
     def save_relations():
+        payloads: List[Dict[str, Any]] = []
         for rel in relations_data:
             src_name = (rel.get("source") or "").strip()
             tgt_name = (rel.get("target") or "").strip()
@@ -421,15 +441,18 @@ def run_unified_chapter_analyze(
                     tgt_id = tgt_id or v
             if not src_id or not tgt_id or src_id == tgt_id:
                 continue
-            supabase.table("entity_relations").insert({
+            payloads.append({
                 "story_id": project_id,
                 "source_entity_id": src_id,
                 "target_entity_id": tgt_id,
                 "relation_type": (rel.get("relation_type") or "liên quan").strip()[:200],
                 "description": (rel.get("reason") or "").strip()[:500],
                 "source_chapter": chapter_number,
-            }).execute()
-            result["counts"]["relations"] += 1
+            })
+        for start in range(0, len(payloads), BATCH_INSERT_SIZE):
+            batch = payloads[start : start + BATCH_INSERT_SIZE]
+            supabase.table("entity_relations").insert(batch).execute()
+        result["counts"]["relations"] = len(payloads)
 
     ok, err = _step_with_retry(save_relations)
     result["steps"]["relations"] = ok
@@ -440,43 +463,50 @@ def run_unified_chapter_analyze(
             update_job_fn(job_id, "failed", result_summary="Unified: bước Relations thất bại.", error_message=result["error"])
         return result
 
-    # Step 6: chunk_bible_links, chunk_timeline_links (bảng V8; nếu chưa có thì bỏ qua)
+    # Step 6: chunk_bible_links, chunk_timeline_links (batch insert)
     def save_links():
-        try:
-            for link in chunk_bible_data:
-                ci = int(link.get("chunk_index", 0))
-                bi = int(link.get("bible_index", 0))
-                if ci < 0 or ci >= len(inserted_chunk_ids):
-                    continue
-                bid = bible_ids_by_index[bi] if bi < len(bible_ids_by_index) else None
-                if not bid:
-                    continue
-                supabase.table("chunk_bible_links").insert({
-                    "story_id": project_id,
-                    "chunk_id": inserted_chunk_ids[ci],
-                    "bible_entry_id": bid,
-                    "mention_role": (link.get("mention_role") or "primary").strip()[:50] or None,
-                    "sort_order": result["counts"]["link_bible"],
-                }).execute()
-                result["counts"]["link_bible"] += 1
-            for link in chunk_timeline_data:
-                ci = int(link.get("chunk_index", 0))
-                ti = int(link.get("timeline_index", 0))
-                if ci < 0 or ci >= len(inserted_chunk_ids):
-                    continue
-                tid = timeline_ids_by_index[ti] if ti < len(timeline_ids_by_index) else None
-                if not tid:
-                    continue
-                supabase.table("chunk_timeline_links").insert({
-                    "story_id": project_id,
-                    "chunk_id": inserted_chunk_ids[ci],
-                    "timeline_event_id": tid,
-                    "mention_role": (link.get("mention_role") or "primary").strip()[:50] or None,
-                    "sort_order": result["counts"]["link_timeline"],
-                }).execute()
-                result["counts"]["link_timeline"] += 1
-        except Exception:
-            raise
+        link_bible_rows: List[Dict[str, Any]] = []
+        so_b = 0
+        for link in chunk_bible_data:
+            ci = int(link.get("chunk_index", 0))
+            bi = int(link.get("bible_index", 0))
+            if ci < 0 or ci >= len(inserted_chunk_ids):
+                continue
+            bid = bible_ids_by_index[bi] if bi < len(bible_ids_by_index) else None
+            if not bid:
+                continue
+            link_bible_rows.append({
+                "story_id": project_id,
+                "chunk_id": inserted_chunk_ids[ci],
+                "bible_entry_id": bid,
+                "mention_role": (link.get("mention_role") or "primary").strip()[:50] or None,
+                "sort_order": so_b,
+            })
+            so_b += 1
+        link_timeline_rows: List[Dict[str, Any]] = []
+        so_t = 0
+        for link in chunk_timeline_data:
+            ci = int(link.get("chunk_index", 0))
+            ti = int(link.get("timeline_index", 0))
+            if ci < 0 or ci >= len(inserted_chunk_ids):
+                continue
+            tid = timeline_ids_by_index[ti] if ti < len(timeline_ids_by_index) else None
+            if not tid:
+                continue
+            link_timeline_rows.append({
+                "story_id": project_id,
+                "chunk_id": inserted_chunk_ids[ci],
+                "timeline_event_id": tid,
+                "mention_role": (link.get("mention_role") or "primary").strip()[:50] or None,
+                "sort_order": so_t,
+            })
+            so_t += 1
+        for start in range(0, len(link_bible_rows), BATCH_INSERT_SIZE):
+            supabase.table("chunk_bible_links").insert(link_bible_rows[start : start + BATCH_INSERT_SIZE]).execute()
+        for start in range(0, len(link_timeline_rows), BATCH_INSERT_SIZE):
+            supabase.table("chunk_timeline_links").insert(link_timeline_rows[start : start + BATCH_INSERT_SIZE]).execute()
+        result["counts"]["link_bible"] = len(link_bible_rows)
+        result["counts"]["link_timeline"] = len(link_timeline_rows)
 
     ok, err = _step_with_retry(save_links)
     result["steps"]["links"] = ok
@@ -487,7 +517,7 @@ def run_unified_chapter_analyze(
             update_job_fn(job_id, "failed", result_summary="Unified: bước Links thất bại.", error_message=result["error"])
         return result
 
-    # Step 6b: source_chunk_id — Bible: chunk đầu tiên link tới; Timeline: chunk đầu tiên link tới
+    # Step 6b: source_chunk_id — V8.5 RPC bulk update (1 call thay vì N update)
     try:
         first_chunk_by_bible: Dict[Any, Any] = {}
         for link in chunk_bible_data:
@@ -499,11 +529,16 @@ def run_unified_chapter_analyze(
             cid = inserted_chunk_ids[ci]
             if bid and cid and bid not in first_chunk_by_bible:
                 first_chunk_by_bible[bid] = cid
-        for bid, cid in first_chunk_by_bible.items():
+        if first_chunk_by_bible:
+            updates_bible = [{"id": str(bid), "source_chunk_id": str(cid)} for bid, cid in first_chunk_by_bible.items()]
             try:
-                supabase.table("story_bible").update({"source_chunk_id": cid}).eq("id", bid).execute()
+                supabase.rpc("bulk_update_bible_source_chunk", {"updates": updates_bible}).execute()
             except Exception:
-                pass
+                for bid, cid in first_chunk_by_bible.items():
+                    try:
+                        supabase.table("story_bible").update({"source_chunk_id": cid}).eq("id", bid).execute()
+                    except Exception:
+                        pass
         first_chunk_by_timeline: Dict[Any, Any] = {}
         for link in chunk_timeline_data:
             ci = int(link.get("chunk_index", 0))
@@ -514,11 +549,16 @@ def run_unified_chapter_analyze(
             cid = inserted_chunk_ids[ci]
             if tid and cid and tid not in first_chunk_by_timeline:
                 first_chunk_by_timeline[tid] = cid
-        for tid, cid in first_chunk_by_timeline.items():
+        if first_chunk_by_timeline:
+            updates_timeline = [{"id": str(tid), "source_chunk_id": str(cid)} for tid, cid in first_chunk_by_timeline.items()]
             try:
-                supabase.table("timeline_events").update({"source_chunk_id": cid}).eq("id", tid).execute()
+                supabase.rpc("bulk_update_timeline_source_chunk", {"updates": updates_timeline}).execute()
             except Exception:
-                pass
+                for tid, cid in first_chunk_by_timeline.items():
+                    try:
+                        supabase.table("timeline_events").update({"source_chunk_id": cid}).eq("id", tid).execute()
+                    except Exception:
+                        pass
     except Exception:
         pass
 

@@ -1,7 +1,17 @@
 # core/background_jobs.py - Background jobs (Data Analyze + Chat). "Background Jobs" tab shows status.
 """Create/update/list jobs. Workers run in thread; completion is not posted to chat (see Background Jobs tab)."""
+import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
+
+from core.user_data_save_pipeline import (
+    run_logic_check_then_save_bible,
+    run_logic_check_then_save_relation,
+    run_logic_check_then_save_timeline,
+    run_logic_check_then_save_chunk,
+)
 
 # Lazy init_services trong worker để tránh circular / streamlit khi import.
 
@@ -267,12 +277,16 @@ def _worker_data_analyze_bible(
         return
     count = 0
     for row in rows_to_save:
-        supabase.table("story_bible").insert({
+        payload = {
             "story_id": project_id,
             "entity_name": row["final_name"],
             "description": row["description"],
             "source_chapter": chap_num,
-        }).execute()
+        }
+        ok, _, payload_ready = run_logic_check_then_save_bible(project_id, payload, supabase)
+        if not ok or not payload_ready:
+            continue
+        supabase.table("story_bible").insert(payload_ready).execute()
         count += 1
     summary = f"Đã lưu {count} mục Bible."
     update_job(job_id, "completed", result_summary=summary)
@@ -323,14 +337,17 @@ def _worker_data_analyze_relation(
                 continue
         try:
             if item.get("kind") == "relation":
-                supabase.table("entity_relations").insert({
+                payload = {
                     "source_entity_id": item["source_entity_id"],
                     "target_entity_id": item["target_entity_id"],
                     "relation_type": item.get("relation_type", "liên quan"),
                     "description": item.get("description", "") or "",
                     "story_id": project_id,
-                }).execute()
-                saved += 1
+                }
+                ok, _, payload_ready = run_logic_check_then_save_relation(project_id, payload, supabase)
+                if ok and payload_ready:
+                    supabase.table("entity_relations").insert(payload_ready).execute()
+                    saved += 1
             else:
                 supabase.table("story_bible").update({"parent_id": item["parent_entity_id"]}).eq("id", item["entity_id"]).execute()
                 saved += 1
@@ -362,24 +379,36 @@ def _worker_data_analyze_timeline(
         if post_to_chat:
             _post_completion_to_chat(project_id, user_id, label, False, None, "Chương không có nội dung")
         return
-    old = supabase.table("timeline_events").select("id").eq("story_id", project_id).eq("chapter_id", chapter_id).execute()
-    if old.data:
-        ids = [r["id"] for r in old.data if r.get("id")]
-        if ids:
-            supabase.table("timeline_events").delete().in_("id", ids).execute()
+    append_only = bool(payload.get("append_only", False))
+    if not append_only:
+        old = supabase.table("timeline_events").select("id").eq("story_id", project_id).eq("chapter_id", chapter_id).execute()
+        if old.data:
+            ids = [r["id"] for r in old.data if r.get("id")]
+            if ids:
+                supabase.table("timeline_events").delete().in_("id", ids).execute()
     events = extract_timeline_events_from_content(content, chapter_label)
+    base_order = 0
+    if append_only:
+        r = supabase.table("timeline_events").select("event_order").eq("story_id", project_id).order("event_order", desc=True).limit(1).execute()
+        if r.data and r.data[0].get("event_order") is not None:
+            base_order = int(r.data[0]["event_order"]) + 1
     saved = 0
     for ev in (events or []):
+        order_val = int(ev.get("event_order", 0)) if not append_only else (base_order + saved)
+        payload_ev = {
+            "story_id": project_id,
+            "chapter_id": chapter_id,
+            "event_order": order_val,
+            "title": (ev.get("title") or "").strip() or "Sự kiện",
+            "description": (ev.get("description") or "").strip(),
+            "raw_date": (ev.get("raw_date") or "").strip(),
+            "event_type": ev.get("event_type", "event"),
+        }
+        ok, _, payload_ready = run_logic_check_then_save_timeline(project_id, payload_ev, supabase)
+        if not ok or not payload_ready:
+            continue
         try:
-            supabase.table("timeline_events").insert({
-                "story_id": project_id,
-                "chapter_id": chapter_id,
-                "event_order": ev.get("event_order", 0),
-                "title": (ev.get("title") or "").strip() or "Sự kiện",
-                "description": (ev.get("description") or "").strip(),
-                "raw_date": (ev.get("raw_date") or "").strip(),
-                "event_type": ev.get("event_type", "event"),
-            }).execute()
+            supabase.table("timeline_events").insert(payload_ready).execute()
             saved += 1
         except Exception:
             pass
@@ -414,50 +443,144 @@ def _worker_data_analyze_chunk(
     if not chunks_list:
         chunks_list = execute_split_logic(content, "by_length", "2000")
     edited = [{"title": c.get("title", ""), "content": (c.get("content") or "").strip(), "order": c.get("order", i + 1)} for i, c in enumerate(chunks_list)]
-    old = supabase.table("chunks").select("id").eq("story_id", project_id).eq("chapter_id", chapter_id).execute()
-    if old.data:
-        ids = [r["id"] for r in old.data if r.get("id")]
-        if ids:
-            supabase.table("chunks").delete().in_("id", ids).execute()
+    append_only = bool(payload.get("append_only", False))
+    base_sort = 0
+    if not append_only:
+        old = supabase.table("chunks").select("id").eq("story_id", project_id).eq("chapter_id", chapter_id).execute()
+        if old.data:
+            ids = [r["id"] for r in old.data if r.get("id")]
+            if ids:
+                supabase.table("chunks").delete().in_("id", ids).execute()
+    else:
+        r = supabase.table("chunks").select("sort_order").eq("story_id", project_id).order("sort_order", desc=True).limit(1).execute()
+        if r.data and r.data[0].get("sort_order") is not None:
+            base_sort = int(r.data[0]["sort_order"]) + 1
     saved = 0
     for idx, chk in enumerate(edited):
         txt = chk.get("content", "").strip()
-        if txt:
-            row = {
-                "story_id": project_id,
-                "chapter_id": chapter_id,
-                "arc_id": arc_id,
-                "content": txt,
-                "raw_content": txt,
-                "meta_json": {"source": "data_analyze", "chapter": chap_num, "title": chk.get("title", "")},
-                "sort_order": chk.get("order", idx + 1),
-            }
-            supabase.table("chunks").insert(row).execute()
+        if not txt:
+            continue
+        sort_val = chk.get("order", idx + 1) if not append_only else (base_sort + saved)
+        row = {
+            "story_id": project_id,
+            "chapter_id": chapter_id,
+            "arc_id": arc_id,
+            "content": txt,
+            "raw_content": txt,
+            "meta_json": {"source": "data_analyze", "chapter": chap_num, "title": chk.get("title", "")},
+            "sort_order": sort_val,
+        }
+        ok, _, payload_ready = run_logic_check_then_save_chunk(project_id, row, supabase)
+        if not ok or not payload_ready:
+            continue
+        try:
+            supabase.table("chunks").insert(payload_ready).execute()
             saved += 1
+        except Exception:
+            pass
     summary = f"Đã lưu {saved} chunks."
     update_job(job_id, "completed", result_summary=summary)
     if post_to_chat:
         _post_completion_to_chat(project_id, user_id, label, True, summary, None)
 
 
-_embedding_backfill_running = False
+# Cờ riêng từng loại: tránh tràn/trùng trong từng bảng (Bible, Chunks, Relations, Timeline).
+_embedding_backfill_bible_running = False
+_embedding_backfill_chunks_running = False
+_embedding_backfill_relations_running = False
+_embedding_backfill_timeline_running = False
+
+EMBEDDING_KINDS = ("bible", "chunks", "relations", "timeline")
 
 
-def is_embedding_backfill_running() -> bool:
-    """True nếu đang chạy backfill embedding (tránh chạy trùng)."""
-    return _embedding_backfill_running
-
-
-def run_embedding_backfill(project_id: str, bible_limit: int = 50, chunks_limit: int = 50) -> Dict[str, int]:
+def is_embedding_backfill_running(kind: Optional[str] = None) -> bool:
     """
-    Tìm story_bible và chunks có embedding null, gọi API embedding batch, cập nhật lại DB.
-    Trả về {"bible_updated": n, "chunks_updated": m}. Không chạy trùng nếu đang có backfill khác.
+    True nếu đang chạy backfill embedding.
+    kind: None = bất kỳ loại nào đang chạy; "bible"|"chunks"|"relations"|"timeline" = chỉ loại đó.
     """
-    global _embedding_backfill_running
-    if _embedding_backfill_running:
-        return {"bible_updated": 0, "chunks_updated": 0}
-    out = {"bible_updated": 0, "chunks_updated": 0}
+    if kind is None:
+        return (
+            _embedding_backfill_bible_running
+            or _embedding_backfill_chunks_running
+            or _embedding_backfill_relations_running
+            or _embedding_backfill_timeline_running
+        )
+    if kind == "bible":
+        return _embedding_backfill_bible_running
+    if kind == "chunks":
+        return _embedding_backfill_chunks_running
+    if kind == "relations":
+        return _embedding_backfill_relations_running
+    if kind == "timeline":
+        return _embedding_backfill_timeline_running
+    return False
+
+
+# Batch size cho gọi RPC bulk embedding (V8.6); fallback update từng dòng nếu RPC không có.
+_EMBEDDING_BULK_BATCH = 100
+
+
+def _bulk_update_embeddings(supabase, rpc_name: str, updates: List[Dict[str, Any]]) -> int:
+    """Gọi RPC bulk update embedding; trả về số bản ghi đã cập nhật. Nếu RPC lỗi thì fallback update từng dòng."""
+    if not updates:
+        return 0
+    try:
+        for start in range(0, len(updates), _EMBEDDING_BULK_BATCH):
+            batch = updates[start : start + _EMBEDDING_BULK_BATCH]
+            supabase.rpc(rpc_name, {"updates": batch}).execute()
+        return len(updates)
+    except Exception as e:
+        logger.warning("RPC %s failed: %s", rpc_name, e)
+        return 0
+
+
+def _embedding_value_for_db(vec: Any) -> Any:
+    """Chuẩn hóa embedding để ghi DB: PostgREST/cột vector thường cần chuỗi '[x,y,z]' thay vì list."""
+    if vec is None:
+        return None
+    if isinstance(vec, (list, tuple)):
+        return "[" + ",".join(str(float(x)) for x in vec) + "]"
+    return vec
+
+
+def _fallback_update_embeddings_one_by_one(supabase, table: str, id_key: str, rows: List[Dict], vectors: List[Any]) -> int:
+    """Update embedding từng dòng (fallback khi không có RPC). Gửi embedding dạng chuỗi '[0.1,0.2,...]' để cột vector nhận đúng."""
+    count = 0
+    for i, row in enumerate(rows):
+        if i < len(vectors) and vectors[i]:
+            try:
+                emb = _embedding_value_for_db(vectors[i])
+                supabase.table(table).update({"embedding": emb}).eq(id_key, row["id"]).execute()
+                count += 1
+            except Exception as e:
+                logger.warning("Fallback embedding update failed %s id=%s: %s", table, row.get("id"), e)
+    return count
+
+
+def run_embedding_backfill(
+    project_id: str,
+    bible_limit: int = 50,
+    chunks_limit: int = 50,
+    relations_limit: int = 0,
+    timeline_limit: int = 0,
+) -> Dict[str, int]:
+    """
+    Tìm các bảng có embedding null, gọi API embedding batch, cập nhật DB (RPC bulk hoặc từng dòng).
+    Trả về {"bible_updated": n, "chunks_updated": m, "relations_updated": r, "timeline_updated": t}.
+    Mỗi loại (bible/chunks/relations/timeline) có cờ riêng: chỉ chặn trùng trong cùng bảng.
+    """
+    global _embedding_backfill_bible_running, _embedding_backfill_chunks_running
+    global _embedding_backfill_relations_running, _embedding_backfill_timeline_running
+    out = {"bible_updated": 0, "chunks_updated": 0, "relations_updated": 0, "timeline_updated": 0}
     if not project_id:
+        return out
+    if bible_limit > 0 and _embedding_backfill_bible_running:
+        return out
+    if chunks_limit > 0 and _embedding_backfill_chunks_running:
+        return out
+    if relations_limit > 0 and _embedding_backfill_relations_running:
+        return out
+    if timeline_limit > 0 and _embedding_backfill_timeline_running:
         return out
     try:
         from config import init_services
@@ -468,21 +591,29 @@ def run_embedding_backfill(project_id: str, bible_limit: int = 50, chunks_limit:
         supabase = services["supabase"]
     except Exception:
         return out
-    _embedding_backfill_running = True
+    if bible_limit > 0:
+        _embedding_backfill_bible_running = True
+    if chunks_limit > 0:
+        _embedding_backfill_chunks_running = True
+    if relations_limit > 0:
+        _embedding_backfill_relations_running = True
+    if timeline_limit > 0:
+        _embedding_backfill_timeline_running = True
     try:
         try:
-            r = supabase.table("story_bible").select("id, description").eq("story_id", project_id).is_("embedding", "NULL").limit(bible_limit).execute()
+            r = supabase.table("story_bible").select("id, entity_name, description").eq("story_id", project_id).is_("embedding", "NULL").limit(bible_limit).execute()
             rows_bible = list(r.data or [])
             if rows_bible:
-                texts_bible = [(row.get("description") or "").strip() or "" for row in rows_bible]
+                texts_bible = []
+                for row in rows_bible:
+                    name = (row.get("entity_name") or "").strip()
+                    desc = (row.get("description") or "").strip()
+                    texts_bible.append(f"{name}: {desc}" if name and desc else (desc or name or ""))
                 vectors_bible = AIService.get_embeddings_batch(texts_bible) if hasattr(AIService, "get_embeddings_batch") else []
-                for i, row in enumerate(rows_bible):
-                    if i < len(vectors_bible) and vectors_bible[i]:
-                        try:
-                            supabase.table("story_bible").update({"embedding": vectors_bible[i]}).eq("id", row["id"]).execute()
-                            out["bible_updated"] += 1
-                        except Exception:
-                            pass
+                payloads = [{"id": str(row["id"]), "embedding": vectors_bible[i]} for i, row in enumerate(rows_bible) if i < len(vectors_bible) and vectors_bible[i]]
+                out["bible_updated"] = _bulk_update_embeddings(supabase, "bulk_update_story_bible_embeddings", payloads)
+                if out["bible_updated"] == 0 and payloads:
+                    out["bible_updated"] = _fallback_update_embeddings_one_by_one(supabase, "story_bible", "id", rows_bible, vectors_bible)
         except Exception:
             pass
         try:
@@ -491,15 +622,68 @@ def run_embedding_backfill(project_id: str, bible_limit: int = 50, chunks_limit:
             if rows_chunks:
                 texts_chunks = [(row.get("content") or "").strip() or "" for row in rows_chunks]
                 vectors_chunks = AIService.get_embeddings_batch(texts_chunks) if hasattr(AIService, "get_embeddings_batch") else []
-                for i, row in enumerate(rows_chunks):
-                    if i < len(vectors_chunks) and vectors_chunks[i]:
-                        try:
-                            supabase.table("chunks").update({"embedding": vectors_chunks[i]}).eq("id", row["id"]).execute()
-                            out["chunks_updated"] += 1
-                        except Exception:
-                            pass
+                payloads = [{"id": str(row["id"]), "embedding": vectors_chunks[i]} for i, row in enumerate(rows_chunks) if i < len(vectors_chunks) and vectors_chunks[i]]
+                out["chunks_updated"] = _bulk_update_embeddings(supabase, "bulk_update_chunks_embeddings", payloads)
+                if out["chunks_updated"] == 0 and payloads:
+                    out["chunks_updated"] = _fallback_update_embeddings_one_by_one(supabase, "chunks", "id", rows_chunks, vectors_chunks)
         except Exception:
             pass
+        if relations_limit > 0:
+            try:
+                rels = supabase.table("entity_relations").select("id, source_entity_id, target_entity_id, relation_type, description").eq("story_id", project_id).is_("embedding", "NULL").limit(relations_limit).execute()
+                rows_rel = list(rels.data or [])
+                if rows_rel:
+                    bible_ids = set()
+                    for row in rows_rel:
+                        if row.get("source_entity_id"):
+                            bible_ids.add(row["source_entity_id"])
+                        if row.get("target_entity_id"):
+                            bible_ids.add(row["target_entity_id"])
+                    id_to_name = {}
+                    if bible_ids:
+                        b = supabase.table("story_bible").select("id, entity_name").in_("id", list(bible_ids)).execute()
+                        for x in (b.data or []):
+                            if x.get("id"):
+                                id_to_name[x["id"]] = (x.get("entity_name") or "").strip()
+                    texts_rel = []
+                    for row in rows_rel:
+                        src = id_to_name.get(row.get("source_entity_id"), "")
+                        tgt = id_to_name.get(row.get("target_entity_id"), "")
+                        rtype = (row.get("relation_type") or "").strip()
+                        desc = (row.get("description") or "").strip()
+                        texts_rel.append(f"{src} {rtype} {tgt} {desc}".strip())
+                    vectors_rel = AIService.get_embeddings_batch(texts_rel) if hasattr(AIService, "get_embeddings_batch") else []
+                    payloads = [{"id": str(row["id"]), "embedding": vectors_rel[i]} for i, row in enumerate(rows_rel) if i < len(vectors_rel) and vectors_rel[i]]
+                    out["relations_updated"] = _bulk_update_embeddings(supabase, "bulk_update_entity_relations_embeddings", payloads)
+                    if out["relations_updated"] == 0 and payloads:
+                        out["relations_updated"] = _fallback_update_embeddings_one_by_one(supabase, "entity_relations", "id", rows_rel, vectors_rel)
+            except Exception:
+                pass
+        if timeline_limit > 0:
+            try:
+                r = supabase.table("timeline_events").select("id, title, description, raw_date").eq("story_id", project_id).is_("embedding", "NULL").limit(timeline_limit).execute()
+                rows_tl = list(r.data or [])
+                if rows_tl:
+                    texts_tl = []
+                    for row in rows_tl:
+                        title = (row.get("title") or "").strip()
+                        desc = (row.get("description") or "").strip()
+                        raw = (row.get("raw_date") or "").strip()
+                        texts_tl.append(f"{title} {desc} {raw}".strip())
+                    vectors_tl = AIService.get_embeddings_batch(texts_tl) if hasattr(AIService, "get_embeddings_batch") else []
+                    payloads = [{"id": str(row["id"]), "embedding": vectors_tl[i]} for i, row in enumerate(rows_tl) if i < len(vectors_tl) and vectors_tl[i]]
+                    out["timeline_updated"] = _bulk_update_embeddings(supabase, "bulk_update_timeline_events_embeddings", payloads)
+                    if out["timeline_updated"] == 0 and payloads:
+                        out["timeline_updated"] = _fallback_update_embeddings_one_by_one(supabase, "timeline_events", "id", rows_tl, vectors_tl)
+            except Exception:
+                pass
     finally:
-        _embedding_backfill_running = False
+        if bible_limit > 0:
+            _embedding_backfill_bible_running = False
+        if chunks_limit > 0:
+            _embedding_backfill_chunks_running = False
+        if relations_limit > 0:
+            _embedding_backfill_relations_running = False
+        if timeline_limit > 0:
+            _embedding_backfill_timeline_running = False
     return out

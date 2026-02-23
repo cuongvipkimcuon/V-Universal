@@ -1,8 +1,11 @@
 # ai/context_schema.py - Schema và chuẩn hóa cho search_context (context_needs, context_priority)
-"""Định nghĩa hợp lệ cho context_needs và hàm chuẩn hóa/suy mặc định."""
+"""Định nghĩa hợp lệ cho context_needs và hàm chuẩn hóa/suy mặc định. V8: full gather không phân loại một loại."""
 from typing import Any, Dict, List
 
 VALID_CONTEXT_NEEDS = frozenset({"bible", "relation", "timeline", "chunk", "chapter"})
+
+# V8: Khi intent search_context, gather đủ tất cả nguồn (bible, relation, timeline, chunk, chapter) thay vì chỉ một loại.
+FULL_CONTEXT_NEEDS_V8 = ["chapter", "bible", "relation", "timeline", "chunk"]
 
 
 def normalize_context_needs(needs: Any) -> List[str]:

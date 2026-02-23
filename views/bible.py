@@ -9,6 +9,7 @@ from ai_engine import AIService, HybridSearch, suggest_import_category, _get_def
 from utils.file_importer import UniversalLoader
 from utils.auth_manager import check_permission, submit_pending_change
 from utils.cache_helpers import get_bible_list_cached, invalidate_cache
+from core.user_data_save_pipeline import run_logic_check_then_save_bible, run_logic_check_then_save_relation
 
 # Tiền tố khóa (chỉ sửa nội dung, không sửa tiền tố): lấy từ Config.PREFIX_SPECIAL_SYSTEM, bỏ OTHER.
 def _get_locked_prefixes():
@@ -38,6 +39,16 @@ def render_bible_tab(project_id, persona):
         return
     supabase = services["supabase"]
 
+    # Số mục chưa có embedding — luôn hiển thị lên đầu
+    try:
+        r_null = supabase.table("story_bible").select("id").eq("story_id", project_id).is_("embedding", "NULL").limit(1001).execute()
+        n = len(r_null.data or [])
+        bible_no_vec_count = n if n <= 1000 else 1001
+    except Exception:
+        bible_no_vec_count = 0
+    lbl = "1000+" if bible_no_vec_count > 1000 else str(bible_no_vec_count)
+    st.caption(f"**Vector:** {lbl} mục chưa có embedding.")
+
     # Cache trigger: chỉ refetch khi bấm Refresh hoặc sau add/delete
     _cache_trigger = st.session_state.get("update_trigger", 0)
     raw_bible = get_bible_list_cached(project_id, _cache_trigger)
@@ -65,28 +76,29 @@ def render_bible_tab(project_id, persona):
         if st.button("📥 Import Knowledge", type="secondary", key="bible_import_btn"):
             st.session_state["import_knowledge_mode"] = True
 
-    # --- Kiểm tra mục chưa có embedding + Đồng bộ vector (chỉ khi user bấm) ---
-    try:
-        r_null = supabase.table("story_bible").select("id").eq("story_id", project_id).is_("embedding", "NULL").limit(1001).execute()
-        n = len(r_null.data or [])
-        bible_no_vec_count = n if n <= 1000 else 1001
-    except Exception:
-        bible_no_vec_count = 0
-    lbl = "1000+" if bible_no_vec_count > 1000 else str(bible_no_vec_count)
-    st.caption(f"**Vector:** {lbl} mục chưa có embedding.")
+    # --- Đồng bộ vector (Bible); cờ riêng cho Bible — chỉ chặn trùng trong bảng Bible ---
+    from core.background_jobs import is_embedding_backfill_running
+    _bible_running = is_embedding_backfill_running("bible")
+    if not _bible_running and st.session_state.get("embedding_sync_clicked_bible"):
+        st.session_state.pop("embedding_sync_clicked_bible", None)
+    sync_bible = _bible_running or st.session_state.get("embedding_sync_clicked_bible", False)
+    if sync_bible:
+        st.caption("⏳ Đang đồng bộ vector (Bible). Vui lòng đợi xong rồi bấm Refresh.")
     c1, c2 = st.columns(2)
     with c1:
-        if st.button("🔄 Kiểm tra mục chưa có embedding", key="bible_check_vec_btn"):
+        if st.button("🔄 Kiểm tra mục chưa có embedding", key="bible_check_vec_btn", disabled=sync_bible):
             invalidate_cache()
             st.toast("Đã làm mới. Số mục chưa có embedding hiển thị phía trên.")
     with c2:
-        if st.button("🔄 Đồng bộ vector (Bible)", key="bible_sync_vec_btn", disabled=(bible_no_vec_count == 0)):
+        if st.button("🔄 Đồng bộ vector (Bible)", key="bible_sync_vec_btn", disabled=(bible_no_vec_count == 0 or sync_bible)):
             import threading
             from core.background_jobs import run_embedding_backfill
+            st.session_state["embedding_sync_clicked_bible"] = True
             def _run():
-                run_embedding_backfill(project_id, bible_limit=200, chunks_limit=0)
+                run_embedding_backfill(project_id, bible_limit=200, chunks_limit=0, relations_limit=0, timeline_limit=0)
             threading.Thread(target=_run, daemon=True).start()
-            st.toast("Đã bắt đầu đồng bộ vector. Bấm Refresh sau vài giây để xem kết quả.")
+            st.toast("Đã bắt đầu đồng bộ vector (Bible). Bấm Refresh sau vài giây để xem kết quả.")
+            st.rerun()
 
     # --- Import Knowledge: upload file -> parse -> gợi ý category -> thêm entry ---
     if st.session_state.get('import_knowledge_mode'):
@@ -128,50 +140,47 @@ def render_bible_tab(project_id, persona):
                     if not name:
                         name = "Imported"
                     entity_name = f"{cat} {name}" if not name.startswith("[") else name
-                    vec = AIService.get_embedding(f"{entity_name}: {desc_import}")
-                    if vec:
-                        user_id = getattr(st.session_state.get("user"), "id", None) or ""
-                        user_email = getattr(st.session_state.get("user"), "email", None) or ""
-                        can_write = check_permission(user_id, user_email, project_id, "write")
-                        can_request = check_permission(user_id, user_email, project_id, "request_write")
-                        try:
-                            payload = {
-                                "entity_name": entity_name,
-                                "description": desc_import[:50000],
-                                "embedding": vec,
-                                "source_chapter": 0,
-                            }
-                            ok = False
-                            if can_write:
-                                payload["story_id"] = project_id
-                                supabase.table("story_bible").insert(payload).execute()
-                                st.session_state["update_trigger"] = st.session_state.get("update_trigger", 0) + 1
-                                st.success("Đã thêm entry từ file!")
+                    user_id = getattr(st.session_state.get("user"), "id", None) or ""
+                    user_email = getattr(st.session_state.get("user"), "email", None) or ""
+                    can_write = check_permission(user_id, user_email, project_id, "write")
+                    can_request = check_permission(user_id, user_email, project_id, "request_write")
+                    try:
+                        payload = {
+                            "entity_name": entity_name,
+                            "description": desc_import[:50000],
+                            "source_chapter": 0,
+                        }
+                        ok = False
+                        _, errs, payload_ready = run_logic_check_then_save_bible(project_id, payload, supabase)
+                        if not payload_ready:
+                            st.error("Check logic lỗi:\n" + "\n".join(errs))
+                        elif can_write:
+                            supabase.table("story_bible").insert(payload_ready).execute()
+                            st.session_state["update_trigger"] = st.session_state.get("update_trigger", 0) + 1
+                            st.success("Đã thêm entry từ file! Bấm **Đồng bộ vector (Bible)** để tạo embedding.")
+                            ok = True
+                        elif can_request:
+                            pid = submit_pending_change(
+                                story_id=project_id,
+                                requested_by_email=user_email,
+                                table_name="story_bible",
+                                target_key={},
+                                old_data={},
+                                new_data=payload_ready,
+                            )
+                            if pid:
+                                st.toast("Đã gửi yêu cầu chỉnh sửa đến Owner.", icon="📤")
                                 ok = True
-                            elif can_request:
-                                pid = submit_pending_change(
-                                    story_id=project_id,
-                                    requested_by_email=user_email,
-                                    table_name="story_bible",
-                                    target_key={},
-                                    old_data={},
-                                    new_data=payload,
-                                )
-                                if pid:
-                                    st.toast("Đã gửi yêu cầu chỉnh sửa đến Owner.", icon="📤")
-                                    ok = True
-                                else:
-                                    st.error("Không gửi được yêu cầu.")
                             else:
-                                st.warning("Bạn không có quyền thêm.")
-                            if ok:
-                                st.session_state['import_knowledge_mode'] = False
-                                st.session_state.pop('import_parsed_text', None)
-                                st.session_state.pop('import_suggested_category', None)
-                        except Exception as e:
-                            st.error(f"Lỗi: {e}")
-                    else:
-                        st.error("Không tạo được embedding.")
+                                st.error("Không gửi được yêu cầu.")
+                        else:
+                            st.warning("Bạn không có quyền thêm.")
+                        if ok:
+                            st.session_state['import_knowledge_mode'] = False
+                            st.session_state.pop('import_parsed_text', None)
+                            st.session_state.pop('import_suggested_category', None)
+                    except Exception as e:
+                        st.error(f"Lỗi: {e}")
                 if st.button("Hủy Import", key="import_cancel"):
                     st.session_state['import_knowledge_mode'] = False
                     st.session_state.pop('import_parsed_text', None)
@@ -229,7 +238,7 @@ def render_bible_tab(project_id, persona):
                         if st.button("Cập nhật Bias", key=f"apply_bias_{eid}"):
                             try:
                                 new_val = round((new_bias + 5) / 10.0, 2)
-                                supabase.table("story_bible").update({"importance_bias": new_val}).eq("id", eid).execute()
+                                supabase.table("story_bible").update({"importance_bias": new_val, "embedding": None}).eq("id", eid).execute()
                                 st.session_state["update_trigger"] = st.session_state.get("update_trigger", 0) + 1
                                 st.toast("Đã cập nhật Importance Bias.")
                             except Exception as ex:
@@ -335,30 +344,32 @@ def render_bible_tab(project_id, persona):
                                 st.error("[CHAT] chỉ tạo qua Auto Crystallize trong Chat, không add tay.")
                             else:
                                 entity_name = f"{entry_type} {name}"
-                                vec = AIService.get_embedding(f"{entity_name}: {description}")
-                                if vec:
-                                    user_id = getattr(st.session_state.get("user"), "id", None) or ""
-                                    user_email = getattr(st.session_state.get("user"), "email", None) or ""
-                                    can_write = check_permission(user_id, user_email, project_id, "write")
-                                    can_request = check_permission(user_id, user_email, project_id, "request_write")
-                                    payload = {
-                                        "entity_name": entity_name,
-                                        "description": description,
-                                        "embedding": vec,
-                                        "source_chapter": source_chap,
-                                    }
-                                    if parent_id_value is not None:
-                                        payload["parent_id"] = parent_id_value
-                                    try:
-                                        payload["importance_bias"] = round((importance_bias + 5) / 10.0, 2)
-                                    except Exception:
-                                        payload["importance_bias"] = 0.5
-                                    try:
+                                user_id = getattr(st.session_state.get("user"), "id", None) or ""
+                                user_email = getattr(st.session_state.get("user"), "email", None) or ""
+                                can_write = check_permission(user_id, user_email, project_id, "write")
+                                can_request = check_permission(user_id, user_email, project_id, "request_write")
+                                payload = {
+                                    "entity_name": entity_name,
+                                    "description": description,
+                                    "source_chapter": source_chap,
+                                }
+                                if parent_id_value is not None:
+                                    payload["parent_id"] = parent_id_value
+                                try:
+                                    payload["importance_bias"] = round((importance_bias + 5) / 10.0, 2)
+                                except Exception:
+                                    payload["importance_bias"] = 0.5
+                                try:
+                                    ok, errs, payload_ready = run_logic_check_then_save_bible(project_id, payload, supabase)
+                                    if not ok:
+                                        st.error("Check logic lỗi:\n" + "\n".join(errs))
+                                    else:
+                                        if any("trùng tên" in e for e in errs):
+                                            st.warning([e for e in errs if "trùng tên" in e][0])
                                         if can_write:
-                                            payload["story_id"] = project_id
-                                            supabase.table("story_bible").insert(payload).execute()
+                                            supabase.table("story_bible").insert(payload_ready).execute()
                                             st.session_state["update_trigger"] = st.session_state.get("update_trigger", 0) + 1
-                                            st.success("Entry added!")
+                                            st.success("Entry added! Bấm **Đồng bộ vector (Bible)** để tạo embedding.")
                                             st.session_state['adding_bible_entry'] = False
                                         elif can_request:
                                             pid = submit_pending_change(
@@ -367,7 +378,7 @@ def render_bible_tab(project_id, persona):
                                                 table_name="story_bible",
                                                 target_key={},
                                                 old_data={},
-                                                new_data=payload,
+                                                new_data=payload_ready,
                                             )
                                             if pid:
                                                 st.toast("Đã gửi yêu cầu chỉnh sửa đến Owner.", icon="📤")
@@ -376,10 +387,8 @@ def render_bible_tab(project_id, persona):
                                                 st.error("Không gửi được yêu cầu.")
                                         else:
                                             st.warning("Bạn không có quyền thêm entry.")
-                                    except Exception as e:
-                                        st.error(f"Lỗi: {e}")
-                                else:
-                                    st.error("Failed to create embedding")
+                                except Exception as e:
+                                    st.error(f"Lỗi: {e}")
                         else:
                             st.warning("Please fill all fields")
 
@@ -454,20 +463,17 @@ def render_bible_tab(project_id, persona):
                             )
 
                             merged_text = response.choices[0].message.content
-                            vec = AIService.get_embedding(merged_text)
-                            if vec:
-                                supabase.table("story_bible").insert({
-                                    "story_id": project_id,
-                                    "entity_name": f"[MERGED] {datetime.now().strftime('%Y%m%d')}",
-                                    "description": merged_text,
-                                    "embedding": vec
-                                }).execute()
-                                supabase.table("story_bible") \
-                                    .delete() \
-                                    .in_("id", selected_ids) \
-                                    .execute()
-                                st.success("Merged successfully!")
-                                invalidate_cache()
+                            supabase.table("story_bible").insert({
+                                "story_id": project_id,
+                                "entity_name": f"[MERGED] {datetime.now().strftime('%Y%m%d')}",
+                                "description": merged_text,
+                            }).execute()
+                            supabase.table("story_bible") \
+                                .delete() \
+                                .in_("id", selected_ids) \
+                                .execute()
+                            st.success("Merged successfully! Bấm **Đồng bộ vector (Bible)** để tạo embedding.")
+                            invalidate_cache()
                         except Exception as e:
                             st.error(f"Merge error: {e}")
 
@@ -571,17 +577,22 @@ def render_bible_tab(project_id, persona):
                                         "description": "",
                                         "story_id": project_id,
                                     }
-                                    try:
-                                        supabase.table("entity_relations").insert(payload).execute()
-                                    except Exception:
-                                        payload = {
-                                            "entity_id": entry["id"],
-                                            "target_entity_id": target_options[rel_target],
-                                            "relation_type": rel_type.strip(),
-                                            "story_id": project_id,
-                                        }
-                                        supabase.table("entity_relations").insert(payload).execute()
-                                    st.success("Đã thêm quan hệ.")
+                                    ok, errs, payload_ready = run_logic_check_then_save_relation(project_id, payload, supabase)
+                                    if not ok:
+                                        st.error("Check logic / match quan hệ lỗi:\n" + "\n".join(errs))
+                                    else:
+                                        try:
+                                            supabase.table("entity_relations").insert(payload_ready).execute()
+                                            st.success("Đã thêm quan hệ.")
+                                        except Exception:
+                                            alt = {
+                                                "entity_id": payload_ready.get("source_entity_id"),
+                                                "target_entity_id": payload_ready.get("target_entity_id"),
+                                                "relation_type": payload_ready.get("relation_type", "liên quan"),
+                                                "story_id": project_id,
+                                            }
+                                            supabase.table("entity_relations").insert(alt).execute()
+                                            st.success("Đã thêm quan hệ.")
                                 except Exception as ex:
                                     st.error(f"Lỗi: {ex}")
                         else:
@@ -632,27 +643,31 @@ def render_bible_tab(project_id, persona):
                 )
 
                 if st.form_submit_button("💾 Update"):
-                    vec = AIService.get_embedding(f"{new_name}: {new_desc}")
-                    if vec:
-                        uid = getattr(st.session_state.get("user"), "id", None) or ""
-                        uem = getattr(st.session_state.get("user"), "email", None) or ""
-                        can_write = check_permission(uid, uem, project_id, "write")
-                        can_request = check_permission(uid, uem, project_id, "request_write")
-                        upd = {
-                            "entity_name": new_name,
-                            "description": new_desc,
-                            "embedding": vec,
-                            "parent_id": edit_parent_id_value,
-                        }
-                        try:
-                            upd["importance_bias"] = round((edit_importance + 5) / 10.0, 2)
-                        except Exception:
-                            upd["importance_bias"] = 0.5
+                    uid = getattr(st.session_state.get("user"), "id", None) or ""
+                    uem = getattr(st.session_state.get("user"), "email", None) or ""
+                    can_write = check_permission(uid, uem, project_id, "write")
+                    can_request = check_permission(uid, uem, project_id, "request_write")
+                    upd = {
+                        "entity_name": new_name,
+                        "description": new_desc,
+                        "parent_id": edit_parent_id_value,
+                        "story_id": project_id,
+                    }
+                    try:
+                        upd["importance_bias"] = round((edit_importance + 5) / 10.0, 2)
+                    except Exception:
+                        upd["importance_bias"] = 0.5
+                    ok, errs, payload_ready = run_logic_check_then_save_bible(project_id, upd, supabase)
+                    if not ok:
+                        st.error("Check logic lỗi:\n" + "\n".join(errs))
+                    else:
+                        update_fields = {k: v for k, v in payload_ready.items() if k not in ("id", "story_id")}
+                        update_fields["embedding"] = None  # Chỉnh sửa tay → xóa embed để lần đồng bộ vector sau sẽ embed lại
                         try:
                             if can_write:
-                                supabase.table("story_bible").update(upd).eq("id", edit_id).execute()
+                                supabase.table("story_bible").update(update_fields).eq("id", edit_id).execute()
                                 st.session_state["update_trigger"] = st.session_state.get("update_trigger", 0) + 1
-                                st.success("Updated!")
+                                st.success("Updated! Bấm **Đồng bộ vector (Bible)** nếu cần cập nhật embedding.")
                                 del st.session_state['editing_bible_entry']
                             elif can_request:
                                 pid = submit_pending_change(
@@ -661,7 +676,7 @@ def render_bible_tab(project_id, persona):
                                     table_name="story_bible",
                                     target_key={"id": edit_id},
                                     old_data={"entity_name": entry.get("entity_name"), "description": entry.get("description")},
-                                    new_data=upd,
+                                    new_data=update_fields,
                                 )
                                 if pid:
                                     st.toast("Đã gửi yêu cầu chỉnh sửa đến Owner.", icon="📤")

@@ -84,6 +84,20 @@ def get_v7_reminder_message() -> str:
 # Intent không cần dữ liệu từ DB để trả lời — có thể thực thi luôn bằng một lần gọi LLM.
 INTENTS_NO_DATA = frozenset({"chat_casual", "ask_user_clarification", "web_search", "suggest_v7"})
 
+# V8: Bảng ánh xạ intent → handler (để tham chiếu thống nhất; chat.py / executor_v7 dùng intent trực tiếp).
+# Handler: "clarification" = chỉ hiển thị, không LLM trả lời; "template" = chỉ template; "llm_with_context" = build context + LLM; "llm_casual" = LLM không cần DB; "data_operation" = job nền.
+INTENT_HANDLER_MAP = {
+    "ask_user_clarification": "clarification",
+    "suggest_v7": "template",
+    "web_search": "llm_casual",
+    "chat_casual": "llm_casual",
+    "search_context": "llm_with_context",
+    "query_Sql": "llm_with_context",
+    "numerical_calculation": "llm_with_context",
+    "check_chapter_logic": "llm_with_context",
+    "update_data": "data_operation",
+}
+
 
 class SmartAIRouter:
     """Bộ định tuyến AI thông minh với hybrid search và bible index"""
@@ -605,6 +619,100 @@ Chỉ trả về JSON."""
             return SmartAIRouter._single_intent_to_plan(single, user_prompt)
         intents_need_verify = {"numerical_calculation", "search_context", "query_Sql", "check_chapter_logic"}
         if any(s.get("intent") in intents_need_verify for s in normalized_plan):
+            verification_required = True
+        return {"analysis": analysis, "plan": normalized_plan, "verification_required": verification_required}
+
+    @staticmethod
+    def get_plan_v7_light(
+        user_prompt: str,
+        chat_history_text: str,
+        project_id: str = None,
+        intent_from_step1: str = "",
+    ) -> Dict:
+        """V7 Planner theo mô hình 3 bước: đã có intent từ bước 1; chỉ sinh plan tối đa 3 bước, prompt ngắn để nhanh."""
+        rules_context = ""
+        bible_index = ""
+        if project_id:
+            rules_context = get_mandatory_rules(project_id)
+            bible_index = get_bible_index(project_id, max_tokens=1200)
+        chat_history_capped = cap_chat_history_to_tokens(chat_history_text or "")
+        chapter_list_str = get_chapter_list_for_router(project_id) if project_id else "(Trống)"
+        planner_prompt = f"""Bạn là Planner. Intent từ bước 1: {intent_from_step1 or "search_context"}. Nhiệm vụ: đưa ra KẾ HOẠCH tối đa 3 bước.
+
+DỮ LIỆU: QUY TẮC={rules_context[:800]} | BIBLE={bible_index[:1000] if bible_index else "(Trống)"} | CHƯƠNG={chapter_list_str} | LỊCH SỬ={chat_history_capped[:600]}
+
+INPUT: "{user_prompt}"
+
+QUY TẮC: Mỗi bước một intent. Intent: search_context, query_Sql, numerical_calculation, update_data, check_chapter_logic, web_search, chat_casual, ask_user_clarification. search_context bắt buộc args.context_needs (mảng). update_data cần chapter_range. Tối đa 3 bước.
+
+Trả về ĐÚNG MỘT JSON: {{ "analysis": "1 câu", "plan": [ {{ "step_id": 1, "intent": "...", "args": {{ "query_refined": "...", "context_needs": [], "chapter_range": null, "data_operation_type": "", "data_operation_target": "", "query_target": "" }}, "dependency": null }} ], "verification_required": true }}
+Chỉ trả về JSON."""
+
+        try:
+            response = AIService.call_openrouter(
+                messages=[
+                    {"role": "system", "content": "Planner. Chỉ trả về JSON. Plan tối đa 3 bước."},
+                    {"role": "user", "content": planner_prompt},
+                ],
+                model=_get_default_tool_model(),
+                temperature=0.1,
+                max_tokens=500,
+                response_format={"type": "json_object"},
+            )
+            content = response.choices[0].message.content
+            content = AIService.clean_json_text(content)
+            data = json.loads(content)
+        except Exception as e:
+            print(f"Planner V7 light error: {e}")
+            single = SmartAIRouter.ai_router_pro_v2(user_prompt, chat_history_text, project_id)
+            return SmartAIRouter._single_intent_to_plan(single, user_prompt)
+        plan = data.get("plan")
+        if not plan or not isinstance(plan, list):
+            single = SmartAIRouter.ai_router_pro_v2(user_prompt, chat_history_text, project_id)
+            return SmartAIRouter._single_intent_to_plan(single, user_prompt)
+        plan = plan[:3]
+        analysis = data.get("analysis", "")
+        verification_required = bool(data.get("verification_required", False))
+        valid_intents = {"numerical_calculation", "search_context", "web_search", "ask_user_clarification", "update_data", "query_Sql", "check_chapter_logic", "chat_casual"}
+        normalized_plan = []
+        for i, s in enumerate(plan):
+            if not isinstance(s, dict):
+                continue
+            intent = (s.get("intent") or "chat_casual").strip().lower()
+            args = s.get("args") or {}
+            if not isinstance(args, dict):
+                args = {}
+            if intent not in valid_intents:
+                intent = "search_context"
+                args = dict(args)
+                if not args.get("context_needs"):
+                    args["context_needs"] = ["bible", "relation", "chapter", "timeline", "chunk"]
+            step_id = int(s.get("step_id", i + 1))
+            normalized_plan.append({
+                "step_id": step_id,
+                "intent": intent,
+                "args": {
+                    "query_refined": args.get("query_refined") or args.get("rewritten_query") or user_prompt,
+                    "context_needs": args.get("context_needs") if isinstance(args.get("context_needs"), list) else [],
+                    "context_priority": args.get("context_priority") if isinstance(args.get("context_priority"), list) else [],
+                    "target_files": args.get("target_files") if isinstance(args.get("target_files"), list) else [],
+                    "target_bible_entities": args.get("target_bible_entities") if isinstance(args.get("target_bible_entities"), list) else [],
+                    "chapter_range": args.get("chapter_range"),
+                    "chapter_range_mode": args.get("chapter_range_mode"),
+                    "chapter_range_count": args.get("chapter_range_count", 5),
+                    "inferred_prefixes": args.get("inferred_prefixes") if isinstance(args.get("inferred_prefixes"), list) else [],
+                    "clarification_question": args.get("clarification_question") or "",
+                    "update_summary": args.get("update_summary") or "",
+                    "data_operation_type": args.get("data_operation_type") or "",
+                    "data_operation_target": args.get("data_operation_target") or "",
+                    "query_target": args.get("query_target") or "",
+                },
+                "dependency": s.get("dependency"),
+            })
+        if not normalized_plan:
+            single = SmartAIRouter.ai_router_pro_v2(user_prompt, chat_history_text, project_id)
+            return SmartAIRouter._single_intent_to_plan(single, user_prompt)
+        if any(s.get("intent") in {"numerical_calculation", "search_context", "query_Sql", "check_chapter_logic"} for s in normalized_plan):
             verification_required = True
         return {"analysis": analysis, "plan": normalized_plan, "verification_required": verification_required}
 

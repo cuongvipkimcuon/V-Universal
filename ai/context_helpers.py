@@ -1,7 +1,23 @@
 # ai/context_helpers.py - Hàm trợ context dùng chung (tránh circular import)
+import json
 from typing import Any, List, Optional, Tuple
 
 from config import init_services
+
+
+def _cosine_sim(a: List[float], b: List[float]) -> float:
+    """Cosine similarity giữa hai vector. Trả về 0 nếu invalid."""
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    try:
+        dot = sum(x * y for x, y in zip(a, b))
+        na = sum(x * x for x in a) ** 0.5
+        nb = sum(y * y for y in b) ** 0.5
+        if na <= 0 or nb <= 0:
+            return 0.0
+        return dot / (na * nb)
+    except Exception:
+        return 0.0
 
 
 def get_archived_bible_ids(project_id: str) -> set:
@@ -174,3 +190,106 @@ def get_entity_relations(entity_id: Any, project_id: str) -> str:
     except Exception as e:
         print(f"get_entity_relations error: {e}")
     return "\n".join(lines) if lines else ""
+
+
+def get_top_relations_by_query(project_id: str, query_text: str, top_k: int = 5) -> str:
+    """Khi entity_relations đã có embedding: lấy quan hệ gần nhất với query (vector). Trả về chuỗi để đưa vào context; rỗng nếu không có embedding hoặc lỗi."""
+    if not query_text or not query_text.strip() or not project_id:
+        return ""
+    try:
+        from ai.service import AIService
+        qvec = AIService.get_embedding(query_text.strip()[:4000])
+        if not qvec:
+            return ""
+        services = init_services()
+        if not services:
+            return ""
+        supabase = services["supabase"]
+        r = supabase.table("entity_relations").select(
+            "id, source_entity_id, target_entity_id, relation_type, description, embedding"
+        ).eq("story_id", project_id).not_.is_("embedding", "null").limit(80).execute()
+        rows = list(r.data or [])
+        if not rows:
+            return ""
+        id_to_name = {}
+        for row in rows:
+            for key in ("source_entity_id", "target_entity_id"):
+                eid = row.get(key)
+                if eid and eid not in id_to_name:
+                    id_to_name[eid] = None
+        if id_to_name:
+            sb = supabase.table("story_bible").select("id, entity_name").eq("story_id", project_id).in_("id", list(id_to_name.keys())).execute()
+            if sb.data:
+                for x in sb.data:
+                    id_to_name[x.get("id")] = (x.get("entity_name") or "").strip()
+        scored = []
+        for row in rows:
+            emb = row.get("embedding")
+            if isinstance(emb, str):
+                try:
+                    emb = json.loads(emb)
+                except Exception:
+                    emb = None
+            if isinstance(emb, list) and len(emb) == len(qvec):
+                sim = _cosine_sim(emb, qvec)
+                scored.append((sim, row))
+        scored.sort(key=lambda x: -x[0])
+        lines = []
+        for _, row in scored[:top_k]:
+            src = id_to_name.get(row.get("source_entity_id"), "")
+            tgt = id_to_name.get(row.get("target_entity_id"), "")
+            rtype = (row.get("relation_type") or "").strip()
+            if src or tgt:
+                lines.append(f"  • {src or '?'} — {rtype} — {tgt or '?'}")
+        if not lines:
+            return ""
+        return "Quan hệ liên quan (theo vector):\n" + "\n".join(lines)
+    except Exception as e:
+        print(f"get_top_relations_by_query error: {e}")
+        return ""
+
+
+def get_top_timeline_by_query(project_id: str, query_text: str, top_k: int = 5) -> str:
+    """Khi timeline_events đã có embedding: lấy sự kiện gần nhất với query (vector). Trả về chuỗi để đưa vào context; rỗng nếu không có embedding hoặc lỗi."""
+    if not query_text or not query_text.strip() or not project_id:
+        return ""
+    try:
+        from ai.service import AIService
+        qvec = AIService.get_embedding(query_text.strip()[:4000])
+        if not qvec:
+            return ""
+        services = init_services()
+        if not services:
+            return ""
+        supabase = services["supabase"]
+        r = supabase.table("timeline_events").select(
+            "id, title, description, raw_date, event_type, embedding"
+        ).eq("story_id", project_id).not_.is_("embedding", "null").limit(80).execute()
+        rows = list(r.data or [])
+        if not rows:
+            return ""
+        scored = []
+        for row in rows:
+            emb = row.get("embedding")
+            if isinstance(emb, str):
+                try:
+                    emb = json.loads(emb)
+                except Exception:
+                    emb = None
+            if isinstance(emb, list) and len(emb) == len(qvec):
+                sim = _cosine_sim(emb, qvec)
+                scored.append((sim, row))
+        scored.sort(key=lambda x: -x[0])
+        lines = []
+        for _, row in scored[:top_k]:
+            title = (row.get("title") or "").strip()
+            desc = (row.get("description") or "").strip()[:150]
+            raw = (row.get("raw_date") or "").strip()
+            if title:
+                lines.append(f"  • {title}" + (f" — {desc}" if desc else "") + (f" ({raw})" if raw else ""))
+        if not lines:
+            return ""
+        return "Sự kiện timeline liên quan (theo vector):\n" + "\n".join(lines)
+    except Exception as e:
+        print(f"get_top_timeline_by_query error: {e}")
+        return ""

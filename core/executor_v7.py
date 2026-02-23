@@ -76,9 +76,11 @@ def execute_plan(
     run_numerical_executor: bool = True,
     max_steps_per_turn: int = 10,
     max_replan_rounds: int = 2,
+    llm_budget_ref: Optional[List[int]] = None,
 ) -> Tuple[str, List[str], List[Dict], List[Dict], List[Dict]]:
     """
     Thực thi plan; sau mỗi bước có thể re-plan (đổi phần còn lại nếu bước vừa thất bại).
+    llm_budget_ref: [current_count, max_count] — numerical LLM chỉ gọi khi current < max; gọi xong tăng current. None = không giới hạn.
     Returns: (cumulative_context, sources, step_results, replan_events, data_operation_steps).
     data_operation_steps: các bước update_data (unified) cần chạy job sau.
     """
@@ -181,7 +183,8 @@ def execute_plan(
             continue
 
         executor_result = None
-        if intent == "numerical_calculation" and run_numerical_executor and PythonExecutor and not free_chat_mode:
+        can_use_llm = llm_budget_ref is None or (len(llm_budget_ref) >= 2 and llm_budget_ref[0] < llm_budget_ref[1])
+        if intent == "numerical_calculation" and run_numerical_executor and PythonExecutor and not free_chat_mode and can_use_llm:
             try:
                 code_prompt = f"""User hỏi: "{user_prompt}"
 Context có sẵn:
@@ -196,6 +199,8 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
                     temperature=0.1,
                     max_tokens=2000,
                 )
+                if llm_budget_ref and len(llm_budget_ref) >= 1:
+                    llm_budget_ref[0] += 1
                 import re
                 raw = (resp.choices[0].message.content or "").strip()
                 m = re.search(r'```(?:python)?\s*(.*?)```', raw, re.DOTALL)
@@ -207,6 +212,8 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
             except Exception as ex:
                 executor_result = f"(Lỗi: {ex})"
                 ctx_text += f"\n\n--- KẾT QUẢ TÍNH TOÁN ---\n{executor_result}"
+        elif intent == "numerical_calculation" and not can_use_llm and llm_budget_ref:
+            ctx_text += "\n\n--- KẾT QUẢ TÍNH TOÁN ---\n(Bỏ qua: đã đạt giới hạn gọi LLM cho lượt này.)"
 
         block = f"\n--- [STEP {step_id}: {intent}] ---\n{ctx_text}\n"
         cumulative_parts.append(block)

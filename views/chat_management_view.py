@@ -82,21 +82,14 @@ def render_chat_management_tab(project_id, persona):
         with st.form("edit_chat_form"):
             new_desc = st.text_area("Nội dung", value=e.get("description", ""), height=150)
             if st.form_submit_button("💾 Cập nhật"):
-                vec = AIService.get_embedding(f"{e.get('entity_name', '')}: {new_desc}")
-                upd = {"description": new_desc}
-                if vec:
-                    upd["embedding"] = vec
+                upd = {"description": new_desc, "embedding": None}
                 try:
                     supabase.table("story_bible").update(upd).eq("id", e["id"]).execute()
-                    st.success("Đã cập nhật.")
+                    st.success("Đã cập nhật. Bấm **Đồng bộ vector (Bible)** trong tab Bible nếu cần cập nhật embedding.")
                     st.session_state["update_trigger"] = st.session_state.get("update_trigger", 0) + 1
                     del st.session_state["chat_editing"]
                     invalidate_cache()
                 except Exception as ex:
-                    upd.pop("embedding", None)
-                    supabase.table("story_bible").update(upd).eq("id", e["id"]).execute()
-                    st.success("Đã cập nhật.")
-                    del st.session_state["chat_editing"]
-                    invalidate_cache()
+                    st.error(str(ex))
             if st.form_submit_button("Hủy"):
                 del st.session_state["chat_editing"]

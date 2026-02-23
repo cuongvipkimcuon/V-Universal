@@ -14,12 +14,30 @@ def suggest_relations(content: str, story_id: str) -> List[Dict[str, Any]]:
     AI quét nội dung (chương/đoạn) và so khớp với bible_index để đề xuất:
     - Quan hệ giữa hai thực thể: Source, Target, Relation_Type, Reason -> kind="relation".
     - Nhân vật tiến hóa (1-n): thực thể mới cùng gốc -> gợi ý parent_id, kind="parent".
+    Dùng vector search để lấy Bible entities liên quan nội dung trước (giảm context LLM, tăng độ chính xác).
     """
     if not content or not content.strip() or not story_id:
         return []
     entries = get_bible_entries(story_id)
     if not entries:
         return []
+    # Nếu có nhiều entity: dùng vector search để chỉ đưa entities liên quan nội dung vào LLM (đỡ gọi LLM với danh sách quá dài)
+    if len(entries) > 60:
+        try:
+            from ai.hybrid_search import HybridSearch
+            query_snippet = (content[:3000] or "").strip()
+            if query_snippet:
+                raw = HybridSearch.smart_search_hybrid_raw(query_snippet, story_id, top_k=80)
+                if raw:
+                    seen_ids = set()
+                    entries = []
+                    for r in raw:
+                        eid = r.get("id")
+                        if eid and eid not in seen_ids:
+                            seen_ids.add(eid)
+                            entries.append(r)
+        except Exception:
+            pass
     name_to_id = {}
     for e in entries:
         name = (e.get("entity_name") or "").strip()
@@ -36,23 +54,23 @@ NỘI DUNG (đoạn/chương cần phân tích):
 {content[:15000]}
 ---
 
-Nhiệm vụ:
-1) QUAN HỆ: Tìm các cặp thực thể có tương tác/liên quan trong nội dung. Với mỗi cặp, trả về source, target, relation_type, reason.
-2) NHÂN VẬT TIẾN HÓA (1-n): Nếu có thực thể mới là "phiên bản khác" của thực thể đã có -> gợi ý parent: entity, parent, reason.
+Nhiệm vụ (ưu tiên ĐẦY ĐỦ, không bỏ sót):
+1) QUAN HỆ: Tìm MỌI cặp thực thể có tương tác/liên quan trong nội dung (trực tiếp hay gián tiếp). Với mỗi cặp: source, target, relation_type, reason. Khi nghi ngờ vẫn liệt kê.
+2) NHÂN VẬT TIẾN HÓA (1-n): Nếu có thực thể mới là "phiên bản khác" hoặc liên quan gốc của thực thể đã có -> gợi ý parent: entity, parent, reason.
 
 Trả về ĐÚNG một JSON object với hai key:
 - "relations": [ {{ "source": "...", "target": "...", "relation_type": "...", "reason": "..." }} ]
 - "parent_suggestions": [ {{ "entity": "...", "parent": "...", "reason": "..." }} ]
 
-Chỉ dùng tên có trong DANH SÁCH THỰC THỂ. Nếu không có gì phù hợp, trả về "relations": [] và "parent_suggestions": [].
+Chỉ dùng tên có trong DANH SÁCH THỰC THỂ. Ưu tiên liệt kê nhiều nhất có thể. Nếu không có gì phù hợp, trả về "relations": [] và "parent_suggestions": [].
 Chỉ trả về JSON, không giải thích thêm."""
 
     try:
         response = AIService.call_openrouter(
             messages=[{"role": "user", "content": prompt}],
             model=_get_default_tool_model(),
-            temperature=0.2,
-            max_tokens=2000,
+            temperature=0.15,
+            max_tokens=4000,
         )
         text = (response.choices[0].message.content or "").strip()
         text = re.sub(r"^```\w*\n?", "", text).strip()
@@ -206,17 +224,17 @@ def extract_timeline_events_from_content(content: str, chapter_label: str = "") 
     try:
         model = _get_default_tool_model()
         ctx = f"Chương: {chapter_label}\n\n" if chapter_label else ""
-        prompt = f"""Trích xuất các SỰ KIỆN theo thứ tự thời gian từ nội dung dưới đây. Mỗi sự kiện: event_order (1,2,...), title, description, raw_date, event_type (event|flashback|milestone|timeskip|other).
+        prompt = f"""Trích xuất MỌI SỰ KIỆN theo thứ tự thời gian từ nội dung dưới đây (kể cả thoáng qua, flashback, mốc nhỏ). Mỗi sự kiện: event_order (1,2,...), title, description, raw_date, event_type (event|flashback|milestone|timeskip|other). Ưu tiên đầy đủ, khi nghi ngờ vẫn liệt kê.
 
 {ctx}NỘI DUNG:
-{content[:25000]}
+{content[:35000]}
 
-Trả về ĐÚNG MỘT JSON với key "events" là mảng. Nếu không có sự kiện rõ ràng, trả về {{ "events": [] }}. Chỉ trả về JSON."""
+Trả về ĐÚNG MỘT JSON với key "events" là mảng. Nếu không có sự kiện, trả về {{ "events": [] }}. Chỉ trả về JSON."""
         response = AIService.call_openrouter(
             messages=[{"role": "user", "content": prompt}],
             model=model,
-            temperature=0.2,
-            max_tokens=4000,
+            temperature=0.15,
+            max_tokens=6000,
             response_format={"type": "json_object"},
         )
         raw = (response.choices[0].message.content or "").strip()

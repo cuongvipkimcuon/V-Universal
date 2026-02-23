@@ -7,7 +7,7 @@ import streamlit as st
 
 from utils.active_sentry import get_pending_conflicts, resolve_conflict
 from utils.cache_helpers import get_chapters_cached
-from core.chapter_logic_check import run_chapter_logic_check, get_chapter_logic_issues
+from core.chapter_logic_check import run_chapter_logic_check, get_chapter_logic_issues, LOGIC_DIMENSIONS
 
 
 def render_data_health_tab(project_id):
@@ -68,10 +68,26 @@ def render_data_health_tab(project_id):
         return
     ch_id, ch_num, ch_title, ch_content, arc_id = chapter_options[selected_label]
 
+    # Soát theo dimension: All hoặc chọn từng mục (giảm prompt và token)
+    st.caption("Soát theo dimension (chọn All hoặc từng mục để giảm prompt/token):")
+    dim_options = ["All"] + list(LOGIC_DIMENSIONS)
+    selected_dims = st.multiselect(
+        "Dimensions cần soát",
+        options=dim_options,
+        default=["All"],
+        key="data_health_dimensions",
+        help="All = soát cả 5; hoặc chọn Timeline, Bible, Relation, Chat crystallize, Rule để chỉ soát từng loại.",
+    )
+    if "All" in selected_dims or not selected_dims:
+        logic_dimensions = None  # full
+    else:
+        logic_dimensions = [d for d in selected_dims if d in LOGIC_DIMENSIONS]
+
     if st.button("🔍 Soát chương này", type="primary", key="data_health_scan_btn", use_container_width=True):
-        with st.spinner("Đang soát logic (5 dimensions)..."):
+        spinner_msg = "Đang soát logic (5 dimensions)..." if logic_dimensions is None else "Đang soát logic (%s)..." % ", ".join(logic_dimensions)
+        with st.spinner(spinner_msg):
             issues, resolved_count, check_id, err = run_chapter_logic_check(
-                project_id, ch_id, ch_num, ch_title, ch_content, arc_id=arc_id
+                project_id, ch_id, ch_num, ch_title, ch_content, arc_id=arc_id, dimensions=logic_dimensions
             )
             if err:
                 st.error("Lỗi: %s" % err)

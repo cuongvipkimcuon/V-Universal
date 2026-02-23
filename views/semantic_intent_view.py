@@ -114,19 +114,13 @@ def render_semantic_intent_tab(project_id):
             data = st.text_area("Data (context + câu trả lời)", placeholder="Ôm hết context tạo ra nó + câu trả lời. Nhập tay hoặc lưu từ chat.", height=200)
             if st.form_submit_button("💾 Lưu"):
                 if q and q.strip():
-                    vec = AIService.get_embedding(q.strip())
                     payload = {"story_id": project_id, "question_sample": q.strip(), "intent": "chat_casual", "related_data": data or ""}
-                    if vec:
-                        payload["embedding"] = vec
                     try:
                         supabase.table("semantic_intent").insert(payload).execute()
-                        st.success("Đã thêm.")
+                        st.success("Đã thêm (embedding chỉ tạo khi có nút đồng bộ vector cho mục này).")
                         st.session_state["si_adding"] = False
                     except Exception as e:
-                        payload.pop("embedding", None)
-                        supabase.table("semantic_intent").insert(payload).execute()
-                        st.success("Đã thêm (chưa vector).")
-                        st.session_state["si_adding"] = False
+                        st.error(str(e))
             if st.form_submit_button("Hủy"):
                 st.session_state["si_adding"] = False
 
@@ -155,18 +149,13 @@ def render_semantic_intent_tab(project_id):
                 q = st.text_area("Mẫu câu hỏi", value=row.get("question_sample", ""))
                 data = st.text_area("Data (context + câu trả lời)", value=row.get("related_data", ""), height=200)
                 if st.form_submit_button("💾 Cập nhật"):
-                    vec = AIService.get_embedding(q.strip()) if q.strip() else None
                     upd = {"question_sample": q.strip(), "intent": "chat_casual", "related_data": data or "", "updated_at": datetime.utcnow().isoformat()}
-                    if vec:
-                        upd["embedding"] = vec
                     try:
                         supabase.table("semantic_intent").update(upd).eq("id", edit_id).execute()
                         del st.session_state["si_editing"]
                         st.success("Đã cập nhật.")
                     except Exception as e:
-                        upd.pop("embedding", None)
-                        supabase.table("semantic_intent").update(upd).eq("id", edit_id).execute()
-                        del st.session_state["si_editing"]
+                        st.error(str(e))
                 if st.form_submit_button("Hủy"):
                     del st.session_state["si_editing"]
 
