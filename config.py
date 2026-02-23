@@ -34,7 +34,7 @@ class Config:
             "mistralai/devstral-2512"
         ],
         "💰 Cost Effective": [
-            "deepseek/deepseek-v3.1",
+            "deepseek/deepseek-chat-v3.1",
             "deepseek/deepseek-v3.2",
             "qwen/qwen3-vl-32b-instruct",
             "meta-llama/llama-4-maverick",
@@ -59,7 +59,7 @@ class Config:
         "google/gemini-3-pro-preview": {"input": 2.00, "output": 12.00},
         "google/gemini-3-flash-preview": {"input": 0.5, "output": 3.00},
         "google/gemini-2.5-flash": {"input": 0.3, "output": 2.50},
-        "deepseek/deepseek-v3.1": {"input": 0.25, "output": 0.38},
+        "deepseek/deepseek-chat-v3.1": {"input": 0.15, "output": 0.75},
         "deepseek/deepseek-v3.2": {"input": 0.25, "output": 0.38},
         "qwen/qwen3-vl-32b-instruct": {"input": 0.50, "output": 1.50},
         "mistralai/devstral-2512": {"input": 0.05, "output": 0.22},
@@ -73,9 +73,9 @@ class Config:
     # Default settings
     DEFAULT_MODEL = "anthropic/claude-3.5-haiku"
     # Model mặc định cho công cụ (Router, Unified extract, Data Analyze...) — ưu tiên throughput qua provider.sort trong request
-    DEFAULT_TOOL_MODEL = "deepseek/deepseek-v3.1"
+    DEFAULT_TOOL_MODEL = "deepseek/deepseek-chat-v3.1"
     EMBEDDING_MODEL = "qwen/qwen3-embedding-8b"
-    ROUTER_MODEL = "deepseek/deepseek-v3.1"
+    ROUTER_MODEL = "deepseek/deepseek-chat-v3.1"
     # Model rẻ cho auto-summary / metadata (Workstation)
     METADATA_MODEL = "google/gemini-2.5-flash"
 
