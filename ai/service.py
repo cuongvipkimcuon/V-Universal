@@ -133,8 +133,9 @@ class AIService:
         output_tokens: int,
         model: str
     ) -> float:
-        """Tính chi phí cho request"""
-        model_costs = Config.MODEL_COSTS.get(model, {"input": 0.0, "output": 0.0})
+        """Tính chi phí cho request. Chuẩn hóa model (bỏ :nitro/:floor) để tra MODEL_COSTS."""
+        base_model = model.split(":")[0] if model else ""
+        model_costs = Config.MODEL_COSTS.get(base_model or model, {"input": 0.0, "output": 0.0})
 
         input_cost = (input_tokens / 1_000_000) * model_costs["input"]
         output_cost = (output_tokens / 1_000_000) * model_costs["output"]
