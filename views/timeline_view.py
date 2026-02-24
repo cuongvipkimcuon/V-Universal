@@ -72,7 +72,12 @@ def render_timeline_tab(project_id):
     else:
         for i, ev in enumerate(events_sorted):
             eid = ev.get("id")
-            with st.expander(f"#{ev.get('event_order', i+1)} [{ev.get('event_type', 'event')}] {ev.get('title', '')}", expanded=False):
+            has_embedding = bool(ev.get("embedding"))
+            sync_badge = "" if has_embedding else " 🔄 Chưa embed"
+            title = f"#{ev.get('event_order', i+1)} [{ev.get('event_type', 'event')}] {ev.get('title', '')}{sync_badge}"
+            with st.expander(title, expanded=False):
+                if not has_embedding:
+                    st.caption("🔄 Chưa đồng bộ vector — bấm **Đồng bộ vector (Timeline)** trên để embed.")
                 st.write("**Mô tả:**", ev.get("description") or "(trống)")
                 st.write("**Thời điểm:**", ev.get("raw_date") or "(trống)")
                 if can_write:

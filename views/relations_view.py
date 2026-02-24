@@ -85,10 +85,14 @@ def render_relations_tab(project_id, persona):
         src_name = id_to_name.get(src_id, "?")
         tgt_name = id_to_name.get(tgt_id, "?")
         title = f"**{src_name}** — {rtype} — **{tgt_name}**"
+        has_embedding = bool(r.get("embedding"))
+        sync_badge = "" if has_embedding else " 🔄 Chưa embed"
 
         editing = st.session_state.get("rel_editing_id") == rel_id
 
-        with st.expander(title, expanded=editing):
+        with st.expander(f"{title}{sync_badge}", expanded=editing):
+            if not has_embedding:
+                st.caption("🔄 Chưa đồng bộ vector — bấm **Đồng bộ vector (Relations)** trên để embed.")
             if editing and can_write:
                 new_type = st.text_input("Loại quan hệ", value=rtype, key=f"rel_type_{rel_id}")
                 new_desc = st.text_area("Mô tả", value=desc, height=80, key=f"rel_desc_{rel_id}")

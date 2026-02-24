@@ -489,14 +489,15 @@ _embedding_backfill_bible_running = False
 _embedding_backfill_chunks_running = False
 _embedding_backfill_relations_running = False
 _embedding_backfill_timeline_running = False
+_embedding_backfill_semantic_running = False
 
-EMBEDDING_KINDS = ("bible", "chunks", "relations", "timeline")
+EMBEDDING_KINDS = ("bible", "chunks", "relations", "timeline", "semantic_intent")
 
 
 def is_embedding_backfill_running(kind: Optional[str] = None) -> bool:
     """
     True nếu đang chạy backfill embedding.
-    kind: None = bất kỳ loại nào đang chạy; "bible"|"chunks"|"relations"|"timeline" = chỉ loại đó.
+    kind: None = bất kỳ loại nào đang chạy; "bible"|"chunks"|"relations"|"timeline"|"semantic_intent" = chỉ loại đó.
     """
     if kind is None:
         return (
@@ -504,6 +505,7 @@ def is_embedding_backfill_running(kind: Optional[str] = None) -> bool:
             or _embedding_backfill_chunks_running
             or _embedding_backfill_relations_running
             or _embedding_backfill_timeline_running
+            or _embedding_backfill_semantic_running
         )
     if kind == "bible":
         return _embedding_backfill_bible_running
@@ -513,6 +515,8 @@ def is_embedding_backfill_running(kind: Optional[str] = None) -> bool:
         return _embedding_backfill_relations_running
     if kind == "timeline":
         return _embedding_backfill_timeline_running
+    if kind == "semantic_intent":
+        return _embedding_backfill_semantic_running
     return False
 
 
@@ -687,3 +691,43 @@ def run_embedding_backfill(
         if timeline_limit > 0:
             _embedding_backfill_timeline_running = False
     return out
+
+
+def run_semantic_intent_embedding_backfill(project_id: str, limit: int = 200) -> int:
+    """
+    Đồng bộ vector cho semantic_intent: embed theo question_sample (câu hỏi), ghi vào cột embedding.
+    Trả về số bản ghi đã cập nhật.
+    """
+    global _embedding_backfill_semantic_running
+    if not project_id:
+        return 0
+    if _embedding_backfill_semantic_running:
+        return 0
+    try:
+        from config import init_services
+        from ai_engine import AIService
+        services = init_services()
+        if not services:
+            return 0
+        supabase = services["supabase"]
+    except Exception:
+        return 0
+    _embedding_backfill_semantic_running = True
+    updated = 0
+    try:
+        r = supabase.table("semantic_intent").select("id, question_sample").eq("story_id", project_id).is_("embedding", "NULL").limit(limit).execute()
+        rows = list(r.data or [])
+        if not rows:
+            return 0
+        texts = [(row.get("question_sample") or "").strip() or "" for row in rows]
+        vectors = AIService.get_embeddings_batch(texts) if hasattr(AIService, "get_embeddings_batch") else []
+        if not vectors:
+            for t in texts:
+                v = AIService.get_embedding(t) if t else None
+                vectors.append(v)
+        updated = _fallback_update_embeddings_one_by_one(supabase, "semantic_intent", "id", rows, vectors)
+    except Exception as e:
+        logger.warning("run_semantic_intent_embedding_backfill failed: %s", e)
+    finally:
+        _embedding_backfill_semantic_running = False
+    return updated

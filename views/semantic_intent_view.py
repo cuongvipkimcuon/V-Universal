@@ -1,11 +1,12 @@
 # views/semantic_intent_view.py - Semantic Intent: mẫu câu hỏi + data (context + câu trả lời)
-"""UI Semantic Intent: data = context + câu trả lời. Ngưỡng 85-100%. Không cần intent."""
+"""UI Semantic Intent: data = context + câu trả lời. Ngưỡng 85-100%. Embed theo câu hỏi (question_sample)."""
 import streamlit as st
 from datetime import datetime
 
 from config import init_services
 from ai_engine import AIService
 from utils.auth_manager import check_permission
+from core.background_jobs import run_semantic_intent_embedding_backfill, is_embedding_backfill_running
 
 
 def _ensure_table(supabase):
@@ -99,6 +100,41 @@ def render_semantic_intent_tab(project_id):
 
     st.markdown("---")
 
+    # Số mẫu đã embed (theo câu hỏi) vs tổng — giống Bible
+    try:
+        r_all = supabase.table("semantic_intent").select("id").eq("story_id", project_id).execute()
+        total_count = len(r_all.data or [])
+        r_null = supabase.table("semantic_intent").select("id").eq("story_id", project_id).is_("embedding", "NULL").execute()
+        no_embed_count = len(r_null.data or [])
+        embed_count = max(0, total_count - no_embed_count)
+    except Exception:
+        total_count = 0
+        no_embed_count = 0
+        embed_count = 0
+    st.caption(f"**Vector (embed theo câu hỏi):** {embed_count} / {total_count} mẫu đã có embedding.")
+    _semantic_sync_running = is_embedding_backfill_running("semantic_intent")
+    if not _semantic_sync_running:
+        st.session_state.pop("embedding_sync_clicked_semantic", None)
+    if _semantic_sync_running:
+        st.caption("⏳ Đang đồng bộ vector (Semantic Intent). Vui lòng đợi xong rồi bấm Refresh.")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("🔄 Làm mới số liệu", key="si_refresh_vec", disabled=_semantic_sync_running):
+            st.rerun()
+    with c2:
+        if st.button("🔄 Đồng bộ vector (Semantic Intent)", key="si_sync_vec_btn", disabled=(no_embed_count == 0 or _semantic_sync_running)):
+            import threading
+            st.session_state["embedding_sync_clicked_semantic"] = True
+
+            def _run():
+                run_semantic_intent_embedding_backfill(project_id, limit=200)
+
+            threading.Thread(target=_run, daemon=True).start()
+            st.toast("Đã bắt đầu đồng bộ vector (embed theo câu hỏi). Bấm **Làm mới số liệu** sau vài giây.")
+            st.rerun()
+
+    st.markdown("---")
+
     # List
     r = supabase.table("semantic_intent").select("*").eq("story_id", project_id).order("created_at", desc=True).execute()
     items = r.data or []
@@ -126,7 +162,11 @@ def render_semantic_intent_tab(project_id):
 
     st.markdown("---")
     for item in items:
-        with st.expander(f"**{item.get('question_sample','')[:60]}**", expanded=False):
+        has_emb = bool(item.get("embedding"))
+        sync_badge = "" if has_emb else " 🔄 Chưa embed"
+        with st.expander(f"**{item.get('question_sample','')[:60]}**{sync_badge}", expanded=False):
+            if not has_emb:
+                st.caption("🔄 Chưa đồng bộ vector — bấm **Đồng bộ vector (Semantic Intent)** trên để embed theo câu hỏi.")
             st.write("**Data:**", (item.get("related_data") or "")[:500])
             col1, col2 = st.columns(2)
             with col1:
@@ -149,11 +189,17 @@ def render_semantic_intent_tab(project_id):
                 q = st.text_area("Mẫu câu hỏi", value=row.get("question_sample", ""))
                 data = st.text_area("Data (context + câu trả lời)", value=row.get("related_data", ""), height=200)
                 if st.form_submit_button("💾 Cập nhật"):
-                    upd = {"question_sample": q.strip(), "intent": "chat_casual", "related_data": data or "", "updated_at": datetime.utcnow().isoformat()}
+                    upd = {
+                        "question_sample": q.strip(),
+                        "intent": "chat_casual",
+                        "related_data": data or "",
+                        "updated_at": datetime.utcnow().isoformat(),
+                        "embedding": None,  # sửa câu hỏi/data → xóa embedding để đồng bộ lại theo câu hỏi
+                    }
                     try:
                         supabase.table("semantic_intent").update(upd).eq("id", edit_id).execute()
                         del st.session_state["si_editing"]
-                        st.success("Đã cập nhật.")
+                        st.success("Đã cập nhật. Bấm **Đồng bộ vector (Semantic Intent)** để embed lại theo câu hỏi.")
                     except Exception as e:
                         st.error(str(e))
                 if st.form_submit_button("Hủy"):
