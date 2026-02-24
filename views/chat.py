@@ -735,7 +735,12 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                                     services = init_services()
                                     supabase = services['supabase']
                                     supabase.table("chat_history").insert({
-                                        "story_id": project_id, "user_id": str(user_id) if user_id else None, "role": "model", "content": f"[Cần làm rõ] {clarification_message}", "created_at": now_timestamp, "metadata": {"intent": "ask_user_clarification"}},
+                                        "story_id": project_id,
+                                        "user_id": str(user_id) if user_id else None,
+                                        "role": "model",
+                                        "content": f"[Cần làm rõ] {clarification_message}",
+                                        "created_at": now_timestamp,
+                                        "metadata": {"intent": "ask_user_clarification"},
                                     }).execute()
                                     _after_save_history_v_work(project_id, user_id, active_persona.get("role", ""), st.session_state.get("allow_data_changing_actions", False))
                                 except Exception:
@@ -829,7 +834,12 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                                     services = init_services()
                                     supabase = services['supabase']
                                     supabase.table("chat_history").insert({
-                                        "story_id": project_id, "user_id": str(user_id) if user_id else None, "role": "model", "content": f"[Cần làm rõ] {clarification_question}", "created_at": now_timestamp, "metadata": {"intent": first_intent}},
+                                        "story_id": project_id,
+                                        "user_id": str(user_id) if user_id else None,
+                                        "role": "model",
+                                        "content": f"[Cần làm rõ] {clarification_question}",
+                                        "created_at": now_timestamp,
+                                        "metadata": {"intent": first_intent},
                                     }).execute()
                                     if not is_v_home:
                                         _after_save_history_v_work(project_id, user_id, active_persona.get("role", ""), st.session_state.get("allow_data_changing_actions", False))
@@ -978,7 +988,12 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                                     services = init_services()
                                     supabase = services['supabase']
                                     supabase.table("chat_history").insert({
-                                        "story_id": project_id, "user_id": str(user_id) if user_id else None, "role": "model", "content": final_response, "created_at": now_timestamp, "metadata": {"v7": True, "verification_required": _plan.get("verification_required")}},
+                                        "story_id": project_id,
+                                        "user_id": str(user_id) if user_id else None,
+                                        "role": "model",
+                                        "content": final_response,
+                                        "created_at": now_timestamp,
+                                        "metadata": {"v7": True, "verification_required": _plan.get("verification_required")},
                                     }).execute()
                                     if not is_v_home:
                                         _after_save_history_v_work(project_id, user_id, active_persona.get("role", ""), st.session_state.get("allow_data_changing_actions", False))
@@ -1009,7 +1024,12 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                                 services = init_services()
                                 supabase = services['supabase']
                                 supabase.table("chat_history").insert({
-                                    "story_id": project_id, "user_id": str(user_id) if user_id else None, "role": "model", "content": f"[Cần làm rõ] {clarification_question}", "created_at": now_timestamp, "metadata": {"intent": intent}},
+                                    "story_id": project_id,
+                                    "user_id": str(user_id) if user_id else None,
+                                    "role": "model",
+                                    "content": f"[Cần làm rõ] {clarification_question}",
+                                    "created_at": now_timestamp,
+                                    "metadata": {"intent": intent},
                                 }).execute()
                                 if not is_v_home:
                                     _after_save_history_v_work(project_id, user_id, active_persona.get("role", ""), st.session_state.get("allow_data_changing_actions", False))
@@ -1028,7 +1048,12 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                                 supabase = services['supabase']
                                 model_msg = "Câu hỏi cần nhiều bước xử lý (nhiều intent hoặc nhiều thao tác). Vui lòng bật V7 Planner để thực hiện đủ trong một lần."
                                 supabase.table("chat_history").insert({
-                                    "story_id": project_id, "user_id": str(user_id) if user_id else None, "role": "model", "content": model_msg, "created_at": now_timestamp, "metadata": {"intent": intent}},
+                                    "story_id": project_id,
+                                    "user_id": str(user_id) if user_id else None,
+                                    "role": "model",
+                                    "content": model_msg,
+                                    "created_at": now_timestamp,
+                                    "metadata": {"intent": intent},
                                 }).execute()
                                 if not is_v_home:
                                     _after_save_history_v_work(project_id, user_id, active_persona.get("role", ""), st.session_state.get("allow_data_changing_actions", False))
@@ -1049,7 +1074,12 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                                     services = init_services()
                                     if services:
                                         services["supabase"].table("chat_history").insert({
-                                            "story_id": project_id, "user_id": str(user_id) if user_id else None, "role": "model", "content": full_response_text, "created_at": now_timestamp, "metadata": {"intent": intent}},
+                                            "story_id": project_id,
+                                            "user_id": str(user_id) if user_id else None,
+                                            "role": "model",
+                                            "content": full_response_text,
+                                            "created_at": now_timestamp,
+                                            "metadata": {"intent": intent},
                                         }).execute()
                                         if not is_v_home:
                                             _after_save_history_v_work(project_id, user_id, active_persona.get("role", ""), st.session_state.get("allow_data_changing_actions", False))
