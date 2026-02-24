@@ -71,6 +71,106 @@ def update_job(
         pass
 
 
+def retry_job_with_stored_data(job_id: str) -> Dict[str, Any]:
+    """
+    Thử lại job bằng dữ liệu LLM đã lưu (không gọi LLM). Gọi trực tiếp từ UI (đồng bộ).
+    Returns: {"success": bool, "error": str|None, "retry_still_failed": bool}
+    """
+    try:
+        from config import init_services
+        from core.job_llm_store import (
+            get_stored_result,
+            get_all_stored_results_for_job,
+            has_stored_result_for_retry,
+            increment_retry_count,
+        )
+        services = init_services()
+        if not services:
+            return {"success": False, "error": "Không kết nối được dịch vụ.", "retry_still_failed": False}
+        supabase = services["supabase"]
+        r = supabase.table("background_jobs").select("*").eq("id", job_id).limit(1).execute()
+        if not r.data or len(r.data) == 0:
+            return {"success": False, "error": "Không tìm thấy job.", "retry_still_failed": False}
+        job = r.data[0]
+        story_id = job.get("story_id")
+        job_type = (job.get("job_type") or "").strip()
+        payload = job.get("payload") or {}
+        if not has_stored_result_for_retry(job_id):
+            return {"success": False, "error": "Không có dữ liệu đã lưu để thử lại.", "retry_still_failed": False}
+        update_job(job_id, "running")
+        if job_type == "unified_chapter_analyze":
+            chapter_number = int(payload.get("chapter_number", 0))
+            row = get_stored_result(job_id, "unified", str(chapter_number))
+            if not row or not row.get("parsed_result"):
+                update_job(job_id, "failed", error_message="Không tìm thấy dữ liệu đã lưu.")
+                return {"success": False, "error": "Không tìm thấy dữ liệu đã lưu.", "retry_still_failed": False}
+            from core.unified_chapter_analyze import run_unified_chapter_analyze
+            out = run_unified_chapter_analyze(
+                story_id, chapter_number,
+                job_id=job_id, update_job_fn=update_job,
+                stored_data=row["parsed_result"],
+            )
+            if out.get("success"):
+                return {"success": True, "error": None, "retry_still_failed": False}
+            increment_retry_count(job_id, "unified", str(chapter_number))
+            update_job(job_id, "failed", result_summary="Thử lại thất bại.", error_message=out.get("error") or "Lỗi không xác định.")
+            return {"success": False, "error": out.get("error"), "retry_still_failed": True}
+        if job_type == "unified_chapter_range":
+            rows = get_all_stored_results_for_job(job_id)
+            unified_rows = [x for x in rows if x.get("step_type") == "unified" and x.get("parsed_result")]
+            if not unified_rows:
+                update_job(job_id, "failed", error_message="Không có dữ liệu đã lưu để thử lại.")
+                return {"success": False, "error": "Không có dữ liệu đã lưu.", "retry_still_failed": False}
+            failed_chapters = []
+            for row in unified_rows:
+                ch = int(row.get("step_key") or 0)
+                from core.unified_chapter_analyze import run_unified_chapter_analyze
+                out = run_unified_chapter_analyze(
+                    story_id, ch, job_id=job_id, update_job_fn=None, stored_data=row["parsed_result"],
+                )
+                if not out.get("success"):
+                    failed_chapters.append((ch, out.get("error")))
+                    increment_retry_count(job_id, "unified", str(ch))
+            if not failed_chapters:
+                summary = f"Đã thử lại xong {len(unified_rows)} chương."
+                update_job(job_id, "completed", result_summary=summary)
+                return {"success": True, "error": None, "retry_still_failed": False}
+            err_parts = [f"Chương {ch}: {err}" for ch, err in failed_chapters]
+            update_job(job_id, "failed", result_summary="Thử lại một số chương thất bại.", error_message="; ".join(err_parts))
+            return {"success": False, "error": failed_chapters[0][1] if failed_chapters else None, "retry_still_failed": True}
+        if job_type in ("data_analyze_bible", "data_analyze_relation", "data_analyze_timeline", "data_analyze_chunk"):
+            step_type_map = {
+                "data_analyze_bible": "data_analyze_bible",
+                "data_analyze_relation": "data_analyze_relation",
+                "data_analyze_timeline": "data_analyze_timeline",
+                "data_analyze_chunk": "data_analyze_chunk",
+            }
+            step_type = step_type_map[job_type]
+            if not has_stored_result_for_retry(job_id, step_type):
+                update_job(job_id, "failed", error_message="Không có dữ liệu đã lưu để thử lại.")
+                return {"success": False, "error": "Không có dữ liệu đã lưu.", "retry_still_failed": False}
+            step_key = str(payload.get("chapter_number", ""))
+            new_payload = dict(payload)
+            new_payload["retry_from_stored"] = True
+            supabase.table("background_jobs").update({"payload": new_payload}).eq("id", job_id).execute()
+            run_job_worker(job_id)
+            r2 = supabase.table("background_jobs").select("status, error_message").eq("id", job_id).limit(1).execute()
+            job_status = (r2.data or [{}])[0].get("status") if r2.data else None
+            if job_status == "failed":
+                increment_retry_count(job_id, step_type, step_key)
+                err = (r2.data or [{}])[0].get("error_message") or "Lỗi không xác định."
+                return {"success": False, "error": err, "retry_still_failed": True}
+            return {"success": True, "error": None, "retry_still_failed": False}
+        update_job(job_id, "failed", error_message="Loại job này chưa hỗ trợ thử lại.")
+        return {"success": False, "error": "Loại job này chưa hỗ trợ thử lại.", "retry_still_failed": False}
+    except Exception as e:
+        try:
+            update_job(job_id, "failed", error_message=str(e)[:500])
+        except Exception:
+            pass
+        return {"success": False, "error": str(e), "retry_still_failed": False}
+
+
 def list_jobs(
     story_id: str,
     status_filter: Optional[str] = None,
@@ -159,14 +259,32 @@ def run_job_worker(job_id: str) -> None:
         elif job_type == "unified_chapter_analyze":
             chapter_number = int(payload.get("chapter_number", 0))
             from core.unified_chapter_analyze import run_unified_chapter_analyze
-            out = run_unified_chapter_analyze(
-                story_id,
-                chapter_number,
-                job_id=job_id,
-                update_job_fn=update_job,
-            )
-            if not out.get("success") and not out.get("error"):
-                update_job(job_id, "failed", error_message="Unified analyze thất bại (không rõ lỗi).")
+            from core.job_llm_store import get_stored_result, has_stored_result_for_retry
+            if payload.get("retry_from_stored") and has_stored_result_for_retry(job_id, "unified"):
+                row = get_stored_result(job_id, "unified", str(chapter_number))
+                if row and row.get("parsed_result"):
+                    out = run_unified_chapter_analyze(
+                        story_id,
+                        chapter_number,
+                        job_id=job_id,
+                        update_job_fn=update_job,
+                        stored_data=row["parsed_result"],
+                    )
+                else:
+                    out = {"success": False, "error": "Không tìm thấy dữ liệu đã lưu."}
+            else:
+                out = run_unified_chapter_analyze(
+                    story_id,
+                    chapter_number,
+                    job_id=job_id,
+                    update_job_fn=update_job,
+                )
+            if not out.get("success"):
+                if payload.get("retry_from_stored"):
+                    from core.job_llm_store import increment_retry_count
+                    increment_retry_count(job_id, "unified", str(chapter_number))
+                if not out.get("error"):
+                    update_job(job_id, "failed", error_message="Unified analyze thất bại (không rõ lỗi).")
         elif job_type == "unified_chapter_range":
             chapter_start = int(payload.get("chapter_start") or payload.get("chapter_range", [0, 0])[0])
             chapter_end = int(payload.get("chapter_end") or (payload.get("chapter_range") or [0, 0])[1])
@@ -248,13 +366,26 @@ def _worker_data_analyze_bible(
         return
 
     ext_persona = PersonaSystem.get_persona(persona_key) or {}
-    if not exclude_existing:
+    from core.job_llm_store import get_stored_result, has_stored_result_for_retry, save_llm_result, mark_failed
+    if payload.get("retry_from_stored") and has_stored_result_for_retry(job_id, "data_analyze_bible"):
+        row = get_stored_result(job_id, "data_analyze_bible", str(chap_num))
+        unique_items = (row.get("parsed_result") or []) if row else []
+    else:
+        if not exclude_existing:
+            existing = supabase.table("story_bible").select("id").eq("story_id", project_id).eq("source_chapter", chap_num).execute()
+            if existing.data:
+                ids = [r["id"] for r in existing.data if r.get("id")]
+                if ids:
+                    supabase.table("story_bible").delete().in_("id", ids).execute()
+        unique_items = _run_extract_on_content(content, ext_persona, project_id, chap_num, exclude_existing=exclude_existing, supabase=supabase)
+        if unique_items and job_id:
+            save_llm_result(job_id, "data_analyze_bible", str(chap_num), unique_items, status="success")
+    if payload.get("retry_from_stored") and not exclude_existing and unique_items:
         existing = supabase.table("story_bible").select("id").eq("story_id", project_id).eq("source_chapter", chap_num).execute()
         if existing.data:
             ids = [r["id"] for r in existing.data if r.get("id")]
             if ids:
                 supabase.table("story_bible").delete().in_("id", ids).execute()
-    unique_items = _run_extract_on_content(content, ext_persona, project_id, chap_num, exclude_existing=exclude_existing, supabase=supabase)
     if not unique_items:
         update_job(job_id, "completed", result_summary="Không tìm thấy thực thể mới.")
         if post_to_chat:
@@ -276,18 +407,26 @@ def _worker_data_analyze_bible(
             _post_completion_to_chat(project_id, user_id, label, True, "Không có mục nào hợp lệ.", None)
         return
     count = 0
-    for row in rows_to_save:
-        payload = {
-            "story_id": project_id,
-            "entity_name": row["final_name"],
-            "description": row["description"],
-            "source_chapter": chap_num,
-        }
-        ok, _, payload_ready = run_logic_check_then_save_bible(project_id, payload, supabase)
-        if not ok or not payload_ready:
-            continue
-        supabase.table("story_bible").insert(payload_ready).execute()
-        count += 1
+    try:
+        for row in rows_to_save:
+            payload = {
+                "story_id": project_id,
+                "entity_name": row["final_name"],
+                "description": row["description"],
+                "source_chapter": chap_num,
+            }
+            ok, _, payload_ready = run_logic_check_then_save_bible(project_id, payload, supabase)
+            if not ok or not payload_ready:
+                continue
+            supabase.table("story_bible").insert(payload_ready).execute()
+            count += 1
+    except Exception as e:
+        if job_id:
+            mark_failed(job_id, "data_analyze_bible", str(chap_num), str(e))
+        update_job(job_id, "failed", error_message=str(e)[:500])
+        if post_to_chat:
+            _post_completion_to_chat(project_id, user_id, label, False, None, str(e))
+        return
     summary = f"Đã lưu {count} mục Bible."
     update_job(job_id, "completed", result_summary=summary)
     if post_to_chat:
@@ -327,32 +466,47 @@ def _worker_data_analyze_relation(
             ids_to_del = [r["id"] for r in (rels_exist.data or []) if r.get("id") and (r.get("source_entity_id") in entity_ids or r.get("target_entity_id") in entity_ids)]
             if ids_to_del:
                 supabase.table("entity_relations").delete().in_("id", ids_to_del).execute()
-    rels = suggest_relations(content, project_id)
+    from core.job_llm_store import get_stored_result, has_stored_result_for_retry, save_llm_result, mark_failed as _mark_failed_rel
+    if payload.get("retry_from_stored") and has_stored_result_for_retry(job_id, "data_analyze_relation"):
+        row = get_stored_result(job_id, "data_analyze_relation", str(chap_num))
+        rels = (row.get("parsed_result") or []) if row else []
+    else:
+        rels = suggest_relations(content, project_id)
+        if job_id:
+            save_llm_result(job_id, "data_analyze_relation", str(chap_num), rels or [], status="success")
     saved = 0
-    for item in (rels or []):
-        if only_new and item.get("kind") == "relation":
-            s, t = item.get("source_entity_id"), item.get("target_entity_id")
-            key = (s, t, (item.get("relation_type") or "").strip())
-            if key in existing_set:
-                continue
-        try:
-            if item.get("kind") == "relation":
-                payload = {
-                    "source_entity_id": item["source_entity_id"],
-                    "target_entity_id": item["target_entity_id"],
-                    "relation_type": item.get("relation_type", "liên quan"),
-                    "description": item.get("description", "") or "",
-                    "story_id": project_id,
-                }
-                ok, _, payload_ready = run_logic_check_then_save_relation(project_id, payload, supabase)
-                if ok and payload_ready:
-                    supabase.table("entity_relations").insert(payload_ready).execute()
+    try:
+        for item in (rels or []):
+            if only_new and item.get("kind") == "relation":
+                s, t = item.get("source_entity_id"), item.get("target_entity_id")
+                key = (s, t, (item.get("relation_type") or "").strip())
+                if key in existing_set:
+                    continue
+            try:
+                if item.get("kind") == "relation":
+                    payload = {
+                        "source_entity_id": item["source_entity_id"],
+                        "target_entity_id": item["target_entity_id"],
+                        "relation_type": item.get("relation_type", "liên quan"),
+                        "description": item.get("description", "") or "",
+                        "story_id": project_id,
+                    }
+                    ok, _, payload_ready = run_logic_check_then_save_relation(project_id, payload, supabase)
+                    if ok and payload_ready:
+                        supabase.table("entity_relations").insert(payload_ready).execute()
+                        saved += 1
+                else:
+                    supabase.table("story_bible").update({"parent_id": item["parent_entity_id"]}).eq("id", item["entity_id"]).execute()
                     saved += 1
-            else:
-                supabase.table("story_bible").update({"parent_id": item["parent_entity_id"]}).eq("id", item["entity_id"]).execute()
-                saved += 1
-        except Exception:
-            pass
+            except Exception:
+                pass
+    except Exception as e:
+        if job_id:
+            _mark_failed_rel(job_id, "data_analyze_relation", str(chap_num), str(e))
+        update_job(job_id, "failed", error_message=str(e)[:500])
+        if post_to_chat:
+            _post_completion_to_chat(project_id, user_id, label, False, None, str(e))
+        return
     summary = f"Đã lưu {saved} quan hệ / parent."
     update_job(job_id, "completed", result_summary=summary)
     if post_to_chat:
@@ -386,32 +540,53 @@ def _worker_data_analyze_timeline(
             ids = [r["id"] for r in old.data if r.get("id")]
             if ids:
                 supabase.table("timeline_events").delete().in_("id", ids).execute()
-    events = extract_timeline_events_from_content(content, chapter_label)
+    from core.job_llm_store import get_stored_result, has_stored_result_for_retry, save_llm_result, mark_failed as _mark_failed_tl
+    if payload.get("retry_from_stored") and has_stored_result_for_retry(job_id, "data_analyze_timeline"):
+        row = get_stored_result(job_id, "data_analyze_timeline", str(chap_num))
+        events = (row.get("parsed_result") or []) if row else []
+    else:
+        events = extract_timeline_events_from_content(content, chapter_label)
+        if job_id:
+            save_llm_result(job_id, "data_analyze_timeline", str(chap_num), events or [], status="success")
+    if payload.get("retry_from_stored") and not append_only and events:
+        old = supabase.table("timeline_events").select("id").eq("story_id", project_id).eq("chapter_id", chapter_id).execute()
+        if old.data:
+            ids = [r["id"] for r in old.data if r.get("id")]
+            if ids:
+                supabase.table("timeline_events").delete().in_("id", ids).execute()
     base_order = 0
     if append_only:
         r = supabase.table("timeline_events").select("event_order").eq("story_id", project_id).order("event_order", desc=True).limit(1).execute()
         if r.data and r.data[0].get("event_order") is not None:
             base_order = int(r.data[0]["event_order"]) + 1
     saved = 0
-    for ev in (events or []):
-        order_val = int(ev.get("event_order", 0)) if not append_only else (base_order + saved)
-        payload_ev = {
-            "story_id": project_id,
-            "chapter_id": chapter_id,
-            "event_order": order_val,
-            "title": (ev.get("title") or "").strip() or "Sự kiện",
-            "description": (ev.get("description") or "").strip(),
-            "raw_date": (ev.get("raw_date") or "").strip(),
-            "event_type": ev.get("event_type", "event"),
-        }
-        ok, _, payload_ready = run_logic_check_then_save_timeline(project_id, payload_ev, supabase)
-        if not ok or not payload_ready:
-            continue
-        try:
-            supabase.table("timeline_events").insert(payload_ready).execute()
-            saved += 1
-        except Exception:
-            pass
+    try:
+        for ev in (events or []):
+            order_val = int(ev.get("event_order", 0)) if not append_only else (base_order + saved)
+            payload_ev = {
+                "story_id": project_id,
+                "chapter_id": chapter_id,
+                "event_order": order_val,
+                "title": (ev.get("title") or "").strip() or "Sự kiện",
+                "description": (ev.get("description") or "").strip(),
+                "raw_date": (ev.get("raw_date") or "").strip(),
+                "event_type": ev.get("event_type", "event"),
+            }
+            ok, _, payload_ready = run_logic_check_then_save_timeline(project_id, payload_ev, supabase)
+            if not ok or not payload_ready:
+                continue
+            try:
+                supabase.table("timeline_events").insert(payload_ready).execute()
+                saved += 1
+            except Exception:
+                pass
+    except Exception as e:
+        if job_id:
+            _mark_failed_tl(job_id, "data_analyze_timeline", str(chap_num), str(e))
+        update_job(job_id, "failed", error_message=str(e)[:500])
+        if post_to_chat:
+            _post_completion_to_chat(project_id, user_id, label, False, None, str(e))
+        return
     summary = f"Đã lưu {saved} sự kiện timeline."
     update_job(job_id, "completed", result_summary=summary)
     if post_to_chat:
@@ -438,11 +613,19 @@ def _worker_data_analyze_chunk(
         if post_to_chat:
             _post_completion_to_chat(project_id, user_id, label, False, None, "Chương không có nội dung")
         return
-    strategy = analyze_split_strategy(content, file_type="story", context_hint="Đoạn văn có ý nghĩa")
-    chunks_list = execute_split_logic(content, strategy.get("split_type", "by_length"), strategy.get("split_value", "2000"))
-    if not chunks_list:
-        chunks_list = execute_split_logic(content, "by_length", "2000")
-    edited = [{"title": c.get("title", ""), "content": (c.get("content") or "").strip(), "order": c.get("order", i + 1)} for i, c in enumerate(chunks_list)]
+    from core.job_llm_store import get_stored_result, has_stored_result_for_retry, save_llm_result, mark_failed as _mark_failed_ch
+    if payload.get("retry_from_stored") and has_stored_result_for_retry(job_id, "data_analyze_chunk"):
+        row = get_stored_result(job_id, "data_analyze_chunk", str(chap_num))
+        data = (row.get("parsed_result") or {}) if row else {}
+        edited = data.get("chunks") or []
+    else:
+        strategy = analyze_split_strategy(content, file_type="story", context_hint="Đoạn văn có ý nghĩa")
+        chunks_list = execute_split_logic(content, strategy.get("split_type", "by_length"), strategy.get("split_value", "2000"))
+        if not chunks_list:
+            chunks_list = execute_split_logic(content, "by_length", "2000")
+        edited = [{"title": c.get("title", ""), "content": (c.get("content") or "").strip(), "order": c.get("order", i + 1)} for i, c in enumerate(chunks_list)]
+        if job_id:
+            save_llm_result(job_id, "data_analyze_chunk", str(chap_num), {"strategy": strategy, "chunks": edited}, status="success")
     append_only = bool(payload.get("append_only", False))
     base_sort = 0
     if not append_only:
@@ -456,28 +639,36 @@ def _worker_data_analyze_chunk(
         if r.data and r.data[0].get("sort_order") is not None:
             base_sort = int(r.data[0]["sort_order"]) + 1
     saved = 0
-    for idx, chk in enumerate(edited):
-        txt = chk.get("content", "").strip()
-        if not txt:
-            continue
-        sort_val = chk.get("order", idx + 1) if not append_only else (base_sort + saved)
-        row = {
-            "story_id": project_id,
-            "chapter_id": chapter_id,
-            "arc_id": arc_id,
-            "content": txt,
-            "raw_content": txt,
-            "meta_json": {"source": "data_analyze", "chapter": chap_num, "title": chk.get("title", "")},
-            "sort_order": sort_val,
-        }
-        ok, _, payload_ready = run_logic_check_then_save_chunk(project_id, row, supabase)
-        if not ok or not payload_ready:
-            continue
-        try:
-            supabase.table("chunks").insert(payload_ready).execute()
-            saved += 1
-        except Exception:
-            pass
+    try:
+        for idx, chk in enumerate(edited):
+            txt = chk.get("content", "").strip()
+            if not txt:
+                continue
+            sort_val = chk.get("order", idx + 1) if not append_only else (base_sort + saved)
+            row = {
+                "story_id": project_id,
+                "chapter_id": chapter_id,
+                "arc_id": arc_id,
+                "content": txt,
+                "raw_content": txt,
+                "meta_json": {"source": "data_analyze", "chapter": chap_num, "title": chk.get("title", "")},
+                "sort_order": sort_val,
+            }
+            ok, _, payload_ready = run_logic_check_then_save_chunk(project_id, row, supabase)
+            if not ok or not payload_ready:
+                continue
+            try:
+                supabase.table("chunks").insert(payload_ready).execute()
+                saved += 1
+            except Exception:
+                pass
+    except Exception as e:
+        if job_id:
+            _mark_failed_ch(job_id, "data_analyze_chunk", str(chap_num), str(e))
+        update_job(job_id, "failed", error_message=str(e)[:500])
+        if post_to_chat:
+            _post_completion_to_chat(project_id, user_id, label, False, None, str(e))
+        return
     summary = f"Đã lưu {saved} chunks."
     update_job(job_id, "completed", result_summary=summary)
     if post_to_chat:

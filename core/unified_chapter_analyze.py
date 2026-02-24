@@ -73,8 +73,8 @@ def _get_persona():
         return {"extractor_prompt": "Trích xuất thực thể quan trọng: nhân vật, địa điểm, sự kiện, đồ vật."}
 
 
-def _llm_unified_extract(content: str, chapter_label: str, persona: dict) -> Dict[str, Any]:
-    """Một lần gọi LLM trả về JSON: bible, timeline, chunks, relations, chunk_bible, chunk_timeline."""
+def _llm_unified_extract(content: str, chapter_label: str, persona: dict) -> Tuple[Dict[str, Any], str]:
+    """Một lần gọi LLM trả về (data, raw): JSON parsed và chuỗi raw để lưu DB."""
     from ai.service import AIService, _get_default_tool_model
     from config import Config
     allowed = Config.get_allowed_prefix_keys_for_extract() if hasattr(Config, "get_allowed_prefix_keys_for_extract") else ["CHARACTER", "LOCATION", "EVENT", "OTHER"]
@@ -116,7 +116,7 @@ Nếu không có: mảng rỗng []. Chỉ trả về JSON, không giải thích.
         raw = re.sub(r"^```\w*\n?", "", raw).strip()
         raw = re.sub(r"\n?```\s*$", "", raw).strip()
         data = json.loads(AIService.clean_json_text(raw))
-        return data
+        return data, raw
     except Exception as e:
         raise RuntimeError(f"LLM unified extract failed: {e}") from e
 
@@ -138,13 +138,16 @@ def run_unified_chapter_analyze(
     chapter_number: int,
     job_id: Optional[str] = None,
     update_job_fn=None,
+    stored_data: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
-    Pipeline: load chapter → 1 LLM call → save bible (no embed), timeline, chunks (with embed), relations, links.
-    Mỗi bước có retry 1 lần; nếu thất bại thì rollback toàn bộ và báo lỗi qua job.
-    Returns: {"success": bool, "error": str|None, "steps": {"bible": bool, "timeline": bool, "chunks": bool, "relations": bool, "links": bool}, "counts": {...}}
+    Pipeline: load chapter → 1 LLM call (hoặc dùng stored_data khi retry) → save bible, timeline, chunks, relations, links.
+    Nếu stored_data được truyền thì bỏ qua LLM và dùng dữ liệu đã lưu (retry).
+    Mỗi bước có retry 1 lần; nếu thất bại thì rollback và ghi job_llm_results failed.
+    Returns: {"success": bool, "error": str|None, "steps": {...}, "counts": {...}}
     """
     from config import Config
+    from core.job_llm_store import save_llm_result, mark_failed
     result = {
         "success": False,
         "error": None,
@@ -177,15 +180,28 @@ def run_unified_chapter_analyze(
         result["error"] = f"Nội dung chương vượt {UNIFIED_MAX_CONTENT_CHARS} ký tự. Cắt bớt hoặc dùng Data Analyze từng bước."
         return result
 
-    # 1) LLM call
-    persona = _get_persona()
-    try:
-        data = _llm_unified_extract(content, chapter_label, persona)
-    except Exception as e:
-        result["error"] = str(e)
-        if job_id and update_job_fn:
-            update_job_fn(job_id, "failed", result_summary="Unified extract thất bại.", error_message=result["error"])
-        return result
+    # 1) LLM call hoặc dùng stored_data (retry)
+    if stored_data is not None:
+        data = stored_data
+    else:
+        persona = _get_persona()
+        try:
+            data, raw_llm = _llm_unified_extract(content, chapter_label, persona)
+        except Exception as e:
+            result["error"] = str(e)
+            if job_id and update_job_fn:
+                update_job_fn(job_id, "failed", result_summary="Unified extract thất bại.", error_message=result["error"])
+            return result
+        if job_id:
+            save_llm_result(
+                job_id,
+                "unified",
+                str(chapter_number),
+                data,
+                llm_raw_response=raw_llm,
+                input_snapshot={"chapter_number": chapter_number, "content_length": len(content)},
+                status="success",
+            )
 
     bible_items = data.get("bible") or []
     timeline_items = data.get("timeline") or []
@@ -318,6 +334,8 @@ def run_unified_chapter_analyze(
     result["counts"]["bible"] = len(inserted_bible_ids)
     if not ok:
         result["error"] = f"Bước Bible thất bại: {err}"
+        if job_id:
+            mark_failed(job_id, "unified", str(chapter_number), result["error"])
         rollback()
         if job_id and update_job_fn:
             update_job_fn(job_id, "failed", result_summary="Unified: bước Bible thất bại.", error_message=result["error"])
@@ -369,6 +387,8 @@ def run_unified_chapter_analyze(
     result["counts"]["timeline"] = len(inserted_timeline_ids)
     if not ok:
         result["error"] = f"Bước Timeline thất bại: {err}"
+        if job_id:
+            mark_failed(job_id, "unified", str(chapter_number), result["error"])
         rollback()
         if job_id and update_job_fn:
             update_job_fn(job_id, "failed", result_summary="Unified: bước Timeline thất bại.", error_message=result["error"])
@@ -409,6 +429,8 @@ def run_unified_chapter_analyze(
     result["counts"]["chunks"] = len(inserted_chunk_ids)
     if not ok:
         result["error"] = f"Bước Chunks thất bại: {err}"
+        if job_id:
+            mark_failed(job_id, "unified", str(chapter_number), result["error"])
         rollback()
         if job_id and update_job_fn:
             update_job_fn(job_id, "failed", result_summary="Unified: bước Chunks thất bại.", error_message=result["error"])
@@ -458,6 +480,8 @@ def run_unified_chapter_analyze(
     result["steps"]["relations"] = ok
     if not ok:
         result["error"] = f"Bước Relations thất bại: {err}"
+        if job_id:
+            mark_failed(job_id, "unified", str(chapter_number), result["error"])
         rollback()
         if job_id and update_job_fn:
             update_job_fn(job_id, "failed", result_summary="Unified: bước Relations thất bại.", error_message=result["error"])
@@ -512,6 +536,8 @@ def run_unified_chapter_analyze(
     result["steps"]["links"] = ok
     if not ok:
         result["error"] = f"Bước Links thất bại: {err}"
+        if job_id:
+            mark_failed(job_id, "unified", str(chapter_number), result["error"])
         rollback()
         if job_id and update_job_fn:
             update_job_fn(job_id, "failed", result_summary="Unified: bước Links thất bại.", error_message=result["error"])
@@ -607,7 +633,7 @@ def run_unified_chapter_range(
     for ch in range(start, end + 1):
         out = run_unified_chapter_analyze(
             project_id, ch,
-            job_id=None,
+            job_id=job_id,
             update_job_fn=None,
         )
         if not out.get("success"):
