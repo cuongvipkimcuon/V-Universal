@@ -272,8 +272,8 @@ def get_project_overview(project_id: str, bible_max_tokens: int = 2000) -> Dict[
         if not services:
             return out
         supabase = services["supabase"]
-        # Project name
-        r = supabase.table("stories").select("name, title").eq("id", project_id).limit(1).execute()
+        # Project name (stories table hiện không còn cột 'name' → chỉ select 'title' để tránh lỗi 42703)
+        r = supabase.table("stories").select("title").eq("id", project_id).limit(1).execute()
         if r.data and len(r.data) > 0:
             row = r.data[0]
             out["project_name"] = (row.get("name") or row.get("title") or "").strip() or "(Không tên)"
@@ -441,7 +441,7 @@ def get_timeline_events(
         supabase = services["supabase"]
         q = (
             supabase.table("timeline_events")
-            .select("id, event_order, title, description, raw_date, event_type, chapter_id, arc_id")
+            .select("id, event_order, title, description, raw_date, event_type, chapter_id, arc_id, embedding")
             .eq("story_id", project_id)
             .order("event_order")
         )

@@ -425,8 +425,17 @@ def _v_home_save_message(user_id, project_id, role, content, topic_start_at):
         pass
 
 
+def _is_system_execution_message(content: str) -> bool:
+    """True nếu tin nhắn liên quan thực thi hệ thống (embedding, unified, job, đồng bộ, ...) — bỏ qua khi crystallize."""
+    if not content or not isinstance(content, str):
+        return False
+    c = content.strip().lower()
+    keywords = ("đang chạy ngầm", "running in background", "đồng bộ vector", "embedding", "unified", "extract_bible", "data operation", "job_id", "đang trả lời trong nền", "chương 1 đến", "@@")
+    return any(k in c for k in keywords)
+
+
 def _auto_crystallize_background(project_id, user_id, persona_role):
-    """Chạy ngầm: crystallize 25 tin (30 - 5) và lưu vào Bible [CHAT] (ngày-stt). Reset counter v7.1 về 0."""
+    """Chạy ngầm: crystallize ~25 tin; bỏ qua tin thực thi hệ thống; lưu vào chat_crystallize_entries (V8.9). Reset counter v7.1 về 0."""
     try:
         services = init_services()
         if not services:
@@ -439,8 +448,10 @@ def _auto_crystallize_background(project_id, user_id, persona_role):
         data = list(r.data)[::-1] if r.data else []
         if len(data) < 25:
             return
-        to_crystallize = data[:-5]
-        chat_text = "\n".join([f"{m['role']}: {m['content']}" for m in to_crystallize])
+        # Bỏ qua tin nhắn liên quan thực thi hệ thống — chỉ ưu tiên thông tin
+        to_crystallize = [m for m in data[:-5] if not _is_system_execution_message(m.get("content") or "")]
+        if len(to_crystallize) < 10:
+            return
         summary = RuleMiningSystem.crystallize_session(to_crystallize, persona_role)
         if not summary or summary == "NO_INFO":
             return
@@ -452,15 +463,19 @@ def _auto_crystallize_background(project_id, user_id, persona_role):
             serial = len(log_r.data) + 1 if log_r.data else 1
         except Exception:
             serial = 1
-        entity_name = f"[CHAT] {today} chat-{serial}"
-        payload = {
-            "story_id": project_id,
-            "entity_name": entity_name,
-            "description": summary,
-            "source_chapter": 0,
-        }
-        ins = supabase.table("story_bible").insert(payload).execute()
-        bible_id = ins.data[0].get("id") if ins.data else None
+        title = f"{today} chat-{serial}"
+        try:
+            ins = supabase.table("chat_crystallize_entries").insert({
+                "scope": "project",
+                "story_id": project_id,
+                "user_id": str(user_id) if user_id else None,
+                "title": title,
+                "description": summary,
+                "message_count": len(to_crystallize),
+            }).execute()
+            entry_id = ins.data[0].get("id") if ins.data else None
+        except Exception:
+            entry_id = None
         try:
             supabase.table("chat_crystallize_log").insert({
                 "story_id": project_id,
@@ -468,7 +483,7 @@ def _auto_crystallize_background(project_id, user_id, persona_role):
                 "crystallize_date": today,
                 "serial_in_day": serial,
                 "message_count": len(to_crystallize),
-                "bible_entry_id": bible_id,
+                "crystallize_entry_id": entry_id,
             }).execute()
         except Exception:
             pass
@@ -561,10 +576,10 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                 key=f"chat_toggle_v7_{chat_mode}",
             )
             st.session_state['allow_data_changing_actions'] = st.toggle(
-                "🔧 Cho phép thao tác ảnh hưởng dữ liệu",
-                value=st.session_state.get('allow_data_changing_actions', False),
-                help="Chỉ áp dụng khi chat (V Work): bật mới cho phép extract/update/delete theo chương, ghi Bible/Rule, Crystallize, thêm Semantic. Tab khác (Data Analyze, Knowledge…) không bị ảnh hưởng. Mặc định tắt.",
-                key=f"chat_toggle_allow_data_{chat_mode}",
+            "🔧 Cho phép thao tác ảnh hưởng dữ liệu",
+            value=st.session_state.get('allow_data_changing_actions', False),
+            help="Chỉ áp dụng khi chat (V Work): bật mới cho phép extract/update/delete theo chương và Crystallize. Tab khác (Data Analyze, Knowledge…) không bị ảnh hưởng. Mặc định tắt.",
+            key=f"chat_toggle_allow_data_{chat_mode}",
             )
             st.session_state['extract_rules_from_chat'] = st.toggle(
                 "🧐 Trích xuất luật từ chat",
@@ -605,6 +620,13 @@ def render_chat_tab(project_id, persona, chat_mode=None):
             )
             submitted = st.form_submit_button("Gửi")
         st.divider()
+        history_depth = st.session_state.get("history_depth", 5)
+        prompt = (prompt or "").strip()
+        prompt_from_clarification = st.session_state.pop("pending_clarification_prompt", None)
+        if prompt_from_clarification:
+            prompt_from_clarification = (prompt_from_clarification or "").strip()
+        prompt_to_use = (prompt if (submitted and prompt) else None) or prompt_from_clarification
+        from_main_form = bool(submitted and prompt)
 
         if is_v_home:
             if not project_id or str(project_id).strip() in ("", "None"):
@@ -622,7 +644,7 @@ def render_chat_tab(project_id, persona, chat_mode=None):
             if visible_msgs and visible_msgs[-1].get("role") == "user":
                 st.caption("⏳ Đang trả lời trong nền. Làm mới trang hoặc quay lại tab sau vài giây để thấy câu trả lời.")
         else:
-            visible_msgs = []
+            visible_msgs = []  # V Work: luôn khởi tạo để dùng khi vẽ history dưới cặp mới (prompt_to_use)
             if not project_id or str(project_id).strip() in ("", "None"):
                 st.info("Chọn một project ở sidebar để xem và gửi tin nhắn trong V Work.")
             else:
@@ -643,28 +665,21 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                     )
                     msgs = msgs_data.data[::-1] if msgs_data.data else []
                     visible_msgs = [m for m in msgs if m["created_at"] > st.session_state.get("chat_cutoff", "1970-01-01")]
-                    # Thứ tự: cặp mới nhất lên đầu; trong mỗi cặp câu hỏi trên, trả lời dưới
-                    for user_msg, model_msg in _pair_messages_newest_first(visible_msgs):
-                        with st.chat_message("user"):
-                            st.markdown(user_msg.get("content", ""))
-                        if model_msg:
-                            with st.chat_message("model", avatar=active_persona["icon"]):
-                                st.markdown(model_msg.get("content", ""))
-                                if model_msg.get("metadata"):
-                                    with st.expander("📊 Details"):
-                                        st.json(model_msg["metadata"], expanded=False)
-                    if visible_msgs and visible_msgs[-1].get("role") == "user":
-                        st.caption("⏳ Đang trả lời trong nền. Làm mới trang hoặc quay lại tab sau vài giây để thấy câu trả lời.")
+                    # V8.9: Chỉ vẽ history khi chưa gửi câu mới — khi vừa gửi thì vẽ cặp mới ở trên (sau block LLM)
+                    if not prompt_to_use:
+                        for user_msg, model_msg in _pair_messages_newest_first(visible_msgs):
+                            with st.chat_message("user"):
+                                st.markdown(user_msg.get("content", ""))
+                            if model_msg:
+                                with st.chat_message("model", avatar=active_persona["icon"]):
+                                    st.markdown(model_msg.get("content", ""))
+                                    if model_msg.get("metadata"):
+                                        with st.expander("📊 Details"):
+                                            st.json(model_msg["metadata"], expanded=False)
+                        if visible_msgs and visible_msgs[-1].get("role") == "user":
+                            st.caption("⏳ Đang trả lời trong nền. Làm mới trang hoặc quay lại tab sau vài giây để thấy câu trả lời.")
                 except Exception as e:
                     st.error(f"Error loading history: {e}")
-        history_depth = st.session_state.get("history_depth", 5)
-        prompt = (prompt or "").strip()
-        # Cho phép prompt từ form clarification (user gõ vào ô làm rõ rồi bấm Gửi)
-        prompt_from_clarification = st.session_state.pop("pending_clarification_prompt", None)
-        if prompt_from_clarification:
-            prompt_from_clarification = (prompt_from_clarification or "").strip()
-        prompt_to_use = (prompt if (submitted and prompt) else None) or prompt_from_clarification
-        from_main_form = bool(submitted and prompt)
 
         if prompt_to_use:
             prompt = prompt_to_use
@@ -692,6 +707,7 @@ def render_chat_tab(project_id, persona, chat_mode=None):
             with st.chat_message("user"):
                 st.markdown(prompt)
 
+            st.caption("⏳ **Đang xử lý...** Vui lòng không chuyển tab.")
             with st.spinner("Thinking..."):
                 v7_handled = False
                 router_out = None
@@ -725,11 +741,7 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                             with st.chat_message("assistant", avatar=active_persona['icon']):
                                 st.caption("📌 Chỉ lệnh (@@) — cần làm rõ")
                                 st.info(clarification_message)
-                                with st.form("clarification_form_cmd"):
-                                    followup = st.text_input("Gõ lại hoặc bổ sung rồi bấm Gửi (hoặc Enter):", key="clarification_input_cmd", placeholder="Ví dụ: @@extract_bible chương 3", label_visibility="collapsed")
-                                    if st.form_submit_button("Gửi") and (followup or "").strip():
-                                        st.session_state["pending_clarification_prompt"] = (followup or "").strip()
-                                        st.rerun()
+                                st.caption("💬 Gõ lại câu lệnh ở ô chat phía trên để tiếp tục.")
                             if st.session_state.get('enable_history', True):
                                 try:
                                     services = init_services()
@@ -824,11 +836,7 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                             with st.chat_message("assistant", avatar=active_persona['icon']):
                                 st.caption("🧠 V7 Planner — Cần làm rõ")
                                 st.info(f"**Để trả lời chính xác, tôi cần bạn làm rõ:**\n\n{clarification_question}")
-                                with st.form("clarification_form_v7"):
-                                    followup = st.text_input("Gõ lại hoặc bổ sung rồi bấm Gửi (hoặc Enter):", key="clarification_input_v7", placeholder="Ví dụ: Tôi muốn hỏi về nhân vật A trong chương 3", label_visibility="collapsed")
-                                    if st.form_submit_button("Gửi") and (followup or "").strip():
-                                        st.session_state["pending_clarification_prompt"] = (followup or "").strip()
-                                        st.rerun()
+                                st.caption("💬 Gõ lại câu hỏi đã làm rõ ở ô chat phía trên để tiếp tục.")
                             if st.session_state.get('enable_history', True):
                                 try:
                                     services = init_services()
@@ -1014,11 +1022,7 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                         with st.chat_message("assistant", avatar=active_persona['icon']):
                             st.caption("🧠 Intent: ask_user_clarification — Cần làm rõ")
                             st.info(f"**Để trả lời chính xác, tôi cần bạn làm rõ:**\n\n{clarification_question}")
-                            with st.form("clarification_form_router"):
-                                followup = st.text_input("Gõ lại hoặc bổ sung rồi bấm Gửi (hoặc Enter):", key="clarification_input_router", placeholder="Ví dụ: Tôi muốn hỏi về nhân vật A trong chương 3", label_visibility="collapsed")
-                                if st.form_submit_button("Gửi") and (followup or "").strip():
-                                    st.session_state["pending_clarification_prompt"] = (followup or "").strip()
-                                    st.rerun()
+                            st.caption("💬 Gõ lại phiên bản đã làm rõ ở ô chat phía trên, rồi bấm Gửi.")
                         if st.session_state.get('enable_history', True):
                             try:
                                 services = init_services()
@@ -1060,7 +1064,7 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                             except Exception:
                                 pass
                     elif intent in ("web_search", "chat_casual"):
-                        # Trả lời bằng LLM chạy trong nền → user đổi tab vẫn được trả lời; câu hỏi đã lưu ở đầu block.
+                        # V8.9: Không chạy ngầm — khóa màn hình, streaming, có lời nhắc không chuyển tab.
                         can_call = max_llm_calls_per_turn == 0 or llm_calls_this_turn[0] < max_llm_calls_per_turn
                         if not can_call:
                             full_response_text = f"(Đã đạt giới hạn {max_llm_calls_per_turn} lần gọi LLM cho lượt này. Có thể tăng trong **Settings → V8 & Observability**.)"
@@ -1099,32 +1103,49 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                                 {"role": "system", "content": system_content},
                                 {"role": "user", "content": prompt},
                             ]
-                            topic_start_at = _v_home_get_current_topic_start(user_id, project_id) if is_v_home else None
-                            threading.Thread(
-                                target=_run_chat_response_background,
-                                kwargs={
-                                    "messages": messages,
-                                    "project_id": project_id,
-                                    "user_id": user_id,
-                                    "prompt": prompt,
-                                    "now_timestamp": now_timestamp,
-                                    "intent": intent,
-                                    "is_v_home": is_v_home,
-                                    "topic_start_at": topic_start_at,
-                                    "model_key": st.session_state.get("selected_model", Config.DEFAULT_MODEL),
-                                    "temperature": st.session_state.get("temperature", 0.7),
-                                    "max_tokens": active_persona.get("max_tokens", 4000),
-                                    "persona_role": active_persona.get("role", ""),
-                                    "allow_data_changing": st.session_state.get("allow_data_changing_actions", False),
-                                },
-                                daemon=True,
-                            ).start()
-                            st.info("⏳ **Đang trả lời trong nền.** Bạn có thể đổi tab; quay lại tab Chat sẽ thấy câu trả lời.")
-                            if from_main_form:
-                                _chat_input_key = f"chat_input_field_{'v_home' if is_v_home else 'v_work'}"
-                                if _chat_input_key in st.session_state:
-                                    del st.session_state[_chat_input_key]
-                            st.rerun()
+                            model = st.session_state.get("selected_model", Config.DEFAULT_MODEL)
+                            run_temperature = st.session_state.get("temperature", 0.7)
+                            max_tokens = active_persona.get("max_tokens", 4000)
+                            full_response_text = ""
+                            with st.chat_message("assistant", avatar=active_persona["icon"]):
+                                if debug_notes:
+                                    st.caption(f"🧠 {', '.join(debug_notes)}")
+                                placeholder = st.empty()
+                                try:
+                                    response = AIService.call_openrouter(
+                                        messages=messages,
+                                        model=model,
+                                        temperature=run_temperature,
+                                        max_tokens=max_tokens,
+                                        stream=True,
+                                    )
+                                    for chunk in response:
+                                        if chunk.choices and chunk.choices[0].delta.content is not None:
+                                            full_response_text += chunk.choices[0].delta.content
+                                            placeholder.markdown(full_response_text + "▌")
+                                    placeholder.markdown(full_response_text or "(Không có nội dung.)")
+                                except Exception as e:
+                                    full_response_text = f"(Lỗi: {e})"
+                                    placeholder.markdown(full_response_text)
+                            if st.session_state.get("enable_history", True):
+                                try:
+                                    if is_v_home:
+                                        topic_start_at = _v_home_get_current_topic_start(user_id, project_id)
+                                        _v_home_save_message(user_id, project_id, "model", full_response_text, topic_start_at)
+                                    else:
+                                        services = init_services()
+                                        if services:
+                                            services["supabase"].table("chat_history").insert({
+                                                "story_id": project_id,
+                                                "user_id": str(user_id) if user_id else None,
+                                                "role": "model",
+                                                "content": full_response_text,
+                                                "created_at": now_timestamp,
+                                                "metadata": {"intent": intent},
+                                            }).execute()
+                                            _after_save_history_v_work(project_id, user_id, active_persona.get("role", ""), st.session_state.get("allow_data_changing_actions", False))
+                                except Exception:
+                                    pass
                     elif intent == "update_data" and not is_v_home and can_write:
                         ch_range = router_out.get("chapter_range")
                         op_target = (router_out.get("data_operation_target") or "").strip()
@@ -1436,6 +1457,19 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
                         except Exception as e:
                             st.error(f"Generation error: {str(e)}")
 
+            # V8.9: Câu mới nhất ở trên — vẽ lịch sử bên dưới sau khi đã vẽ cặp (user, model) mới
+            if not is_v_home and visible_msgs:
+                st.divider()
+                for user_msg, model_msg in _pair_messages_newest_first(visible_msgs):
+                    with st.chat_message("user"):
+                        st.markdown(user_msg.get("content", ""))
+                    if model_msg:
+                        with st.chat_message("model", avatar=active_persona["icon"]):
+                            st.markdown(model_msg.get("content", ""))
+                            if model_msg.get("metadata"):
+                                with st.expander("📊 Details"):
+                                    st.json(model_msg["metadata"], expanded=False)
+
             # Xóa nội dung ô chat sau khi đã gửi (chỉ khi gửi từ form chính)
             if from_main_form:
                 _chat_input_key = f"chat_input_field_{'v_home' if is_v_home else 'v_work'}"
@@ -1463,24 +1497,26 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
             col_a, col_b = st.columns(2)
             with col_a:
                 if st.button("✅ Thêm vào Semantic", key="chat_semantic_add_btn_dialog"):
-                    if not st.session_state.get("allow_data_changing_actions", False):
-                        st.warning("Bật toggle **Cho phép thao tác ảnh hưởng dữ liệu** (sidebar V Work) để thêm vào Semantic Intent.")
-                    else:
-                        try:
-                            svc = init_services()
-                            if svc:
-                                sb = svc["supabase"]
-                                ctx = px.get("context", "") or ""
-                                resp = px.get("response", "") or ""
-                                related_data = (ctx.rstrip() + "\n\n--- Câu trả lời ---\n" + resp) if ctx else resp
-                                payload = {"story_id": project_id, "question_sample": px.get("prompt", ""), "intent": "chat_casual", "related_data": related_data}
-                                sb.table("semantic_intent").insert(payload).execute()
-                        except Exception:
-                            pass
-                        st.session_state.pop("pending_semantic_add", None)
-                        st.session_state.pop("show_semantic_dialog", None)
-                        st.toast("Đã thêm vào Semantic Intent.")
-                        st.rerun()
+                    try:
+                        svc = init_services()
+                        if svc:
+                            sb = svc["supabase"]
+                            ctx = px.get("context", "") or ""
+                            resp = px.get("response", "") or ""
+                            related_data = (ctx.rstrip() + "\n\n--- Câu trả lời ---\n" + resp) if ctx else resp
+                            payload = {
+                                "story_id": project_id,
+                                "question_sample": px.get("prompt", ""),
+                                "intent": "chat_casual",
+                                "related_data": related_data,
+                            }
+                            sb.table("semantic_intent").insert(payload).execute()
+                    except Exception:
+                        pass
+                    st.session_state.pop("pending_semantic_add", None)
+                    st.session_state.pop("show_semantic_dialog", None)
+                    st.toast("Đã thêm vào Semantic Intent.")
+                    st.rerun()
             with col_b:
                 if st.button("❌ Bỏ qua", key="chat_semantic_skip_btn_dialog"):
                     st.session_state.pop("pending_semantic_add", None)
@@ -1509,25 +1545,19 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
                 col_ok, col_no = st.columns(2)
                 with col_ok:
                     if st.button("✅ Xác nhận thực hiện", key=f"update_confirm_ok_{chat_mode}"):
-                        if not st.session_state.get("allow_data_changing_actions", False):
-                            st.warning("Bật toggle **Cho phép thao tác ảnh hưởng dữ liệu** (sidebar V Work) để ghi vào Bible.")
-                        else:
-                            try:
-                                services = init_services()
-                                supabase = services["supabase"]
-                                content_to_save = (pu.get("response", "") or pu.get("update_summary", "") or "").strip()
-                                if content_to_save:
-                                    payload = {
-                                        "story_id": project_id,
-                                        "entity_name": f"[RULE] {datetime.now().strftime('%Y%m%d_%H%M%S')}",
-                                        "description": content_to_save,
-                                        "source_chapter": 0,
-                                    }
-                                    supabase.table("story_bible").insert(payload).execute()
-                                    st.toast("Đã ghi nhớ vào Bible. Bấm **Đồng bộ vector (Bible)** trong tab Bible để tạo embedding.")
-                                del st.session_state["pending_update_confirm"]
-                            except Exception as e:
-                                st.error(f"Lỗi khi ghi: {e}")
+                        try:
+                            services = init_services()
+                            supabase = services["supabase"]
+                            content_to_save = (pu.get("response", "") or pu.get("update_summary", "") or "").strip()
+                            if content_to_save:
+                                payload = {"scope": "project", "story_id": project_id, "content": content_to_save}
+                                supabase.table("project_rules").insert(payload).execute()
+                                from utils.cache_helpers import invalidate_cache
+                                invalidate_cache()
+                                st.toast("Đã ghi nhớ luật (cấp project).")
+                            del st.session_state["pending_update_confirm"]
+                        except Exception as e:
+                            st.error(f"Lỗi khi ghi: {e}")
                 with col_no:
                     if st.button("❌ Hủy", key=f"update_confirm_no_{chat_mode}"):
                         del st.session_state["pending_update_confirm"]
@@ -1542,20 +1572,15 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
 
     _extract_rules_on = st.session_state.get("extract_rules_from_chat", False)
     _has_pending_rules = 'pending_new_rules' in st.session_state and isinstance(st.session_state.get('pending_new_rules'), list) and len(st.session_state.get('pending_new_rules', [])) > 0
-    _use_dialog = callable(getattr(st, "dialog", None))
     if not is_v_home and can_write and _extract_rules_on and _has_pending_rules:
         pending_list = st.session_state['pending_new_rules']
 
         def _rules_confirmation_dialog(pid, mode):
             pl = st.session_state.get('pending_new_rules') or []
             if not pl:
-                st.caption("Đã xử lý hết.")
-                if "show_rules_dialog" in st.session_state:
-                    del st.session_state["show_rules_dialog"]
-                if st.button("Đóng"):
-                    st.rerun()
+                st.caption("Đã xử lý hết luật mới từ chat.")
                 return
-            st.caption("Luật lưu vào **Knowledge > Bible** (prefix [RULE]). Xác nhận từng luật hoặc tất cả.")
+            st.caption("Luật trích xuất từ chat. Xác nhận từng luật hoặc tất cả. Luật được lưu vào **Knowledge > Rules** (scope project).")
             for i, item in enumerate(pl):
                 rule_content = item.get("content") or ""
                 analysis = item.get("analysis")
@@ -1585,24 +1610,24 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
                             supabase = services.get("supabase") if services else None
                             if supabase:
                                 try:
-                                    supabase.table("story_bible").insert({
-                                        "story_id": pid, "entity_name": f"[RULE] {datetime.now().strftime('%Y%m%d_%H%M%S')}", "description": final_content, "source_chapter": 0
+                                    supabase.table("project_rules").insert({
+                                        "scope": "project", "story_id": pid, "content": final_content
                                     }).execute()
-                                    st.toast("Đã lưu luật. Bấm **Đồng bộ vector (Bible)** trong tab Bible để tạo embedding.")
+                                    from utils.cache_helpers import invalidate_cache
+                                    invalidate_cache()
+                                    st.toast("Đã lưu luật (cấp project).")
                                 except Exception as e:
                                     st.error(str(e))
                             pl.pop(i)
                             if not pl:
                                 st.session_state.pop('pending_new_rules', None)
-                                st.session_state.pop("show_rules_dialog", None)
-                            st.rerun()
+                            st.experimental_rerun()
                     with col_b:
                         if st.button("❌ Bỏ qua", key=f"rule_ignore_one_{rule_key}"):
                             pl.pop(i)
                             if not pl:
                                 st.session_state.pop('pending_new_rules', None)
-                                st.session_state.pop("show_rules_dialog", None)
-                            st.rerun()
+                            st.experimental_rerun()
                     st.divider()
             if pl:
                 col_all_a, col_all_b = st.columns(2)
@@ -1616,30 +1641,21 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
                             fc = (an.get('merged_content') if an and an.get('status') == "MERGE" else rc) or rc
                             if supabase:
                                 try:
-                                    supabase.table("story_bible").insert({
-                                        "story_id": pid, "entity_name": f"[RULE] {datetime.now().strftime('%Y%m%d_%H%M%S')}",
-                                        "description": fc, "source_chapter": 0
+                                    supabase.table("project_rules").insert({
+                                        "scope": "project", "story_id": pid, "content": fc
                                     }).execute()
                                 except Exception:
                                     pass
-                        st.toast("Đã lưu tất cả luật.")
+                        from utils.cache_helpers import invalidate_cache
+                        invalidate_cache()
+                        st.toast("Đã lưu tất cả luật (cấp project).")
                         st.session_state.pop('pending_new_rules', None)
-                        st.session_state.pop("show_rules_dialog", None)
-                        st.rerun()
+                        st.experimental_rerun()
                 with col_all_b:
                     if st.button("❌ Bỏ qua tất cả", key=f"rule_ignore_all_{mode}"):
                         st.session_state.pop('pending_new_rules', None)
-                        st.session_state.pop("show_rules_dialog", None)
-                        st.rerun()
+                        st.experimental_rerun()
 
         n = len(pending_list)
-        if st.button(f"🧐 **{n} luật mới** cần xác nhận — Bấm để xem", key="open_rules_dialog_btn"):
-            st.session_state["show_rules_dialog"] = True
-            st.rerun()
-        if st.session_state.get("show_rules_dialog"):
-            if _use_dialog:
-                _dialog_fn = st.dialog("🧐 Luật mới từ chat")(_rules_confirmation_dialog)
-                _dialog_fn(project_id, chat_mode)
-            else:
-                with st.expander("🧐 Luật mới từ chat", expanded=True):
-                    _rules_confirmation_dialog(project_id, chat_mode)
+        with st.expander(f"🧐 Luật mới từ chat ({n})", expanded=True):
+            _rules_confirmation_dialog(project_id, chat_mode)
