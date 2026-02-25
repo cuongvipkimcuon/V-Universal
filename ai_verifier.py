@@ -6,7 +6,7 @@ from typing import Dict, List, Tuple, Any, Callable, Optional
 MAX_RETRIES = 2
 
 # Intent không cần verify (không sinh fact từ context)
-INTENTS_SKIP_VERIFY = {"ask_user_clarification", "update_data", "chat_casual"}
+INTENTS_SKIP_VERIFY = {"ask_user_clarification", "unified", "chat_casual"}
 
 # Intent verify số (so với Python executor)
 INTENTS_VERIFY_NUMERICAL = {"numerical_calculation"}
@@ -133,7 +133,7 @@ def verify_output(
 ) -> Tuple[bool, str]:
     """
     Kiểm tra response theo từng loại intent trong plan.
-    - ask_user_clarification, update_data, chat_casual: không verify.
+    - ask_user_clarification, unified, chat_casual: không verify.
     - numerical_calculation: so sánh số với executor (1%).
     - manage_timeline: độ dài và timeline có trong context.
     - search_context, query_Sql: grounding (LLM judge).

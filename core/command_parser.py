@@ -35,10 +35,10 @@ BUILTIN_TRIGGERS = {
     "suggest_v7": "suggest_v7",
 }
 
-# command_key -> (intent, data_operation_type, data_operation_target) cho update_data
+# command_key -> (intent, data_operation_type, data_operation_target) cho unified
 COMMAND_TO_ROUTER = {
-    "unified": ("update_data", "extract", "unified"),
-    "data_analyze": ("update_data", "extract", "unified"),
+    "unified": ("unified", "extract", "unified"),
+    "data_analyze": ("unified", "extract", "unified"),
     "summarize_chapter": ("search_context", None, None),
     "read_chapter": ("search_context", None, None),
     "search_bible": ("search_context", None, None),
@@ -47,7 +47,7 @@ COMMAND_TO_ROUTER = {
     "mixed_context": ("search_context", None, None),
     "numerical_calculation": ("numerical_calculation", None, None),
     "web_search": ("web_search", None, None),
-    "remember_rule": ("update_data", "remember_rule", "rule"),
+    "remember_rule": ("chat_casual", None, None),
     "query_sql": ("query_Sql", None, None),
     "list_chapters": ("search_context", None, None),
     "suggest_v7": ("suggest_v7", None, None),
@@ -193,12 +193,10 @@ def _build_router_out(
         else:
             out["context_needs"] = ["chapter"]
             out["context_priority"] = ["chapter"]
-    if intent == "update_data":
+    if intent == "unified":
         t = COMMAND_TO_ROUTER.get(command_key, (None, None, None))
         out["data_operation_type"] = t[1] or "extract"
         out["data_operation_target"] = t[2] or "unified"
-        if command_key == "remember_rule":
-            out["update_summary"] = update_summary or query_text
         if command_key in ("data_analyze", "unified"):
             out["data_operation_type"] = "extract"
             out["data_operation_target"] = "unified"

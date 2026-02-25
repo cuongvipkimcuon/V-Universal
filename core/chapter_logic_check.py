@@ -79,7 +79,7 @@ def build_logic_context_for_chapter(
             else:
                 parts.append("[TIMELINE] Chưa có dữ liệu sự kiện.")
 
-        # 2) Bible + 3) Rule + 4) Chat crystallize
+        # 2) Bible + 3) Rule + 4) Chat crystallize (V8.9: project_rules + chat_crystallize_entries + legacy story_bible)
         if "bible" in want or "rule" in want or "chat_crystallize" in want:
             bible_entries = _get_bible_for_logic(project_id, include_archived=include_archived)
             bible_lines = []
@@ -101,6 +101,77 @@ def build_logic_context_for_chapter(
                 else:
                     if "bible" in want:
                         bible_lines.append(f"  • {name}: {desc}")
+            if "rule" in want:
+                try:
+                    # global (chỉ rule đã approve)
+                    r = (
+                        supabase.table("project_rules")
+                        .select("content, scope")
+                        .eq("scope", "global")
+                        .is_("story_id", "null")
+                        .eq("approve", True)
+                        .order("created_at", desc=True)
+                        .limit(100)
+                        .execute()
+                    )
+                    for row in (r.data or []):
+                        c = (row.get("content") or "").strip()
+                        if len(c) > 800:
+                            c = c[:797] + "..."
+                        if c:
+                            rule_lines.append(f"  • [RULE] (global): {c}")
+                    # project (chỉ rule đã approve)
+                    if project_id:
+                        r = (
+                            supabase.table("project_rules")
+                            .select("content, scope")
+                            .eq("scope", "project")
+                            .eq("story_id", project_id)
+                            .eq("approve", True)
+                            .order("created_at", desc=True)
+                            .limit(100)
+                            .execute()
+                        )
+                        for row in (r.data or []):
+                            c = (row.get("content") or "").strip()
+                            if len(c) > 800:
+                                c = c[:797] + "..."
+                            if c:
+                                rule_lines.append(f"  • [RULE] (project): {c}")
+                    # arc (chỉ rule đã approve)
+                    if project_id and arc_id:
+                        r = (
+                            supabase.table("project_rules")
+                            .select("content, scope")
+                            .eq("scope", "arc")
+                            .eq("story_id", project_id)
+                            .eq("arc_id", arc_id)
+                            .eq("approve", True)
+                            .order("created_at", desc=True)
+                            .limit(100)
+                            .execute()
+                        )
+                        for row in (r.data or []):
+                            c = (row.get("content") or "").strip()
+                            if len(c) > 800:
+                                c = c[:797] + "..."
+                            if c:
+                                rule_lines.append(f"  • [RULE] (arc): {c}")
+                except Exception:
+                    pass
+            if "chat_crystallize" in want:
+                try:
+                    q = supabase.table("chat_crystallize_entries").select("title, description").eq("scope", "project").eq("story_id", project_id)
+                    r = q.order("created_at", desc=True).limit(50).execute()
+                    for row in (r.data or []):
+                        title = (row.get("title") or "").strip()
+                        desc = (row.get("description") or "").strip()
+                        if len(desc) > 800:
+                            desc = desc[:797] + "..."
+                        if title or desc:
+                            chat_lines.append(f"  • {title}: {desc}")
+                except Exception:
+                    pass
 
             if bible_lines:
                 parts.append("[BIBLE - Nhân vật / khái niệm]\n" + "\n".join(bible_lines))

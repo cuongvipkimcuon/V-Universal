@@ -259,6 +259,7 @@ def get_project_overview(project_id: str, bible_max_tokens: int = 2000) -> Dict[
     out = {
         "project_name": "",
         "arcs_summary": "(Trống)",
+        "arc_chapters_summary": "(Trống)",
         "chapter_list_str": "(Trống)",
         "bible_index": "",
         "relation_summary": "0 quan hệ",
@@ -277,14 +278,24 @@ def get_project_overview(project_id: str, bible_max_tokens: int = 2000) -> Dict[
         if r.data and len(r.data) > 0:
             row = r.data[0]
             out["project_name"] = (row.get("name") or row.get("title") or "").strip() or "(Không tên)"
-        # Arcs
-        ar = supabase.table("arcs").select("name, title, sort_order").eq("story_id", project_id).order("sort_order").execute()
+        # Arcs + chương thuộc từng arc (để prompt khoanh vùng khi user hỏi về arc)
+        ar = supabase.table("arcs").select("id, name, sort_order").eq("story_id", project_id).order("sort_order").execute()
         if ar.data:
-            parts = []
+            arc_names = []
+            arc_chapters_parts = []
             for a in ar.data:
                 name = (a.get("name") or a.get("title") or "").strip() or "Arc"
-                parts.append(name)
-            out["arcs_summary"] = ", ".join(parts) if parts else "(Trống)"
+                arc_names.append(name)
+                arc_id = a.get("id")
+                if arc_id:
+                    try:
+                        ch = supabase.table("chapters").select("chapter_number").eq("story_id", project_id).eq("arc_id", arc_id).order("chapter_number").execute()
+                        nums = [str(row.get("chapter_number")) for row in (ch.data or []) if row.get("chapter_number") is not None]
+                        arc_chapters_parts.append(f"{name}: chương {', '.join(nums)}" if nums else f"{name}: (chưa gán chương)")
+                    except Exception:
+                        arc_chapters_parts.append(f"{name}: (lỗi truy vấn)")
+            out["arcs_summary"] = ", ".join(arc_names) if arc_names else "(Trống)"
+            out["arc_chapters_summary"] = ". ".join(arc_chapters_parts) if arc_chapters_parts else "(Trống)"
         # Chapters & Bible (dùng hàm có sẵn)
         out["chapter_list_str"] = get_chapter_list_for_router(project_id)
         out["bible_index"] = get_bible_index(project_id, max_tokens=bible_max_tokens)

@@ -275,11 +275,10 @@ class SessionManager:
         self.cookie_manager = stx.CookieManager(key="v_universe_cookies")
 
     def initialize_session(self):
-        """Khởi tạo session state"""
+        """Khởi tạo session state. V8.9: Không ghi đè 'user' nếu đã có (tránh F5 mất đăng nhập sau khi restore từ cookie)."""
         if 'initialized' not in st.session_state:
-            st.session_state.update({
+            defaults = {
                 'initialized': True,
-                'user': None,
                 'current_project': None,
                 'project_id': None,
                 'chat_messages': [],
@@ -300,16 +299,21 @@ class SessionManager:
                 'rule_analysis': None,
                 'edit_rule_manual': None,
                 'current_arc_id': None,
-            })
+            }
+            for k, v in defaults.items():
+                if k not in st.session_state:
+                    st.session_state[k] = v
+            if 'user' not in st.session_state:
+                st.session_state['user'] = None
 
     def check_login(self):
-        """Kiểm tra và quản lý đăng nhập"""
-        self.initialize_session()
-
+        """Kiểm tra và quản lý đăng nhập. V8.9: Ưu tiên khôi phục từ cookie trước khi init session để tránh F5 mất đăng nhập."""
         if st.session_state.get('logging_out'):
+            self.initialize_session()
             return False
 
         if 'user' in st.session_state and st.session_state.user:
+            self.initialize_session()
             return True
 
         access_token = self.cookie_manager.get("supabase_access_token")
@@ -322,11 +326,27 @@ class SessionManager:
                     session = services['supabase'].auth.set_session(access_token, refresh_token)
                     if session and session.user:
                         st.session_state.user = session.user
+                        self.initialize_session()
+                        return True
             except Exception:
+                try:
+                    # Thử refresh token khi access_token hết hạn
+                    if refresh_token:
+                        services2 = init_services()
+                        if services2:
+                            session = services2['supabase'].auth.refresh_session(refresh_token)
+                            if session and session.user:
+                                st.session_state.user = session.user
+                                self.cookie_manager.set("supabase_access_token", session.session.access_token, key="refresh_access")
+                                self.cookie_manager.set("supabase_refresh_token", session.session.refresh_token, key="refresh_refresh")
+                                self.initialize_session()
+                                return True
+                except Exception:
+                    pass
                 self.cookie_manager.delete("supabase_access_token", key="del_access_check_login")
                 self.cookie_manager.delete("supabase_refresh_token", key="del_refresh_check_login")
-                return False
 
+        self.initialize_session()
         return False
 
     def render_login_form(self):

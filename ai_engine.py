@@ -16,6 +16,7 @@ from ai.context_helpers import (
     get_entity_relations as _get_entity_relations,
     get_top_relations_by_query,
     get_top_timeline_by_query,
+    filter_context_items_by_embedding,
 )
 from ai.hybrid_search import HybridSearch, check_semantic_intent, search_chunks_vector
 from ai.query_sql import VALID_QUERY_TARGETS, build_query_sql_context, infer_query_target
@@ -93,7 +94,7 @@ def _intent_handle_llm_casual(router_result: Dict, ctx: Dict) -> None:
 
 
 def _intent_handle_data_operation(router_result: Dict, ctx: Dict) -> None:
-    """Handler: data_operation — update_data."""
+    """Handler: data_operation — unified."""
     op_type = router_result.get("data_operation_type") or ""
     op_target = router_result.get("data_operation_target") or ""
     if op_target in ("bible", "relation", "timeline", "chunking"):
@@ -251,6 +252,7 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
             raw_list = HybridSearch.smart_search_hybrid_raw(
                 entity, project_id, top_k=7, inferred_prefixes=inferred_prefixes
             )
+            raw_list = filter_context_items_by_embedding(raw_list)
             if range_bounds_bible:
                 raw_list = _filter_bible_by_chapter_range(raw_list, range_bounds_bible, max_items=10)
             if raw_list:
@@ -277,6 +279,7 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
                 top_k=10,
                 inferred_prefixes=inferred_prefixes,
             )
+            raw_list = filter_context_items_by_embedding(raw_list)
             if range_bounds_bible:
                 raw_list = _filter_bible_by_chapter_range(raw_list, range_bounds_bible, max_items=12)
             if raw_list:
@@ -332,6 +335,7 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
             chapter_range=range_bounds_bible,
             arc_id=current_arc_id,
         )
+        events = filter_context_items_by_embedding(events)
         if events:
             lines = ["[TIMELINE EVENTS - Thứ tự sự kiện / mốc thời gian]"]
             for e in events:
@@ -369,6 +373,7 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
         chunk_rows = search_chunks_vector(query_for_chunk, project_id, arc_id=current_arc_id, top_k=20)
         if not chunk_rows and current_arc_id:
             chunk_rows = search_chunks_vector(query_for_chunk, project_id, arc_id=None, top_k=20)
+        chunk_rows = filter_context_items_by_embedding(chunk_rows)
         if chunk_rows and ReverseLookupAssembler:
             chunk_ids = [str(c.get("id")) for c in chunk_rows if c.get("id")]
             if chunk_ids:
@@ -619,6 +624,38 @@ class ContextManager:
         return _get_mandatory_rules(project_id)
 
     @staticmethod
+    def get_rules_block_by_type(project_id: str, arc_id: Optional[str], types: List[str]) -> str:
+        """Wrapper: lấy block rule theo type (Style/Method/Info/Unknown)."""
+        try:
+            from ai.context_helpers import get_rules_by_type_block
+
+            return get_rules_by_type_block(project_id, arc_id, types)
+        except Exception:
+            return ""
+
+    @staticmethod
+    def get_relevant_info_rules(
+        project_id: str,
+        user_prompt: str,
+        arc_id: Optional[str] = None,
+        threshold: float = 0.75,
+        candidate_block: Optional[str] = None,
+    ) -> str:
+        """Wrapper: lấy Info Rules (type='Info') có similarity >= threshold với câu hỏi hiện tại, ưu tiên trong candidate_block nếu có."""
+        try:
+            from ai.context_helpers import get_relevant_info_rules as _get_relevant_info_rules
+
+            return _get_relevant_info_rules(
+                project_id,
+                user_prompt,
+                arc_id=arc_id,
+                threshold=threshold,
+                candidate_rules_block=candidate_block,
+            )
+        except Exception:
+            return ""
+
+    @staticmethod
     def build_context(
         router_result: Dict,
         project_id: str,
@@ -669,17 +706,32 @@ class ContextManager:
             context_parts.append(strict_text)
             total_tokens += AIService.estimate_tokens(strict_text)
 
-        # Bước 3: Dùng luật đã lọc từ bước 2 (included_rules_text) nếu có; không thì lấy toàn bộ mandatory rules
-        included_rules = (router_result.get("included_rules_text") or "").strip()
-        if included_rules:
-            rules_text = "\n🔥 --- MANDATORY RULES (đã lọc liên quan) ---\n" + included_rules + "\n"
+        # Bước 3: Rules theo type
+        # - Style: luôn bơm vào context cuối (ảnh hưởng phong cách/thoại).
+        # - Unknown: bơm nguyên văn (chưa phân loại).
+        # - Info: lọc bằng vector (similarity >= 0.75 với câu hỏi) rồi mới bơm.
+        # - Method: chỉ dùng ở bước 1 intent, không bơm vào context cuối.
+        style_block = ContextManager.get_rules_block_by_type(project_id, current_arc_id, ["Style"])
+        if style_block:
+            rules_text = "\n🔥 --- STYLE RULES ---\n" + style_block + "\n"
             context_parts.append(rules_text)
             total_tokens += AIService.estimate_tokens(rules_text)
-        else:
-            rules_text = ContextManager.get_mandatory_rules(project_id)
-            if rules_text:
-                context_parts.append(rules_text)
-                total_tokens += AIService.estimate_tokens(rules_text)
+        unknown_block = ContextManager.get_rules_block_by_type(project_id, current_arc_id, ["Unknown"])
+        if unknown_block:
+            rules_text = "\n🔥 --- PROJECT RULES ---\n" + unknown_block + "\n"
+            context_parts.append(rules_text)
+            total_tokens += AIService.estimate_tokens(rules_text)
+        info_block = ContextManager.get_relevant_info_rules(
+            project_id,
+            router_result.get("rewritten_query") or router_result.get("reason") or "",
+            arc_id=current_arc_id,
+            threshold=0.75,
+            candidate_block=(router_result.get("included_rules_text") or router_result.get("relevant_rules") or ""),
+        )
+        if info_block:
+            rules_text = "\n🔥 --- INFO RULES (gần với câu hỏi) ---\n" + info_block + "\n"
+            context_parts.append(rules_text)
+            total_tokens += AIService.estimate_tokens(rules_text)
 
         intent = router_result.get("intent", "chat_casual")
         target_files = router_result.get("target_files", [])

@@ -28,7 +28,7 @@ def get_chapters_cached(project_id: str, update_trigger: int = 0):
 
 @st.cache_data(ttl=300)
 def get_bible_list_cached(project_id: str, update_trigger: int = 0):
-    """Toàn bộ story_bible cho project (để list/filter). update_trigger thay đổi -> cache miss."""
+    """Toàn bộ story_bible cho project (để list/filter). Không gồm [RULE]/[CHAT] — dùng get_rules_list_cached/get_chat_crystallize_*. update_trigger thay đổi -> cache miss."""
     if not project_id:
         return []
     try:
@@ -44,7 +44,147 @@ def get_bible_list_cached(project_id: str, update_trigger: int = 0):
             .order("created_at", desc=True)
             .execute()
         )
-        return list(r.data) if r.data else []
+        data = list(r.data) if r.data else []
+        # V8.9: Loại [RULE] và [CHAT] — đã chuyển sang bảng riêng
+        data = [e for e in data if not (e.get("entity_name") or "").strip().startswith("[RULE]") and not (e.get("entity_name") or "").strip().startswith("[CHAT]")]
+        return data
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=300)
+def get_rules_list_cached(project_id: str, update_trigger: int = 0):
+    """Danh sách rules cho project: từ project_rules (scope global + project + arc).
+    Mỗi item: id, scope, content/description, entity_name (label), created_at, approve, source.
+    """
+    out = []
+    try:
+        from config import init_services
+        services = init_services()
+        if not services:
+            return []
+        supabase = services["supabase"]
+        # V8.9+: project_rules — global (story_id NULL) + project/arc (story_id = project_id); UI cần thấy cả đã duyệt và chưa duyệt
+        try:
+            r_global = supabase.table("project_rules").select("*").eq("scope", "global").order("created_at", desc=True).execute()
+            for row in (r_global.data or []):
+                out.append({
+                    "id": row.get("id"),
+                    "scope": "global",
+                    "content": row.get("content", ""),
+                    "description": row.get("content", ""),
+                    "entity_name": f"[RULE] (global) {row.get('content', '')[:50]}",
+                    "created_at": row.get("created_at"),
+                    "approve": row.get("approve", True),
+                    "source": "project_rules",
+                })
+        except Exception:
+            pass
+        if project_id:
+            # Project-level rules
+            try:
+                r_proj = (
+                    supabase.table("project_rules")
+                    .select("*")
+                    .eq("scope", "project")
+                    .eq("story_id", project_id)
+                    .order("created_at", desc=True)
+                    .execute()
+                )
+                for row in (r_proj.data or []):
+                    out.append({
+                        "id": row.get("id"),
+                        "scope": "project",
+                        "content": row.get("content", ""),
+                        "description": row.get("content", ""),
+                        "entity_name": f"[RULE] {row.get('content', '')[:50]}",
+                        "created_at": row.get("created_at"),
+                        "approve": row.get("approve", True),
+                        "source": "project_rules",
+                    })
+            except Exception:
+                pass
+
+            # V9.3+: rules cấp ARC (scope = 'arc' + story_id, map nhiều arc qua project_rule_arcs)
+            try:
+                r_arc_rules = (
+                    supabase.table("project_rules")
+                    .select("*")
+                    .eq("scope", "arc")
+                    .eq("story_id", project_id)
+                    .order("created_at", desc=True)
+                    .execute()
+                )
+                arc_rules = list(r_arc_rules.data or [])
+                if arc_rules:
+                    # Lấy map rule_id -> danh sách arc_id từ project_rule_arcs
+                    rule_ids = [row.get("id") for row in arc_rules if row.get("id")]
+                    arc_map = {}
+                    if rule_ids:
+                        try:
+                            m = (
+                                supabase.table("project_rule_arcs")
+                                .select("rule_id, arc_id")
+                                .in_("rule_id", rule_ids)
+                                .execute()
+                            )
+                            for r in (m.data or []):
+                                rid = r.get("rule_id")
+                                aid = r.get("arc_id")
+                                if not rid or not aid:
+                                    continue
+                                arc_map.setdefault(str(rid), set()).add(str(aid))
+                        except Exception:
+                            arc_map = {}
+
+                    # Lấy tên arc để hiển thị label đẹp hơn
+                    all_arc_ids = set()
+                    for s in arc_map.values():
+                        all_arc_ids.update(s)
+                    arc_name_map = {}
+                    if all_arc_ids:
+                        try:
+                            ar = (
+                                supabase.table("arcs")
+                                .select("id, name")
+                                .in_("id", list(all_arc_ids))
+                                .execute()
+                            )
+                            for row in (ar.data or []):
+                                arc_name_map[str(row.get("id"))] = (row.get("name") or "").strip() or "Arc"
+                        except Exception:
+                            arc_name_map = {}
+
+                    for row in arc_rules:
+                        rid = row.get("id")
+                        base_arc_id = row.get("arc_id")
+                        # Hợp nhất: arc_id cũ + map nhiều arc
+                        arc_ids = set()
+                        if base_arc_id:
+                            arc_ids.add(str(base_arc_id))
+                        arc_ids.update(arc_map.get(str(rid), set()))
+                        arc_ids_list = list(arc_ids)
+                        # Tên arc cho label
+                        arc_names = [arc_name_map.get(aid, "") for aid in arc_ids_list if arc_name_map.get(aid)]
+                        arc_label = ", ".join(arc_names) if arc_names else ""
+                        label_prefix = "[RULE][arc]"
+                        if arc_label:
+                            label_prefix = f"{label_prefix} ({arc_label})"
+                        out.append({
+                            "id": rid,
+                            "scope": "arc",
+                            "arc_ids": arc_ids_list,
+                            "content": row.get("content", ""),
+                            "description": row.get("content", ""),
+                            "entity_name": f"{label_prefix} {row.get('content', '')[:50]}",
+                            "created_at": row.get("created_at"),
+                            "approve": row.get("approve", True),
+                            "source": "project_rules",
+                        })
+            except Exception:
+                pass
+        out.sort(key=lambda x: (x.get("created_at") or ""), reverse=True)
+        return out
     except Exception:
         return []
 
@@ -129,13 +269,32 @@ def get_dashboard_metrics_cached(project_id: str, update_trigger: int = 0):
         supabase = services["supabase"]
         files = supabase.table("chapters").select("count", count="exact").eq("story_id", project_id).execute()
         bible = supabase.table("story_bible").select("count", count="exact").eq("story_id", project_id).execute()
-        rules = supabase.table("story_bible").select("count", count="exact").eq("story_id", project_id).ilike("entity_name", "%[RULE]%").execute()
+        # V9.2+: rule_count = project_rules đã approve (global + project)
+        rule_count = 0
+        try:
+            r_global = (
+                supabase.table("project_rules")
+                .select("id")
+                .eq("scope", "global")
+                .eq("approve", True)
+                .execute()
+            )
+            r_proj = (
+                supabase.table("project_rules")
+                .select("id")
+                .eq("scope", "project")
+                .eq("story_id", project_id)
+                .eq("approve", True)
+                .execute()
+            )
+            rule_count = len(r_global.data or []) + len(r_proj.data or [])
+        except Exception:
+            rule_count = 0
         chat = supabase.table("chat_history").select("count", count="exact").eq("story_id", project_id).execute()
         recent = supabase.table("chapters").select("title, updated_at").eq("story_id", project_id).order("updated_at", desc=True).limit(5).execute()
         bible_entities = supabase.table("story_bible").select("entity_name").eq("story_id", project_id).execute()
         file_count = files.count if hasattr(files, "count") else len(files.data or [])
         bible_count = bible.count if hasattr(bible, "count") else len(bible.data or [])
-        rule_count = rules.count if hasattr(rules, "count") else len(rules.data or [])
         chat_count = chat.count if hasattr(chat, "count") else len(chat.data or [])
         return {
             "file_count": file_count,

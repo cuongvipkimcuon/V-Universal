@@ -202,7 +202,13 @@ def check_semantic_intent(
         query_vec = AIService.get_embedding(query_text)
         if not query_vec:
             return None
-        rows = supabase.table("semantic_intent").select("id, question_sample, intent, related_data, embedding").eq("story_id", project_id).execute()
+        rows = (
+            supabase.table("semantic_intent")
+            .select("id, question_sample, intent, related_data, embedding")
+            .eq("story_id", project_id)
+            .eq("approve", True)
+            .execute()
+        )
         data = rows.data or []
         best_match = None
         best_sim = 0.0

@@ -1,8 +1,12 @@
 # core/global_data_sync.py - Kiểm tra và đồng bộ dữ liệu toàn cục (1-N, parent-child, orphan).
 """Chạy khi user bấm; thực thi trong background job. Tự xem → tự sửa → tự đồng bộ, không tự kích hoạt.
-Bible: cùng tên (chuẩn hóa) + cùng thực thể (embedding) → parent_id. Relation & chunk_bible_links đi theo Bible chuẩn (canonical)."""
+Bible, chunks, timeline, relation: đồng bộ theo tên (trùng tên / regex chuẩn hóa) hoặc pgvector (ngưỡng 97%) trong phạm vi 1 chương."""
+import re
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Set, Tuple
+
+# Ngưỡng similarity pgvector để coi là trùng (trong phạm vi 1 chương)
+SIM_THRESHOLD_CHAPTER = 0.90
 
 
 def _get_supabase():
@@ -36,6 +40,12 @@ def run_global_data_sync(
             "cbl_deduped": 0,
             "timeline_orphan": 0,
             "chunk_orphan": 0,
+            "chunk_parent_by_name_chapter": 0,
+            "chunk_parent_by_embedding_chapter": 0,
+            "timeline_parent_by_name_chapter": 0,
+            "timeline_parent_by_embedding_chapter": 0,
+            "relation_deduped_by_chapter": 0,
+            "relation_deduped_by_embedding_chapter": 0,
         },
         "fixed": {
             "chunk_bible_links_deleted": 0,
@@ -50,6 +60,12 @@ def run_global_data_sync(
             "chunk_bible_links_deduped": 0,
             "timeline_events_null_chapter": 0,
             "chunks_orphan_fixed": 0,
+            "chunk_parent_by_name_chapter": 0,
+            "chunk_parent_by_embedding_chapter": 0,
+            "timeline_parent_by_name_chapter": 0,
+            "timeline_parent_by_embedding_chapter": 0,
+            "relation_deduped_by_chapter": 0,
+            "relation_deduped_by_embedding_chapter": 0,
         },
     }
     supabase = _get_supabase()
@@ -124,6 +140,30 @@ def run_global_data_sync(
                 n = n[n.index("]") + 1 :].strip()
             return n or ""
 
+        # 5a) V8.9: Đồng bộ theo tên trong phạm vi 1 chương — gộp bản trùng trong cùng chương
+        by_chapter_norm: Dict[Tuple[Any, str], List[Dict]] = defaultdict(list)
+        for r in (bible_rows.data or []):
+            if not r.get("id"):
+                continue
+            norm = _norm_name(r.get("entity_name") or "")
+            if norm:
+                ch = r.get("source_chapter")
+                by_chapter_norm[(ch, norm)].append({"id": r["id"], "source_chapter": ch, "entity_name": r.get("entity_name")})
+        for (_ch, _norm), items in by_chapter_norm.items():
+            if len(items) < 2:
+                continue
+            # Trong cùng chương: parent = bản đầu (theo id hoặc thứ tự)
+            sorted_items = sorted(items, key=lambda x: str(x["id"]))
+            parent_id = sorted_items[0]["id"]
+            for item in sorted_items[1:]:
+                cur = bible_by_id.get(item["id"])
+                if cur and (cur.get("parent_id") or "") != parent_id:
+                    try:
+                        supabase.table("story_bible").update({"parent_id": parent_id}).eq("id", item["id"]).execute()
+                        result["fixed"]["bible_parent_id_updated"] += 1
+                    except Exception:
+                        pass
+
         by_norm: Dict[str, List[Dict]] = defaultdict(list)
         for r in (bible_rows.data or []):
             if not r.get("id"):
@@ -170,43 +210,171 @@ def run_global_data_sync(
                 emb = r.get("embedding")
                 if emb is not None and isinstance(emb, (list, tuple)) and len(emb) > 0 and isinstance(emb[0], (int, float)):
                     rows_with_emb.append({**r, "embedding": list(emb)})
-            # Sắp xếp theo source_chapter (None = 999)
+            # V8.9: Chỉ so embedding trong cùng 1 chương; ngưỡng 97%
             rows_with_emb.sort(key=lambda x: (x.get("source_chapter") is None, x.get("source_chapter") or 999))
-            SIM_THRESHOLD = 0.88
-            for i, row in enumerate(rows_with_emb):
-                if row.get("parent_id"):
-                    continue
-                ch_cur = row.get("source_chapter")
-                emb_cur = row.get("embedding")
-                if not emb_cur:
-                    continue
-                best_id, best_sim = None, SIM_THRESHOLD
-                for j in range(i):
-                    other = rows_with_emb[j]
-                    if other.get("source_chapter") is None and ch_cur is None:
+            by_ch = defaultdict(list)
+            for r in rows_with_emb:
+                ch = r.get("source_chapter")
+                by_ch[ch].append(r)
+            for _ch, group in by_ch.items():
+                group.sort(key=lambda x: str(x.get("id")))
+                for i, row in enumerate(group):
+                    if row.get("parent_id"):
                         continue
-                    if (other.get("source_chapter") or 999) >= (ch_cur or 999):
+                    emb_cur = row.get("embedding")
+                    if not emb_cur:
                         continue
-                    emb_oth = other.get("embedding")
-                    if not emb_oth:
-                        continue
-                    sim = _cosine(emb_cur, emb_oth)
-                    if sim > best_sim:
-                        best_sim = sim
-                        best_id = other["id"]
-                if best_id:
-                    try:
-                        supabase.table("story_bible").update({"parent_id": best_id}).eq("id", row["id"]).execute()
-                        result["report"]["bible_same_entity_by_embedding"] += 1
-                        result["fixed"]["bible_parent_id_by_embedding"] += 1
-                    except Exception:
-                        pass
+                    best_id, best_sim = None, SIM_THRESHOLD_CHAPTER
+                    for j in range(i):
+                        other = group[j]
+                        emb_oth = other.get("embedding")
+                        if not emb_oth:
+                            continue
+                        sim = _cosine(emb_cur, emb_oth)
+                        if sim >= best_sim:
+                            best_sim = sim
+                            best_id = other["id"]
+                    if best_id:
+                        try:
+                            supabase.table("story_bible").update({"parent_id": best_id}).eq("id", row["id"]).execute()
+                            result["report"]["bible_same_entity_by_embedding"] += 1
+                            result["fixed"]["bible_parent_id_by_embedding"] += 1
+                        except Exception:
+                            pass
         except Exception:
             pass
 
         # Reload bible sau khi đã set parent (name + embedding)
         bible_rows = supabase.table("story_bible").select("id, entity_name, source_chapter, parent_id").eq("story_id", project_id).execute()
         bible_by_id = {r["id"]: r for r in (bible_rows.data or []) if r.get("id")}
+
+        # --- 5c) Chunks: đồng bộ theo tên (trùng content chuẩn hóa) hoặc embedding 97% trong phạm vi 1 chương ---
+        def _norm_text(t: str, max_len: int = 300) -> str:
+            if not t or not isinstance(t, str):
+                return ""
+            s = re.sub(r"\s+", " ", (t[:max_len] or "").strip().lower())
+            return s.strip() or ""
+
+        try:
+            chunk_rows_full = supabase.table("chunks").select("id, chapter_id, content, raw_content, parent_chunk_id, embedding").eq("story_id", project_id).execute()
+            chunks_all = list(chunk_rows_full.data or [])
+            by_ch_norm: Dict[Tuple[Any, str], List[Dict]] = defaultdict(list)
+            for r in chunks_all:
+                if not r.get("id"):
+                    continue
+                ch = r.get("chapter_id")
+                norm = _norm_text(r.get("content") or r.get("raw_content", ""), 300)
+                if norm:
+                    by_ch_norm[(ch, norm)].append({"id": r["id"], "chapter_id": ch})
+            for (_ch, _n), items in by_ch_norm.items():
+                if len(items) < 2:
+                    continue
+                sorted_items = sorted(items, key=lambda x: str(x["id"]))
+                parent_id = sorted_items[0]["id"]
+                for item in sorted_items[1:]:
+                    try:
+                        supabase.table("chunks").update({"parent_chunk_id": parent_id}).eq("id", item["id"]).execute()
+                        result["report"]["chunk_parent_by_name_chapter"] += 1
+                        result["fixed"]["chunk_parent_by_name_chapter"] += 1
+                    except Exception:
+                        pass
+            # Chunks: embedding 97% trong cùng chapter_id
+            chunks_with_emb = []
+            for r in chunks_all:
+                emb = r.get("embedding")
+                if emb is not None and isinstance(emb, (list, tuple)) and len(emb) > 0 and isinstance(emb[0], (int, float)):
+                    chunks_with_emb.append({**r, "embedding": list(emb)})
+            by_chunk_ch: Dict[Any, List[Dict]] = defaultdict(list)
+            for r in chunks_with_emb:
+                by_chunk_ch[r.get("chapter_id")].append(r)
+            for _ch, group in by_chunk_ch.items():
+                group.sort(key=lambda x: str(x.get("id")))
+                for i, row in enumerate(group):
+                    if row.get("parent_chunk_id"):
+                        continue
+                    emb_cur = row.get("embedding")
+                    if not emb_cur:
+                        continue
+                    best_id, best_sim = None, SIM_THRESHOLD_CHAPTER
+                    for j in range(i):
+                        other = group[j]
+                        emb_oth = other.get("embedding")
+                        if not emb_oth:
+                            continue
+                        sim = _cosine(emb_cur, emb_oth)
+                        if sim >= best_sim:
+                            best_sim = sim
+                            best_id = other["id"]
+                    if best_id:
+                        try:
+                            supabase.table("chunks").update({"parent_chunk_id": best_id}).eq("id", row["id"]).execute()
+                            result["report"]["chunk_parent_by_embedding_chapter"] += 1
+                            result["fixed"]["chunk_parent_by_embedding_chapter"] += 1
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+        # --- 5d) Timeline_events: đồng bộ theo tên (trùng title chuẩn hóa) hoặc embedding 97% trong phạm vi 1 chương ---
+        try:
+            timeline_full = supabase.table("timeline_events").select("id, chapter_id, title, parent_event_id, embedding").eq("story_id", project_id).execute()
+            timeline_all = list(timeline_full.data or [])
+            by_te_ch_norm: Dict[Tuple[Any, str], List[Dict]] = defaultdict(list)
+            for r in timeline_all:
+                if not r.get("id"):
+                    continue
+                ch = r.get("chapter_id")
+                norm = _norm_text(r.get("title") or "", 200)
+                if norm:
+                    by_te_ch_norm[(ch, norm)].append({"id": r["id"], "chapter_id": ch})
+            for (_ch, _n), items in by_te_ch_norm.items():
+                if len(items) < 2:
+                    continue
+                sorted_items = sorted(items, key=lambda x: str(x["id"]))
+                parent_id = sorted_items[0]["id"]
+                for item in sorted_items[1:]:
+                    try:
+                        supabase.table("timeline_events").update({"parent_event_id": parent_id}).eq("id", item["id"]).execute()
+                        result["report"]["timeline_parent_by_name_chapter"] += 1
+                        result["fixed"]["timeline_parent_by_name_chapter"] += 1
+                    except Exception:
+                        pass
+            # Timeline: embedding 97% trong cùng chapter_id
+            te_with_emb = []
+            for r in timeline_all:
+                emb = r.get("embedding")
+                if emb is not None and isinstance(emb, (list, tuple)) and len(emb) > 0 and isinstance(emb[0], (int, float)):
+                    te_with_emb.append({**r, "embedding": list(emb)})
+            by_te_ch: Dict[Any, List[Dict]] = defaultdict(list)
+            for r in te_with_emb:
+                by_te_ch[r.get("chapter_id")].append(r)
+            for _ch, group in by_te_ch.items():
+                group.sort(key=lambda x: str(x.get("id")))
+                for i, row in enumerate(group):
+                    if row.get("parent_event_id"):
+                        continue
+                    emb_cur = row.get("embedding")
+                    if not emb_cur:
+                        continue
+                    best_id, best_sim = None, SIM_THRESHOLD_CHAPTER
+                    for j in range(i):
+                        other = group[j]
+                        emb_oth = other.get("embedding")
+                        if not emb_oth:
+                            continue
+                        sim = _cosine(emb_cur, emb_oth)
+                        if sim >= best_sim:
+                            best_sim = sim
+                            best_id = other["id"]
+                    if best_id:
+                        try:
+                            supabase.table("timeline_events").update({"parent_event_id": best_id}).eq("id", row["id"]).execute()
+                            result["report"]["timeline_parent_by_embedding_chapter"] += 1
+                            result["fixed"]["timeline_parent_by_embedding_chapter"] += 1
+                        except Exception:
+                            pass
+        except Exception:
+            pass
 
         # --- 6) entity_relations.source_chapter: nếu null, điền từ bible (source_entity_id hoặc target thuộc chương nào) ---
         try:
@@ -269,20 +437,63 @@ def run_global_data_sync(
                         result["fixed"]["entity_relations_normalized"] += 1
                     except Exception:
                         pass
-            # Dedupe: cùng (story_id, source_entity_id, target_entity_id, relation_type) giữ một
-            rels2 = supabase.table("entity_relations").select("id, source_entity_id, target_entity_id, relation_type").eq("story_id", project_id).execute()
-            key_to_id: Dict[Tuple[Any, Any, str], str] = {}
+            # Dedupe trong phạm vi 1 chương: cùng (source_chapter, source, target, relation_type) giữ một
+            rels2 = supabase.table("entity_relations").select("id, source_entity_id, target_entity_id, relation_type, source_chapter").eq("story_id", project_id).execute()
+            key_to_id: Dict[Tuple[Any, Any, Any, str], str] = {}
             for row in (rels2.data or []):
-                key = (row.get("source_entity_id"), row.get("target_entity_id"), (row.get("relation_type") or "").strip())
+                ch = row.get("source_chapter")
+                key = (ch, row.get("source_entity_id"), row.get("target_entity_id"), (row.get("relation_type") or "").strip())
                 if key not in key_to_id:
                     key_to_id[key] = row["id"]
                 else:
                     try:
                         supabase.table("entity_relations").delete().eq("id", row["id"]).execute()
                         result["report"]["relation_deduped"] += 1
+                        result["report"]["relation_deduped_by_chapter"] += 1
                         result["fixed"]["entity_relations_deduped"] += 1
+                        result["fixed"]["relation_deduped_by_chapter"] += 1
                     except Exception:
                         pass
+        except Exception:
+            pass
+
+        # --- 6e) entity_relations: trùng theo embedding 97% trong cùng source_chapter → giữ một, xóa bản còn lại ---
+        try:
+            rels_emb = supabase.table("entity_relations").select("id, source_chapter, embedding").eq("story_id", project_id).execute()
+            rels_with_emb = []
+            for r in (rels_emb.data or []):
+                emb = r.get("embedding")
+                if emb is not None and isinstance(emb, (list, tuple)) and len(emb) > 0 and isinstance(emb[0], (int, float)):
+                    rels_with_emb.append({**r, "embedding": list(emb)})
+            by_rel_ch: Dict[Any, List[Dict]] = defaultdict(list)
+            for r in rels_with_emb:
+                by_rel_ch[r.get("source_chapter")].append(r)
+            to_delete = []
+            for _ch, group in by_rel_ch.items():
+                group.sort(key=lambda x: str(x.get("id")))
+                for i, row in enumerate(group):
+                    if row["id"] in to_delete:
+                        continue
+                    emb_cur = row.get("embedding")
+                    if not emb_cur:
+                        continue
+                    for j in range(i):
+                        other = group[j]
+                        if other["id"] in to_delete:
+                            continue
+                        emb_oth = other.get("embedding")
+                        if not emb_oth:
+                            continue
+                        if _cosine(emb_cur, emb_oth) >= SIM_THRESHOLD_CHAPTER:
+                            to_delete.append(row["id"])
+                            result["report"]["relation_deduped_by_embedding_chapter"] += 1
+                            result["fixed"]["relation_deduped_by_embedding_chapter"] += 1
+                            break
+            for rid in to_delete:
+                try:
+                    supabase.table("entity_relations").delete().eq("id", rid).execute()
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -346,8 +557,11 @@ def run_global_data_sync(
             fxd = result["fixed"]
             summary = (
                 f"Dọn rác: {fxd['chunk_bible_links_deleted']} link bible, {fxd['chunk_timeline_links_deleted']} link timeline, {fxd['entity_relations_deleted']} relation. "
-                f"Bible: {fxd['bible_parent_id_updated']} parent (tên), {fxd['bible_parent_id_by_embedding']} parent (embedding). "
+                f"Bible: {fxd['bible_parent_id_updated']} parent (tên), {fxd['bible_parent_id_by_embedding']} parent (embed 97%). "
+                f"Chunk: {fxd['chunk_parent_by_name_chapter']} (tên), {fxd['chunk_parent_by_embedding_chapter']} (embed 97%). "
+                f"Timeline: {fxd['timeline_parent_by_name_chapter']} (tên), {fxd['timeline_parent_by_embedding_chapter']} (embed 97%). "
                 f"Relation: {fxd['entity_relations_normalized']} chuẩn hóa, {fxd['entity_relations_deduped']} gộp trùng; "
+                f"theo chương: {fxd['relation_deduped_by_chapter']} (tên), {fxd['relation_deduped_by_embedding_chapter']} (embed 97%). "
                 f"CBL: {fxd['chunk_bible_links_normalized']} chuẩn hóa, {fxd['chunk_bible_links_deduped']} gộp trùng; "
                 f"source_chapter: {fxd['entity_relations_source_chapter_updated']}."
             )

@@ -675,20 +675,22 @@ def _worker_data_analyze_chunk(
         _post_completion_to_chat(project_id, user_id, label, True, summary, None)
 
 
-# Cờ riêng từng loại: tránh tràn/trùng trong từng bảng (Bible, Chunks, Relations, Timeline).
+# Cờ riêng từng loại: tránh tràn/trùng trong từng bảng (Bible, Chunks, Relations, Timeline, Semantic, Rules, Chat Crystallize).
 _embedding_backfill_bible_running = False
 _embedding_backfill_chunks_running = False
 _embedding_backfill_relations_running = False
 _embedding_backfill_timeline_running = False
 _embedding_backfill_semantic_running = False
+_embedding_backfill_rules_running = False
+_embedding_backfill_crystallize_running = False
 
-EMBEDDING_KINDS = ("bible", "chunks", "relations", "timeline", "semantic_intent")
+EMBEDDING_KINDS = ("bible", "chunks", "relations", "timeline", "semantic_intent", "rules", "crystallize")
 
 
 def is_embedding_backfill_running(kind: Optional[str] = None) -> bool:
     """
     True nếu đang chạy backfill embedding.
-    kind: None = bất kỳ loại nào đang chạy; "bible"|"chunks"|"relations"|"timeline"|"semantic_intent" = chỉ loại đó.
+    kind: None = bất kỳ loại nào đang chạy; "bible"|"chunks"|"relations"|"timeline"|"semantic_intent"|"rules"|"crystallize" = chỉ loại đó.
     """
     if kind is None:
         return (
@@ -697,6 +699,8 @@ def is_embedding_backfill_running(kind: Optional[str] = None) -> bool:
             or _embedding_backfill_relations_running
             or _embedding_backfill_timeline_running
             or _embedding_backfill_semantic_running
+            or _embedding_backfill_rules_running
+            or _embedding_backfill_crystallize_running
         )
     if kind == "bible":
         return _embedding_backfill_bible_running
@@ -708,6 +712,10 @@ def is_embedding_backfill_running(kind: Optional[str] = None) -> bool:
         return _embedding_backfill_timeline_running
     if kind == "semantic_intent":
         return _embedding_backfill_semantic_running
+    if kind == "rules":
+        return _embedding_backfill_rules_running
+    if kind == "crystallize":
+        return _embedding_backfill_crystallize_running
     return False
 
 
@@ -906,7 +914,16 @@ def run_semantic_intent_embedding_backfill(project_id: str, limit: int = 200) ->
     _embedding_backfill_semantic_running = True
     updated = 0
     try:
-        r = supabase.table("semantic_intent").select("id, question_sample").eq("story_id", project_id).is_("embedding", "NULL").limit(limit).execute()
+        # Chỉ embed cho mẫu đã duyệt (approve = TRUE) và chưa có embedding
+        r = (
+            supabase.table("semantic_intent")
+            .select("id, question_sample, approve")
+            .eq("story_id", project_id)
+            .eq("approve", True)
+            .is_("embedding", "NULL")
+            .limit(limit)
+            .execute()
+        )
         rows = list(r.data or [])
         if not rows:
             return 0
@@ -921,4 +938,106 @@ def run_semantic_intent_embedding_backfill(project_id: str, limit: int = 200) ->
         logger.warning("run_semantic_intent_embedding_backfill failed: %s", e)
     finally:
         _embedding_backfill_semantic_running = False
+    return updated
+
+
+def run_rules_embedding_backfill(project_id: str, limit: int = 200) -> int:
+    """
+    Đồng bộ vector cho project_rules: chỉ embed các Rule đã được approve của project hiện tại.
+    """
+    global _embedding_backfill_rules_running
+    if not project_id:
+        return 0
+    if _embedding_backfill_rules_running:
+        return 0
+    try:
+        from config import init_services
+        from ai_engine import AIService
+        services = init_services()
+        if not services:
+            return 0
+        supabase = services["supabase"]
+    except Exception:
+        return 0
+    _embedding_backfill_rules_running = True
+    updated = 0
+    try:
+        r = (
+            supabase.table("project_rules")
+            .select("id, content, approve")
+            .eq("story_id", project_id)
+            .eq("approve", True)
+            .is_("embedding", "NULL")
+            .limit(limit)
+            .execute()
+        )
+        rows = list(r.data or [])
+        if not rows:
+            return 0
+        texts = [(row.get("content") or "").strip() or "" for row in rows]
+        vectors = AIService.get_embeddings_batch(texts) if hasattr(AIService, "get_embeddings_batch") else []
+        if not vectors:
+            for t in texts:
+                v = AIService.get_embedding(t) if t else None
+                vectors.append(v)
+        updated = _fallback_update_embeddings_one_by_one(supabase, "project_rules", "id", rows, vectors)
+    except Exception as e:
+        logger.warning("run_rules_embedding_backfill failed: %s", e)
+    finally:
+        _embedding_backfill_rules_running = False
+    return updated
+
+
+def run_crystallize_embedding_backfill(project_id: str, limit: int = 200) -> int:
+    """
+    Đồng bộ vector cho chat_crystallize_entries:
+    - Chỉ embed các entry của project hiện tại có embedding NULL.
+    - Text dùng để embed = title + \\n\\n + description (nếu có).
+    """
+    global _embedding_backfill_crystallize_running
+    if not project_id:
+        return 0
+    if _embedding_backfill_crystallize_running:
+        return 0
+    try:
+        from config import init_services
+        from ai_engine import AIService
+        services = init_services()
+        if not services:
+            return 0
+        supabase = services["supabase"]
+    except Exception:
+        return 0
+    _embedding_backfill_crystallize_running = True
+    updated = 0
+    try:
+        r = (
+            supabase.table("chat_crystallize_entries")
+            .select("id, title, description, scope")
+            .eq("story_id", project_id)
+            .is_("embedding", "NULL")
+            .limit(limit)
+            .execute()
+        )
+        rows = list(r.data or [])
+        if not rows:
+            return 0
+        texts = []
+        for row in rows:
+            title = (row.get("title") or "").strip()
+            desc = (row.get("description") or "").strip()
+            if title and desc:
+                texts.append(f"{title}\n\n{desc}")
+            else:
+                texts.append(desc or title or "")
+        vectors = AIService.get_embeddings_batch(texts) if hasattr(AIService, "get_embeddings_batch") else []
+        if not vectors:
+            for t in texts:
+                v = AIService.get_embedding(t) if t else None
+                vectors.append(v)
+        updated = _fallback_update_embeddings_one_by_one(supabase, "chat_crystallize_entries", "id", rows, vectors)
+    except Exception as e:
+        logger.warning("run_crystallize_embedding_backfill failed: %s", e)
+    finally:
+        _embedding_backfill_crystallize_running = False
     return updated

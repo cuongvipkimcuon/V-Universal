@@ -5,7 +5,7 @@ from typing import Dict
 
 from config import Config
 
-from ai.context_helpers import get_mandatory_rules
+from ai.context_helpers import get_mandatory_rules, get_rules_by_type_block, get_rules_for_intent_prompt
 from ai.context_schema import (
     infer_default_context_needs,
     normalize_context_needs,
@@ -82,10 +82,10 @@ def get_v7_reminder_message() -> str:
 
 
 # Intent không cần dữ liệu từ DB để trả lời — có thể thực thi luôn bằng một lần gọi LLM.
-INTENTS_NO_DATA = frozenset({"chat_casual", "ask_user_clarification", "web_search", "suggest_v7"})
+# unified: thao tác theo chương (job nền), không cần context_planner.
+INTENTS_NO_DATA = frozenset({"chat_casual", "ask_user_clarification", "web_search", "suggest_v7", "unified"})
 
-# V8: Bảng ánh xạ intent → handler (để tham chiếu thống nhất; chat.py / executor_v7 dùng intent trực tiếp).
-# Handler: "clarification" = chỉ hiển thị, không LLM trả lời; "template" = chỉ template; "llm_with_context" = build context + LLM; "llm_casual" = LLM không cần DB; "data_operation" = job nền.
+# V8: Bảng ánh xạ intent → handler. Ghi nhớ luật / "từ giờ luật là" → chat_casual (không còn update_data).
 INTENT_HANDLER_MAP = {
     "ask_user_clarification": "clarification",
     "suggest_v7": "template",
@@ -95,7 +95,7 @@ INTENT_HANDLER_MAP = {
     "query_Sql": "llm_with_context",
     "numerical_calculation": "llm_with_context",
     "check_chapter_logic": "llm_with_context",
-    "update_data": "data_operation",
+    "unified": "data_operation",
 }
 
 
@@ -107,18 +107,55 @@ class SmartAIRouter:
     @staticmethod
     def intent_only_classifier(user_prompt: str, chat_history_text: str, project_id: str = None) -> Dict:
         """
-        Bước 1: Xem xét câu hỏi + QUY TẮC DỰ ÁN để đưa ra intent và lọc rule liên quan.
-        Trả về: intent, needs_data, rewritten_query, clarification_question, relevant_rules (chuỗi các quy tắc liên quan, dùng cho bước 2/3).
+        Bước 1: Xem xét câu hỏi + QUY TẮC DỰ ÁN để đưa ra intent, lọc rule liên quan
+        VÀ phát hiện các "luật" mới user vừa nêu (cách tương tác, quy ước, format, phong cách trả lời...).
+        Trả về: intent, needs_data, rewritten_query, clarification_question, relevant_rules (chuỗi các quy tắc liên quan, dùng cho bước 2/3),
+        và new_rules (mảng các câu luật mới trích xuất từ lượt chat này).
         """
         chat_history_text = cap_chat_history_to_tokens(chat_history_text or "")
         rules_context = ""
+        project_name = "(Không có project)"
+        chapter_list_str = "(Trống)"
+        arc_chapters_summary = "(Trống)"
         if project_id:
-            rules_context = get_mandatory_rules(project_id)
-        rules_block = (rules_context or "(Không có quy tắc)").strip()
-        prompt = f"""Bạn là bộ phân loại Intent. Nhiệm vụ: (1) Xác định intent của user từ câu hỏi. (2) Trong các QUY TẮC DỰ ÁN dưới đây, chọn ra những quy tắc LIÊN QUAN đến câu hỏi (để dùng cho bước sau). Trả về đúng JSON.
+            # Hai block: Method+Unknown (flow) và Info (chọn relevant_rules) + bối cảnh project + arc & chương
+            try:
+                method_flow_block = get_rules_by_type_block(project_id, None, ["Method", "Unknown"])
+                info_rules_block = get_rules_for_intent_prompt(project_id)
+            except Exception:
+                method_flow_block = ""
+                info_rules_block = ""
+            try:
+                overview = get_project_overview(project_id or "", bible_max_tokens=0)
+                project_name = overview.get("project_name") or "(Không tên)"
+                chapter_list_str = overview.get("chapter_list_str") or "(Trống)"
+                arc_chapters_summary = overview.get("arc_chapters_summary") or "(Trống)"
+            except Exception:
+                pass
+        else:
+            method_flow_block = ""
+            info_rules_block = ""
+        method_block_str = (method_flow_block or "(Không có)").strip()[:2500]
+        info_block_str = (info_rules_block or "(Không có)").strip()[:4000]
+        prompt = f"""Bạn là bộ phân loại Intent và Trinh Sát Luật (Rule Scout). Nhiệm vụ:
+1) Xác định intent của user từ câu hỏi.
+2) Trong block QUY TẮC DỰ ÁN (INFO RULES) dưới đây, chọn ra những quy tắc LIÊN QUAN đến câu hỏi (relevant_rules) — CHỈ chọn từ block INFO RULES, copy nguyên dạng "- ...". Không chọn từ block METHOD RULES.
+3) Phát hiện mọi "LUẬT" mới mà user vừa nói ra trong lượt chat này: yêu cầu về cách tương tác, quy ước, cách trả lời, phong cách, định dạng, ràng buộc ("không được...", "luôn...", "từ giờ...", "hãy...").
+4) Hiểu rõ bối cảnh DỰ ÁN (tên, arc, chương thuộc arc) để phân loại chính xác; khi user hỏi về một arc, khoanh vùng chapter_range theo các chương thuộc arc đó.
 
---- QUY TẮC DỰ ÁN (MANDATORY RULES) ---
-{rules_block[:4000] if rules_block else "(Không có quy tắc)"}
+--- BỐI CẢNH DỰ ÁN ---
+- TÊN DỰ ÁN: {project_name}
+- ARC VÀ CHƯƠNG THUỘC ARC: {arc_chapters_summary}
+- DANH SÁCH CHƯƠNG (số - tên): {chapter_list_str}
+Lưu ý: Nếu câu hỏi nhắc đến arc/chương trùng với danh sách trên, hãy NGẦM HIỂU và khoanh vùng chapter_range tương ứng (vd. "arc Tuổi thơ" -> chapter_range = [1, 3] nếu arc đó gồm chương 1,2,3). KHÔNG cần hỏi lại trừ khi thật sự mơ hồ.
+
+--- QUY TẮC LUỒNG (METHOD RULES) ---
+{method_block_str}
+(Chỉ tham khảo flow/cách lấy dữ liệu; KHÔNG chọn relevant_rules từ block này.)
+
+--- QUY TẮC DỰ ÁN (INFO RULES) ---
+{info_block_str}
+(Chọn relevant_rules CHỈ từ block này, copy nguyên dạng "- ...".)
 
 --- LỊCH SỬ CHAT (tham khảo) ---
 {chat_history_text[:1500] if chat_history_text else "(Trống)"}
@@ -126,13 +163,17 @@ class SmartAIRouter:
 CÁC INTENT:
 - ask_user_clarification: Câu quá ngắn, mơ hồ, thiếu chủ ngữ. Cần điền clarification_question (câu gợi ý hỏi lại).
 - web_search: Cần thông tin thực tế bên ngoài (tỷ giá, tin tức, thời tiết, tra cứu).
-- chat_casual: Chào hỏi, xã giao, cảm ơn, không yêu cầu tra cứu hay dữ liệu.
+- chat_casual: Chào hỏi, xã giao, cảm ơn, không yêu cầu tra cứu hay dữ liệu. Nếu câu chỉ là than vãn cảm xúc (buồn, mệt, chán, stress, cô đơn, nản, tuyệt vọng, "tụt mood"...) và không có yêu cầu tra cứu nội dung dự án (nhân vật, chương, timeline, dữ liệu...), hãy chọn intent = "chat_casual".
 - suggest_v7: Câu rõ ràng cần 2+ bước (vd "tóm tắt chương 1 rồi so sánh timeline").
 - search_context: Tra cứu nội dung dự án (nhân vật, quan hệ, timeline, tóm tắt chương, nội dung chương).
 - query_Sql: User muốn XEM/LIỆT KÊ dữ liệu thô (list chương, luật, timeline dạng bảng).
-- update_data: Ra lệnh thay đổi/ghi dữ liệu (unified, nhớ quy tắc).
+- unified: Ra lệnh chạy phân tích/trích xuất theo chương (Unified: Bible + Timeline + Chunks + Relations). Bắt buộc có chapter_range (ví dụ chương 1, chương 1 đến 5). Không dùng cho "ghi nhớ quy tắc".
+- chat_casual (bổ sung): Ghi nhớ quy tắc / ưu tiên / "từ giờ luật là", "hãy nhớ rằng", "V hãy nghiêm khắc khi..." → chọn chat_casual (luật vẫn được trích trong new_rules).
 - check_chapter_logic: Hỏi lỗi logic/mâu thuẫn/plot hole của chương.
 - numerical_calculation: Tính toán, thống kê trên dữ liệu.
+
+NGUYÊN TẮC BỔ SUNG:
+- Nếu câu KHÔNG nhắc trực tiếp hay gián tiếp tới nội dung/vấn đề của dự án (không nói về chương, nhân vật, timeline, dữ liệu, lỗi logic...) và chỉ là than vãn cảm xúc hoặc nói chuyện chung, ưu tiên phân loại intent = "chat_casual". Chỉ khi nội dung thật sự mơ hồ mà không thể hiểu được ý user thì mới chọn "ask_user_clarification".
 
 INPUT USER: "{user_prompt}"
 
@@ -141,11 +182,15 @@ Trả về JSON với đủ key:
 - rewritten_query: câu viết lại ngắn
 - clarification_question: chỉ khi intent=ask_user_clarification
 - relevant_rules: chuỗi chỉ gồm các quy tắc LIÊN QUAN đến câu hỏi (copy nguyên định dạng "- ..." từ QUY TẮC DỰ ÁN). Nếu không có quy tắc nào liên quan hoặc không có quy tắc thì trả về chuỗi rỗng "".
+- new_rules: mảng các câu luật user vừa đặt ra trong lượt chat này (có thể rỗng nếu không có). Mỗi phần tử là 1 câu ngắn gọn, dạng khẳng định (vd: "Luôn trả lời bằng tiếng Việt.", "Không được chửi user.", "Ưu tiên tóm tắt ngắn gọn.").
 """
         try:
             response = AIService.call_openrouter(
                 messages=[
-                    {"role": "system", "content": "Bạn là bộ phân loại Intent. Trả về JSON: intent, rewritten_query, clarification_question, relevant_rules (chuỗi các quy tắc liên quan)."},
+                    {
+                        "role": "system",
+                        "content": "Bạn là bộ phân loại Intent & Rule Scout. Trả về JSON: intent, rewritten_query, clarification_question, relevant_rules (chuỗi các quy tắc liên quan), new_rules (mảng các câu luật mới của user, có thể rỗng).",
+                    },
                     {"role": "user", "content": prompt},
                 ],
                 model=_get_default_tool_model(),
@@ -159,17 +204,29 @@ Trả về JSON với đủ key:
             intent = (data.get("intent") or "chat_casual").strip().lower()
             if intent not in (
                 "ask_user_clarification", "web_search", "chat_casual", "suggest_v7",
-                "search_context", "query_Sql", "update_data", "check_chapter_logic", "numerical_calculation",
+                "search_context", "query_Sql", "unified", "check_chapter_logic", "numerical_calculation",
             ):
                 intent = "chat_casual"
+            # Legacy: LLM trả về update_data → coi là unified (chỉ thao tác theo chương).
+            if intent == "update_data":
+                intent = "unified"
             needs_data = intent not in INTENTS_NO_DATA
             relevant_rules = (data.get("relevant_rules") or "").strip()
+            raw_new_rules = data.get("new_rules") or []
+            new_rules: list[str] = []
+            if isinstance(raw_new_rules, list):
+                for r in raw_new_rules:
+                    s = (r if isinstance(r, str) else str(r)).strip()
+                    if s and len(s) >= 5 and "NO_RULE" not in s.upper():
+                        if s not in new_rules:
+                            new_rules.append(s)
             return {
                 "intent": intent,
                 "needs_data": needs_data,
                 "rewritten_query": (data.get("rewritten_query") or user_prompt).strip(),
                 "clarification_question": (data.get("clarification_question") or "").strip(),
                 "relevant_rules": relevant_rules,
+                "new_rules": new_rules,
             }
         except Exception as e:
             print(f"Intent classifier error: {e}")
@@ -179,6 +236,7 @@ Trả về JSON với đủ key:
                 "rewritten_query": user_prompt,
                 "clarification_question": "",
                 "relevant_rules": "",
+                "new_rules": [],
             }
 
     @staticmethod
@@ -197,6 +255,7 @@ Trả về JSON với đủ key:
         overview = get_project_overview(project_id or "", bible_max_tokens=2000)
         project_name = overview.get("project_name") or "(Không tên)"
         arcs_summary = overview.get("arcs_summary") or "(Trống)"
+        arc_chapters_summary = overview.get("arc_chapters_summary") or "(Trống)"
         chapter_list_str = overview.get("chapter_list_str") or "(Trống)"
         bible_index = overview.get("bible_index") or "(Trống)"
         relation_summary = overview.get("relation_summary") or "0 quan hệ"
@@ -217,6 +276,7 @@ Trả về JSON với đủ key:
 --- BỨC TRANH TỔNG QUAN DỮ LIỆU DỰ ÁN ---
 - TÊN DỰ ÁN: {project_name}
 - ARCS: {arcs_summary}
+- ARC VÀ CHƯƠNG THUỘC ARC: {arc_chapters_summary}
 - DANH SÁCH CHƯƠNG (số - tên): {chapter_list_str}
 - BIBLE (entity): {bible_index[:2000] if bible_index else "(Trống)"}
 - RELATION: {relation_summary}
@@ -233,11 +293,11 @@ INPUT USER: "{user_prompt}"
 Bạn cần trả về:
 - context_needs: mảng ["bible"] | ["relation"] | ["timeline"] | ["chunk"] | ["chapter"] hoặc kết hợp (cần lấy nguồn nào).
 - context_priority: thứ tự ưu tiên (phần tử đầu quan trọng nhất).
-- chapter_range: null hoặc [start, end]. "Chương 1" -> [1,1]; "chương 1 đến 5" -> [1,5].
+- chapter_range: null hoặc [start, end]. "Chương 1" -> [1,1]; "chương 1 đến 5" -> [1,5]. Khi user hỏi về một ARC (vd. "arc Tuổi thơ"), dựa vào ARC VÀ CHƯƠNG THUỘC ARC để đặt chapter_range = [min, max] các chương thuộc arc đó.
 - chapter_range_mode: "range" | "first" | "latest" | null.
 - target_bible_entities: tên nhân vật/entity user hỏi (mảng string).
 - query_target: chỉ khi intent=query_Sql: "chapters"|"rules"|"bible_entity"|"chunks"|"timeline"|"relation"|"summary"|"art".
-- data_operation_type, data_operation_target: chỉ khi intent=update_data.
+- data_operation_type, data_operation_target: chỉ khi intent=unified.
 - included_rules_text: chuỗi các quy tắc (từ block QUY TẮC LIÊN QUAN trên) thực sự cần đưa vào context để trả lời. Giữ nguyên định dạng "- ...". Có thể là toàn bộ hoặc subset. Nếu không cần quy tắc nào thì "".
 
 Trả về JSON (đủ key):
@@ -342,12 +402,12 @@ Bạn là AI Điều Phối Viên (Router) cho hệ thống V7-Universal. Nhiệ
 | **ask_user_clarification** | Câu hỏi quá ngắn, mơ hồ, thiếu chủ ngữ hoặc không rõ ngữ cảnh. | "Tính đi", "Nó là ai", "Cái đó sao rồi" (khi không có history). |
 | **web_search** | Cần thông tin **THỰC TẾ, THỜI GIAN THỰC** bên ngoài dự án. | "Tỷ giá", "Giá vàng", "Thời tiết", "Tin tức", "Thông số súng Glock ngoài đời", "mới nhất", "tra cứu". |
 | **numerical_calculation** | Yêu cầu **TÍNH TOÁN CON SỐ**, thống kê, so sánh dữ liệu định lượng. | "Tính tổng", "Doanh thu", "Trung bình", "Đếm số lượng", "% tăng trưởng". |
-| **update_data** | User yêu cầu **thay đổi/ghi dữ liệu** hệ thống. Gồm hai nhóm: (1) **Ghi nhớ quy tắc**: "Hãy nhớ rằng...", "Cập nhật quy tắc...", "Thêm nhân vật..." -> data_operation_type: "remember_rule", data_operation_target: "rule", update_summary: mô tả. (2) **Thao tác theo chương (Unified)**: phân tích/chạy **unified** cho một hoặc nhiều chương (một lần LLM → Bible + Timeline + Chunks + Relations) -> data_operation_type: "extract", data_operation_target: "unified", chapter_range [start, end] hoặc [ch, ch]. | "Hãy nhớ rằng...", "Unified chương 1", "Phân tích dữ liệu chương 1 đến 10", "Chạy unified chương 5". |
+| **unified** | User **ra lệnh chạy phân tích/trích xuất theo chương** (Unified: Bible + Timeline + Chunks + Relations). Bắt buộc có chapter_range [start, end] hoặc [ch, ch]. **KHÔNG** dùng cho "ghi nhớ quy tắc". | "Unified chương 1", "Phân tích dữ liệu chương 1 đến 10", "Chạy unified chương 5". |
+| **chat_casual** | Chào hỏi, xã giao, **ghi nhớ quy tắc/ưu tiên**: "Hãy nhớ rằng...", "Từ giờ luật là...", "V hãy nghiêm khắc khi đánh giá..." → chọn **chat_casual** (không chọn unified). | "Hello", "Cảm ơn", "Hãy nhớ rằng luôn trả lời ngắn gọn", "Tôi muốn V nghiêm khắc khi đánh giá". |
 | **query_Sql** | User **CHỈ MUỐN XEM/LIỆT KÊ** dữ liệu thô (không hỏi tự nhiên). Khi chọn query_Sql BẮT BUỘC điền **query_target**. **KHÔNG** chọn cho câu hỏi tự nhiên về quan hệ/timeline — những câu đó chọn search_context. | "Liệt kê chương", "Cho tôi xem luật", "Xuất timeline chương 2 dạng list". |
 | **search_context** | **Intent thống nhất** cho mọi câu hỏi cần tra cứu/đọc nội dung dự án. Khi chọn search_context BẮT BUỘC điền **context_needs** (mảng, giá trị trong: "bible", "relation", "timeline", "chunk", "chapter") và **context_priority** (mảng cùng phần tử với context_needs nhưng **theo thứ tự ưu tiên** cho câu hỏi này: phần tử đầu = quan trọng nhất, dùng để tối ưu token). Ví dụ: "Trong chương 3 A làm gì và quan hệ B" -> context_needs: ["bible","relation","chapter"], context_priority: ["chapter","bible","relation"] (nội dung chương quan trọng nhất). | "A và B có quan hệ gì", "Trong chương 3 A làm gì và quan hệ B", "Sự kiện nào trước", "Tóm tắt chương 1", "nhân vật X". |
-| **suggest_v7** | Câu hỏi **rõ ràng cần 2+ intent** (vd: "tóm tắt chương 1 rồi so sánh timeline"). Thao tác unified theo chương chỉ cần 1 bước update_data. Dùng REFERENCE (bộ lọc nhanh) làm gợi ý; nếu đồng ý thì trả về suggest_v7. | "Chạy unified chương 1 đến 5", "tóm tắt chương 1 rồi so sánh với timeline". |
+| **suggest_v7** | Câu hỏi **rõ ràng cần 2+ intent** (vd: "tóm tắt chương 1 rồi so sánh timeline"). Thao tác unified theo chương chỉ cần 1 bước unified. Dùng REFERENCE (bộ lọc nhanh) làm gợi ý; nếu đồng ý thì trả về suggest_v7. | "tóm tắt chương 1 rồi so sánh với timeline". |
 | **check_chapter_logic** | User **hỏi về tính logic / mâu thuẫn / điểm vô lý / plot hole** của chương (soát lỗi logic theo timeline, bible, relation, crystallize, rule). **KHÔNG** chọn khi user chỉ hỏi nội dung, tóm tắt hay tra cứu thông thường — những câu đó dùng **search_context**. Khi chọn check_chapter_logic BẮT BUỘC điền **chapter_range** (chương cần soát). | "Chương 3 có điểm vô lý không", "Soát lỗi logic chương 5", "Mâu thuẫn trong chương 2", "Plot hole chương 1", "Kiểm tra logic chương 4". |
-| **chat_casual** | Chào hỏi xã giao, không yêu cầu dữ liệu hay tra cứu. | "Hello", "Cảm ơn", "Bạn khỏe không". |
 
 **BẢNG QUERY_TARGET (chỉ dùng khi intent = query_Sql):**
 | query_target | Ý user | Ví dụ |
@@ -362,13 +422,13 @@ Bạn là AI Điều Phối Viên (Router) cho hệ thống V7-Universal. Nhiệ
 | art | Nghệ thuật, style | "Nghệ thuật chương 1", "Style tác phẩm" |
 
 ### 3. HƯỚNG DẪN XỬ LÝ ĐẶC BIỆT (CRITICAL RULES)
-1. **Quy tắc "Chương / đọc nội dung":** User nhắc "Chương X" hoặc "tóm tắt chương" / "xem nội dung chương" -> chọn **search_context** với **context_needs** chứa "chapter", điền chapter_range. **read_full_content KHÔNG bao giờ chọn** — chỉ dùng nội bộ khi search_context trả lời chưa đủ. Nếu user **ra lệnh thao tác dữ liệu** (extract/update/delete) theo chương -> `update_data`.
+1. **Quy tắc "Chương / đọc nội dung":** User nhắc "Chương X" hoặc "tóm tắt chương" / "xem nội dung chương" -> chọn **search_context** với **context_needs** chứa "chapter", điền chapter_range. **read_full_content KHÔNG bao giờ chọn** — chỉ dùng nội bộ khi search_context trả lời chưa đủ. Nếu user **ra lệnh chạy unified** theo chương (extract/ phân tích dữ liệu chương) -> `unified`, điền chapter_range.
 2. **Quy tắc "Thực Tế":** Hỏi tỷ giá, tin tức, thời tiết -> BẮT BUỘC `web_search`.
 3. **Quy tắc "Làm Rõ":** Câu quá ngắn/mơ hồ -> `ask_user_clarification`, điền `clarification_question`.
 4. **Quy tắc "Tham chiếu chat cũ":** Tin nhắn chỉ tham chiếu lệnh trước (vd "làm cái đó", "ok làm đi") -> từ LỊCH SỬ CHAT: (1) **Phân định**: ĐÃ LÀM GÌ (bước/intent đã thực thi, kết quả đã có) vs CẦN LÀM GÌ (phần user muốn thực hiện tiếp hoặc câu hỏi còn lại). (2) Chỉ trả về intent và rewritten_query cho phần **CẦN LÀM**; không lặp lại bước đã làm. Lấy intent/rewritten_query từ tin nhắn user gần nhất có nội dung cụ thể.
 5. **Quy tắc "Tham chiếu nội dung chat (crystallize)":** User nói đã bàn về X -> `search_context`, context_needs: ["bible"], rewritten_query: X.
 6. **Quy tắc "Nhiều bước (suggest_v7)":** Câu hỏi rõ ràng cần 2+ intent hoặc 2+ thao tác -> `suggest_v7`.
-7. **Quy tắc "update_data":** Chỉ khi user **ra lệnh thay đổi/ghi dữ liệu**. Chỉ xem/tóm tắt/hỏi -> KHÔNG update_data.
+7. **Quy tắc "unified vs chat_casual":** Chỉ khi user **ra lệnh chạy unified** theo chương (có nói rõ chương/khoảng chương) -> `unified`. "Hãy nhớ rằng", "từ giờ luật là", "V hãy nghiêm khắc khi..." -> `chat_casual`. Chỉ xem/tóm tắt/hỏi -> KHÔNG unified.
 8. **Quy tắc "Tra cứu":** Tra cứu ngoài (tỷ giá, tin) -> `web_search`. Tra cứu nội dung dự án -> `search_context`.
 9. **Quy tắc "query_Sql":** CHỈ khi user muốn XEM/LIỆT KÊ dữ liệu thô. Câu hỏi tự nhiên về quan hệ/timeline -> `search_context`. Điền **query_target** khi intent = query_Sql.
 10. **Quy tắc "search_context — context_needs":** Luôn điền **context_needs** (mảng): hỏi quan hệ -> ["bible","relation"]; hỏi timeline/sự kiện -> ["timeline"] hoặc ["bible","timeline"]; hỏi chi tiết vụn (ai nói, câu nào) -> ["chunk"]; hỏi trong chương X kết hợp Bible -> ["bible","relation","chapter"] hoặc ["bible","chapter"]; chỉ tóm tắt chương -> ["chapter"]. Có thể kết hợp nhiều: ["bible","relation","timeline","chunk","chapter"] tùy câu hỏi.
@@ -404,17 +464,17 @@ Bạn là AI Điều Phối Viên (Router) cho hệ thống V7-Universal. Nhiệ
 **Output:** {{ "intent": "suggest_v7", "context_needs": [], "reason": "User yêu cầu hai việc: tóm tắt và so sánh timeline. Cần nhiều bước.", "rewritten_query": "Tóm tắt chương 1 rồi so sánh với timeline chương 2", "target_files": [], "target_bible_entities": [], "inferred_prefixes": [], "chapter_range": null, "chapter_range_mode": null, "chapter_range_count": 5, "clarification_question": "", "update_summary": "" }}
 
 **Input:** "Chạy unified chương 1 đến 10"
-**Output:** {{ "intent": "update_data", "context_needs": [], "reason": "User yêu cầu chạy phân tích unified theo chương.", "rewritten_query": "Unified chương 1 đến 10", "target_files": [], "target_bible_entities": [], "inferred_prefixes": [], "chapter_range": [1, 10], "chapter_range_mode": "range", "chapter_range_count": 5, "clarification_question": "", "update_summary": "", "data_operation_type": "extract", "data_operation_target": "unified", "query_target": "" }}
+**Output:** {{ "intent": "unified", "context_needs": [], "reason": "User yêu cầu chạy phân tích unified theo chương.", "rewritten_query": "Unified chương 1 đến 10", "target_files": [], "target_bible_entities": [], "inferred_prefixes": [], "chapter_range": [1, 10], "chapter_range_mode": "range", "chapter_range_count": 5, "clarification_question": "", "update_summary": "", "data_operation_type": "extract", "data_operation_target": "unified", "query_target": "" }}
 
 **Input:** "Phân tích dữ liệu chương 5"
-**Output:** {{ "intent": "update_data", "context_needs": [], "reason": "User yêu cầu unified một chương.", "rewritten_query": "Unified chương 5", "target_files": [], "target_bible_entities": [], "inferred_prefixes": [], "chapter_range": [5, 5], "chapter_range_mode": "range", "chapter_range_count": 5, "clarification_question": "", "update_summary": "", "data_operation_type": "extract", "data_operation_target": "unified", "query_target": "" }}
+**Output:** {{ "intent": "unified", "context_needs": [], "reason": "User yêu cầu unified một chương.", "rewritten_query": "Unified chương 5", "target_files": [], "target_bible_entities": [], "inferred_prefixes": [], "chapter_range": [5, 5], "chapter_range_mode": "range", "chapter_range_count": 5, "clarification_question": "", "update_summary": "", "data_operation_type": "extract", "data_operation_target": "unified", "query_target": "" }}
 
 ### 6. INPUT CỦA USER
 "{user_prompt}"
 
 ### 7. OUTPUT (JSON ONLY) — Trả về đúng format sau, đủ các key:
 {{
-    "intent": "ask_user_clarification" | "web_search" | "numerical_calculation" | "update_data" | "query_Sql" | "search_context" | "suggest_v7" | "check_chapter_logic" | "chat_casual",
+    "intent": "ask_user_clarification" | "web_search" | "numerical_calculation" | "unified" | "query_Sql" | "search_context" | "suggest_v7" | "check_chapter_logic" | "chat_casual",
     "context_needs": [] hoặc ["bible"] | ["relation"] | ["timeline"] | ["chunk"] | ["chapter"] hoặc kết hợp (BẮT BUỘC khi intent = search_context),
     "context_priority": [] hoặc mảng cùng phần tử với context_needs theo thứ tự ưu tiên (phần tử đầu = quan trọng nhất; dùng để tối ưu token; BẮT BUỘC khi intent = search_context),
     "target_files": [],
@@ -426,9 +486,9 @@ Bạn là AI Điều Phối Viên (Router) cho hệ thống V7-Universal. Nhiệ
     "chapter_range_mode": null hoặc "first" | "latest" | "range",
     "chapter_range_count": 5,
     "clarification_question": "" hoặc "Câu hỏi gợi ý (khi intent ask_user_clarification)",
-    "update_summary": "" hoặc "Mô tả nội dung sẽ ghi (khi update_data + remember_rule)",
-    "data_operation_type": "" hoặc "remember_rule" | "extract" | "update" | "delete" (khi intent update_data),
-    "data_operation_target": "" hoặc "rule" | "unified",
+    "update_summary": "",
+    "data_operation_type": "" hoặc "extract" (khi intent unified),
+    "data_operation_target": "" hoặc "unified",
     "query_target": "" hoặc "chapters" | "rules" | "bible_entity" | "chunks" | "timeline" | "relation" | "summary" | "art" (BẮT BUỘC khi intent = query_Sql)
 }}
 """
@@ -462,6 +522,9 @@ Bạn là AI Điều Phối Viên (Router) cho hệ thống V7-Universal. Nhiệ
             result.setdefault("query_target", "")
             result.setdefault("context_needs", [])
             result.setdefault("context_priority", [])
+            # Legacy: update_data -> unified (chỉ còn nhánh unified cho thao tác theo chương).
+            if result.get("intent") == "update_data":
+                result["intent"] = "unified"
             # Chuẩn hóa intent cũ -> search_context
             legacy_search = ("read_full_content", "search_bible", "mixed_context", "manage_timeline", "search_chunks")
             if result.get("intent") in legacy_search:
@@ -534,7 +597,7 @@ QUY TẮC:
 - **Tham chiếu chat cũ — phân định ĐÃ LÀM / CẦN LÀM:** Khi user tham chiếu lệnh trước (vd "làm đi", "cái đó", "tiếp đi"): (1) Từ LỊCH SỬ xác định **ĐÃ LÀM GÌ** (các bước/intent đã thực thi, kết quả model đã trả lời). (2) Xác định **CẦN LÀM GÌ** (phần còn lại user muốn, hoặc câu hỏi mới). (3) Chỉ lên plan cho phần **CẦN LÀM**; không thêm bước lặp lại việc đã làm. (4) Mỗi bước trong plan: **query_refined** = câu hỏi/nội dung **chỉ dành cho bước đó** (phần cần làm của bước đó), không gộp cả "đã làm".
 - **search_context (intent thống nhất):** Mọi câu hỏi cần tra cứu/đọc (lore, nhân vật, quan hệ, timeline, chunk, tóm tắt chương) -> ĐÚNG MỘT bước intent `search_context`. BẮT BUỘC điền **context_needs** trong args: mảng ["bible"] | ["relation"] | ["timeline"] | ["chunk"] | ["chapter"] hoặc kết hợp. read_full_content KHÔNG dùng; chỉ fallback nội bộ khi trả lời chưa đủ.
 - **Nhiều bước (plan 2+ step):** Chỉ khi user nói RÕ nhiều việc (vd "tóm tắt chương 1 rồi so sánh với timeline") -> tách nhiều bước, dependency khi cần.
-- update_data chỉ khi ra lệnh thực thi. query_Sql chỉ khi XEM/LIỆT KÊ dữ liệu thô; args có query_target. check_chapter_logic khi user hỏi về lỗi logic/mâu thuẫn/điểm vô lý của chương — điền chapter_range; không dùng search_context cho câu đó. dependency: null cho update_data, query_Sql, web_search, ask_user_clarification, chat_casual, check_chapter_logic. verification_required: true nếu plan có numerical_calculation, search_context, query_Sql, check_chapter_logic.
+- unified chỉ khi ra lệnh chạy unified theo chương; args có chapter_range. query_Sql chỉ khi XEM/LIỆT KÊ dữ liệu thô; args có query_target. check_chapter_logic khi user hỏi về lỗi logic/mâu thuẫn/điểm vô lý của chương — điền chapter_range. dependency: null cho unified, query_Sql, web_search, ask_user_clarification, chat_casual, check_chapter_logic. verification_required: true nếu plan có numerical_calculation, search_context, query_Sql, check_chapter_logic.
 
 Trả về ĐÚNG MỘT JSON:
 - **analysis**: Mô tả ngắn; nếu dùng LỊCH SỬ thì ghi rõ: "Đã làm: ...; Cần làm: ..." để plan chỉ chạy đúng bước còn lại.
@@ -567,18 +630,20 @@ Chỉ trả về JSON."""
             return SmartAIRouter._single_intent_to_plan(single, user_prompt)
         analysis = data.get("analysis", "")
         verification_required = bool(data.get("verification_required", False))
-        valid_intents = {"numerical_calculation", "search_context", "web_search", "ask_user_clarification", "update_data", "query_Sql", "check_chapter_logic", "chat_casual"}
+        valid_intents = {"numerical_calculation", "search_context", "web_search", "ask_user_clarification", "unified", "query_Sql", "check_chapter_logic", "chat_casual"}
         normalized_plan = []
         for i, s in enumerate(plan):
             if not isinstance(s, dict):
                 continue
             intent = (s.get("intent") or "chat_casual").strip().lower()
+            if intent == "update_data":
+                intent = "unified"
             args = s.get("args") or {}
             if not isinstance(args, dict):
                 args = {}
             if intent not in valid_intents:
                 if intent in ("extract_bible", "extract_relation", "extract_timeline", "extract_chunking"):
-                    intent = "update_data"
+                    intent = "unified"
                     args = dict(args)
                     if not args.get("data_operation_target"):
                         args["data_operation_target"] = "unified"
@@ -643,7 +708,7 @@ DỮ LIỆU: QUY TẮC={rules_context[:800]} | BIBLE={bible_index[:1000] if bibl
 
 INPUT: "{user_prompt}"
 
-QUY TẮC: Mỗi bước một intent. Intent: search_context, query_Sql, numerical_calculation, update_data, check_chapter_logic, web_search, chat_casual, ask_user_clarification. search_context bắt buộc args.context_needs (mảng). update_data cần chapter_range. Tối đa 3 bước.
+QUY TẮC: Mỗi bước một intent. Intent: search_context, query_Sql, numerical_calculation, unified, check_chapter_logic, web_search, chat_casual, ask_user_clarification. search_context bắt buộc args.context_needs (mảng). unified cần chapter_range. Tối đa 3 bước.
 
 Trả về ĐÚNG MỘT JSON: {{ "analysis": "1 câu", "plan": [ {{ "step_id": 1, "intent": "...", "args": {{ "query_refined": "...", "context_needs": [], "chapter_range": null, "data_operation_type": "", "data_operation_target": "", "query_target": "" }}, "dependency": null }} ], "verification_required": true }}
 Chỉ trả về JSON."""
@@ -673,12 +738,14 @@ Chỉ trả về JSON."""
         plan = plan[:3]
         analysis = data.get("analysis", "")
         verification_required = bool(data.get("verification_required", False))
-        valid_intents = {"numerical_calculation", "search_context", "web_search", "ask_user_clarification", "update_data", "query_Sql", "check_chapter_logic", "chat_casual"}
+        valid_intents = {"numerical_calculation", "search_context", "web_search", "ask_user_clarification", "unified", "query_Sql", "check_chapter_logic", "chat_casual"}
         normalized_plan = []
         for i, s in enumerate(plan):
             if not isinstance(s, dict):
                 continue
             intent = (s.get("intent") or "chat_casual").strip().lower()
+            if intent == "update_data":
+                intent = "unified"
             args = s.get("args") or {}
             if not isinstance(args, dict):
                 args = {}

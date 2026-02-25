@@ -153,8 +153,18 @@ def build_query_sql_context(
         return block, "🔍 Query SQL"
 
     if query_target == "summary":
-        res = supabase.table("story_bible").select("entity_name, description").eq("story_id", project_id).ilike("entity_name", "%[CHAT]%").limit(10).execute()
-        rows = list(res.data) if res.data else []
+        rows = []
+        try:
+            r_new = supabase.table("chat_crystallize_entries").select("title, description").eq("scope", "project").eq("story_id", project_id).order("created_at", desc=True).limit(10).execute()
+            rows = [{"entity_name": r.get("title", ""), "description": r.get("description", "")} for r in (r_new.data or [])]
+        except Exception:
+            pass
+        if not rows:
+            try:
+                res = supabase.table("story_bible").select("entity_name, description").eq("story_id", project_id).ilike("entity_name", "%[CHAT]%").limit(10).execute()
+                rows = list(res.data) if res.data else []
+            except Exception:
+                pass
         if not rows:
             return "\n--- TÓM TẮT ĐÃ LƯU (query_Sql) ---\nChưa có tóm tắt crystallize nào.", "🔍 Query SQL"
         lines = [f"- {row.get('entity_name', '')}: {(row.get('description') or '')[:400]}..." for row in rows]

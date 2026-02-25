@@ -52,12 +52,8 @@ def render_bible_tab(project_id, persona):
     # Cache trigger: chỉ refetch khi bấm Refresh hoặc sau add/delete
     _cache_trigger = st.session_state.get("update_trigger", 0)
     raw_bible = get_bible_list_cached(project_id, _cache_trigger)
-    # [RULE] và [CHAT] chỉ hiện ở tab Rules và Memory; Bible chỉ hiện các prefix còn lại
-    bible_data_all = [
-        e for e in raw_bible
-        if not (e.get("entity_name") or "").strip().startswith("[RULE]")
-        and not (e.get("entity_name") or "").strip().startswith("[CHAT]")
-    ]
+    # V9.2: Không còn chặn prefix [RULE]/[CHAT] tại đây; Bible hiển thị đầy đủ, legacy RULE/CHAT không còn ảnh hưởng logic.
+    bible_data_all = list(raw_bible or [])
     all_prefixes = set()
     for entry in bible_data_all:
         match = re.match(r"^(\[[^\]]+\])", entry.get("entity_name", "") or "")
@@ -69,8 +65,7 @@ def render_bible_tab(project_id, persona):
     col_act = st.columns([3, 2, 1])
     with col_act[2]:
         st.markdown("###")
-        if st.button("🔄 Refresh", key="bible_refresh_btn"):
-            invalidate_cache()
+        # V8.9: Bỏ nút Refresh riêng tab — dùng Refresh tổng ở sidebar; dữ liệu load khi tab được kích hoạt
         if st.button("➕ Add Entry", type="primary", key="bible_add_btn"):
             st.session_state["adding_bible_entry"] = True
         if st.button("📥 Import Knowledge", type="secondary", key="bible_import_btn"):

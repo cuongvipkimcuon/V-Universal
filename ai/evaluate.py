@@ -73,7 +73,7 @@ def evaluate_step_outcome(intent: str, ctx_text: str, sources: List[str]) -> Tup
     Đánh giá bước vừa chạy: có "thất bại" (không tìm thấy dữ liệu) cần cân nhắc re-plan không.
     Returns: (should_consider_replan, reason).
     """
-    if not intent or intent in ("chat_casual", "ask_user_clarification", "update_data", "web_search"):
+    if not intent or intent in ("chat_casual", "ask_user_clarification", "unified", "web_search"):
         return False, ""
     ctx_upper = (ctx_text or "").upper()
     src_list = sources or []

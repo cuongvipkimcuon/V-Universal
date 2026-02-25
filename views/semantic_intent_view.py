@@ -63,20 +63,35 @@ def render_semantic_intent_tab(project_id):
     can_write = check_permission(str(user_id or ""), user_email or "", project_id, "write")
     can_delete = check_permission(str(user_id or ""), user_email or "", project_id, "delete")
 
-    # Tùy chọn (dạng phủ định: bật = tắt hành vi tương ứng trong V Work chat)
-    st.caption("**Tùy chọn phủ định** — bật = tắt hành vi trong V Work chat. Lưu bên dưới có hiệu lực toàn project.")
-    opt_no_auto = _get_setting(supabase, "semantic_intent_no_auto_create", False)
-    opt_no_use = _get_setting(supabase, "semantic_intent_no_use", False)
+    # Tùy chọn Semantic Intent: dạng khẳng định (bật = dùng). Mặc định: KHÔNG auto-create, KHÔNG dùng khi trả lời.
+    st.caption("**Tùy chọn Semantic Intent** — bật = dùng trong V Work chat. Mặc định tắt (an toàn).")
+    # Ở tầng settings vẫn lưu dạng phủ định semantic_intent_no_auto_create / semantic_intent_no_use cho tương thích.
+    opt_no_auto = _get_setting(supabase, "semantic_intent_no_auto_create", True)
+    opt_no_use = _get_setting(supabase, "semantic_intent_no_use", True)
     col_opt1, col_opt2 = st.columns(2)
     with col_opt1:
-        no_auto = st.toggle("Không gợi ý thêm mẫu Semantic sau mỗi câu trả lời", value=opt_no_auto, key="si_no_auto",
-                            help="Bật = V Work chat không hiện 'Thêm vào Semantic Intent?' sau reply.")
+        use_auto = st.toggle(
+            "Tự động lưu Semantic từ V Work",
+            value=not opt_no_auto,
+            key="si_use_auto",
+            help="Bật = Sau mỗi câu trả lời phù hợp, V Work có thể lưu một mẫu Semantic Intent (ở trạng thái chưa duyệt).",
+        )
     with col_opt2:
-        no_use = st.toggle("Không dùng semantic intent để tạo câu trả lời", value=opt_no_use, key="si_no_use",
-                           help="Bật = V Work bỏ qua semantic intent, luôn dùng Router.")
+        use_in_chat = st.toggle(
+            "Dùng Semantic Intent khi trả lời",
+            value=not opt_no_use,
+            key="si_use_in_chat",
+            help="Bật = Khi câu hỏi khớp mạnh với một Semantic Intent đã duyệt, V Work dùng data đó làm context chính để trả lời nhanh.",
+        )
     if st.button("💾 Lưu tùy chọn", key="si_save_opts"):
         try:
-            for k, v in [("semantic_intent_no_auto_create", 1 if no_auto else 0), ("semantic_intent_no_use", 1 if no_use else 0)]:
+            # Chuyển ngược về dạng phủ định khi lưu (no_auto/no_use) để giữ tương thích với phần còn lại của code.
+            no_auto = not use_auto
+            no_use = not use_in_chat
+            for k, v in [
+                ("semantic_intent_no_auto_create", 1 if no_auto else 0),
+                ("semantic_intent_no_use", 1 if no_use else 0),
+            ]:
                 try:
                     supabase.table("settings").upsert({"key": k, "value": v}, on_conflict="key").execute()
                 except Exception:
@@ -102,9 +117,20 @@ def render_semantic_intent_tab(project_id):
 
     # Số mẫu đã embed (theo câu hỏi) vs tổng — giống Bible
     try:
-        r_all = supabase.table("semantic_intent").select("id").eq("story_id", project_id).execute()
+        r_all = (
+            supabase.table("semantic_intent")
+            .select("id")
+            .eq("story_id", project_id)
+            .execute()
+        )
         total_count = len(r_all.data or [])
-        r_null = supabase.table("semantic_intent").select("id").eq("story_id", project_id).is_("embedding", "NULL").execute()
+        r_null = (
+            supabase.table("semantic_intent")
+            .select("id")
+            .eq("story_id", project_id)
+            .is_("embedding", "NULL")
+            .execute()
+        )
         no_embed_count = len(r_null.data or [])
         embed_count = max(0, total_count - no_embed_count)
     except Exception:
@@ -135,11 +161,30 @@ def render_semantic_intent_tab(project_id):
 
     st.markdown("---")
 
-    # List
-    r = supabase.table("semantic_intent").select("*").eq("story_id", project_id).order("created_at", desc=True).execute()
+    # List (cả đã duyệt và chưa duyệt)
+    r = (
+        supabase.table("semantic_intent")
+        .select("*")
+        .eq("story_id", project_id)
+        .order("created_at", desc=True)
+        .execute()
+    )
     items = r.data or []
 
     st.metric("Tổng mẫu", len(items))
+
+    # Filter trạng thái duyệt cho Semantic Intent
+    status_filter = st.selectbox(
+        "Trạng thái",
+        ["Tất cả", "Chỉ đã duyệt", "Chỉ chưa duyệt"],
+        index=0,
+        key="si_status_filter",
+        help="Lọc Semantic Intent theo trạng thái duyệt. Chỉ mẫu đã duyệt mới được dùng để match.",
+    )
+    if status_filter == "Chỉ đã duyệt":
+        items = [x for x in items if bool(x.get("approve", True))]
+    elif status_filter == "Chỉ chưa duyệt":
+        items = [x for x in items if not bool(x.get("approve", True))]
 
     if st.button("➕ Thêm mẫu", key="si_add") and can_write:
         st.session_state["si_adding"] = True
@@ -150,7 +195,13 @@ def render_semantic_intent_tab(project_id):
             data = st.text_area("Data (context + câu trả lời)", placeholder="Ôm hết context tạo ra nó + câu trả lời. Nhập tay hoặc lưu từ chat.", height=200)
             if st.form_submit_button("💾 Lưu"):
                 if q and q.strip():
-                    payload = {"story_id": project_id, "question_sample": q.strip(), "intent": "chat_casual", "related_data": data or ""}
+                    payload = {
+                        "story_id": project_id,
+                        "question_sample": q.strip(),
+                        "intent": "chat_casual",
+                        "related_data": data or "",
+                        "approve": True,
+                    }
                     try:
                         supabase.table("semantic_intent").insert(payload).execute()
                         st.success("Đã thêm (embedding chỉ tạo khi có nút đồng bộ vector cho mục này).")
@@ -164,11 +215,13 @@ def render_semantic_intent_tab(project_id):
     for item in items:
         has_emb = bool(item.get("embedding"))
         sync_badge = "" if has_emb else " 🔄 Chưa embed"
-        with st.expander(f"**{item.get('question_sample','')[:60]}**{sync_badge}", expanded=False):
+        approved = bool(item.get("approve", True))
+        approve_badge = " ✅ ĐÃ DUYỆT" if approved else " ⏳ CHƯA DUYỆT"
+        with st.expander(f"**{item.get('question_sample','')[:60]}**{sync_badge}{approve_badge}", expanded=False):
             if not has_emb:
                 st.caption("🔄 Chưa đồng bộ vector — bấm **Đồng bộ vector (Semantic Intent)** trên để embed theo câu hỏi.")
             st.write("**Data:**", (item.get("related_data") or "")[:500])
-            col1, col2 = st.columns(2)
+            col1, col2, col3 = st.columns(3)
             with col1:
                 if st.button("✏️ Sửa", key=f"si_edit_{item.get('id')}"):
                     st.session_state["si_editing"] = item.get("id")
@@ -179,6 +232,14 @@ def render_semantic_intent_tab(project_id):
                         st.success("Đã xóa.")
                     except Exception as e:
                         st.error(str(e))
+            with col3:
+                if can_write:
+                    if not approved and st.button("✅ Approve", key=f"si_approve_{item.get('id')}"):
+                        try:
+                            supabase.table("semantic_intent").update({"approve": True, "updated_at": datetime.utcnow().isoformat()}).eq("id", item["id"]).execute()
+                            st.success("Đã duyệt Semantic Intent.")
+                        except Exception as e:
+                            st.error(str(e))
 
     if st.session_state.get("si_editing") and can_write:
         edit_id = st.session_state["si_editing"]

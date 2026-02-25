@@ -82,7 +82,7 @@ def execute_plan(
     Thực thi plan; sau mỗi bước có thể re-plan (đổi phần còn lại nếu bước vừa thất bại).
     llm_budget_ref: [current_count, max_count] — numerical LLM chỉ gọi khi current < max; gọi xong tăng current. None = không giới hạn.
     Returns: (cumulative_context, sources, step_results, replan_events, data_operation_steps).
-    data_operation_steps: các bước update_data (unified) cần chạy job sau.
+    data_operation_steps: các bước unified cần chạy job sau.
     """
     ContextManager, AIService, Config, parse_chapter_range_from_query, _get_default_tool_model = _get_engine()
     try:
@@ -111,8 +111,8 @@ def execute_plan(
         args = step.get("args") or {}
         op_target = (args.get("data_operation_target") or "").strip()
 
-        # Bước update_data (unified): thu thập để chạy job unified_chapter_range sau, không build context.
-        if intent == "update_data" and op_target == "unified":
+        # Bước unified (hoặc legacy update_data): thu thập để chạy job unified_chapter_range sau, không build context.
+        if intent in ("update_data", "unified") and op_target == "unified":
             op_type = args.get("data_operation_type") or "extract"
             ch_range = args.get("chapter_range")
             if ch_range and isinstance(ch_range, (list, tuple)) and len(ch_range) >= 2:
@@ -127,7 +127,7 @@ def execute_plan(
             elif ch_range and len(ch_range) >= 1:
                 ch_num = int(ch_range[0])
                 data_operation_steps.append({"operation_type": op_type, "target": "unified", "chapter_range": [ch_num, ch_num]})
-            block = f"\n--- [STEP {step_id}: update_data] ---\n(Unified analyze chương — chờ xác nhận để thực hiện)\n"
+            block = f"\n--- [STEP {step_id}: unified] ---\n(Unified analyze chương — chờ xác nhận để thực hiện)\n"
             cumulative_parts.append(block)
             step_results.append({"step_id": step_id, "intent": intent, "context_snippet": "", "executor_result": None})
             steps_executed += 1

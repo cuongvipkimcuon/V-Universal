@@ -6,6 +6,7 @@ from config import init_services
 from ai_engine import AIService
 from utils.auth_manager import check_permission
 from utils.cache_helpers import get_bible_list_cached, invalidate_cache
+from core.background_jobs import run_crystallize_embedding_backfill, is_embedding_backfill_running
 
 
 def render_chat_management_tab(project_id, persona):
@@ -22,6 +23,57 @@ def render_chat_management_tab(project_id, persona):
         st.warning("Không kết nối được dịch vụ.")
         return
     supabase = services["supabase"]
+
+    # Thống kê embedding cho Chat Memory (chat_crystallize_entries) và nút đồng bộ vector riêng
+    try:
+        r_all = (
+            supabase.table("chat_crystallize_entries")
+            .select("id")
+            .eq("story_id", project_id)
+            .execute()
+        )
+        total_mem = len(r_all.data or [])
+        r_null = (
+            supabase.table("chat_crystallize_entries")
+            .select("id")
+            .eq("story_id", project_id)
+            .is_("embedding", "NULL")
+            .execute()
+        )
+        need_embed = len(r_null.data or [])
+        embedded = max(0, total_mem - need_embed)
+    except Exception:
+        total_mem = 0
+        need_embed = 0
+        embedded = 0
+
+    st.caption(f"**Vector (Chat Memory / Crystallize):** {embedded} / {total_mem} entry có embedding.")
+    _mem_sync_running = is_embedding_backfill_running("crystallize")
+    if not _mem_sync_running and st.session_state.get("embedding_sync_clicked_crystallize"):
+        st.session_state.pop("embedding_sync_clicked_crystallize", None)
+    if _mem_sync_running or st.session_state.get("embedding_sync_clicked_crystallize", False):
+        st.caption("⏳ Đang đồng bộ vector (Chat Memory). Vui lòng đợi xong rồi bấm Refresh.")
+    col_vec1, col_vec2 = st.columns(2)
+    with col_vec1:
+        if st.button("🔄 Làm mới số liệu vector", key="chat_mem_refresh_vec", disabled=_mem_sync_running):
+            st.rerun()
+    with col_vec2:
+        if st.button(
+            "🔄 Đồng bộ vector (Chat Memory)",
+            key="chat_mem_sync_vec_btn",
+            disabled=(need_embed == 0 or _mem_sync_running),
+        ):
+            import threading
+
+            st.session_state["embedding_sync_clicked_crystallize"] = True
+
+            def _run():
+                run_crystallize_embedding_backfill(project_id, limit=200)
+
+            threading.Thread(target=_run, daemon=True).start()
+            st.toast("Đã bắt đầu đồng bộ vector cho Chat Memory. Bấm **Làm mới số liệu vector** sau vài giây.")
+            st.rerun()
+
     bible_data_all = get_bible_list_cached(project_id, st.session_state.get("update_trigger", 0))
     chat_data = [e for e in bible_data_all if (e.get("entity_name") or "").startswith("[CHAT]")]
     user = st.session_state.get("user")

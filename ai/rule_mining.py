@@ -168,15 +168,18 @@ Trả về ĐÚNG MỘT JSON:
 
     @staticmethod
     def crystallize_session(chat_history: List[Dict], persona_role: str) -> str:
-        """Tóm tắt và lọc thông tin giá trị từ chat history"""
+        """Tóm tắt và lọc thông tin giá trị từ chat history. Bỏ qua nội dung thực thi hệ thống (embedding, job, đồng bộ...), chỉ ưu tiên thông tin."""
         chat_text = "\n".join([f"{m.get('role', '')}: {m.get('content', '')}" for m in chat_history])
         prompt = f"""
         Bạn là Thư Ký Cuộc Họp ({persona_role}).
-        Nhiệm vụ: Đọc chat và LỌC BỎ VÔ NGHĨA. Chỉ giữ lại và TÓM TẮT thông tin giá trị.
+        Nhiệm vụ: Đọc chat và LỌC BỎ:
+        - Tin nhắn về thực thi hệ thống (chạy ngầm, đồng bộ vector, embedding, job, unified, lệnh @@...)
+        - Chào hỏi, vô nghĩa
+        Chỉ giữ lại và TÓM TẮT thông tin giá trị (nội dung sáng tạo, quyết định, mô tả nhân vật/sự kiện, v.v.).
 
         CHAT LOG: {chat_text}
 
-        OUTPUT: Trả về bản tóm tắt súc tích (50-100 từ) bằng Tiếng Việt. Nếu toàn chào hỏi, trả về "NO_INFO".
+        OUTPUT: Trả về bản tóm tắt súc tích (50-100 từ) bằng Tiếng Việt. Nếu không còn thông tin đáng ghi nhớ, trả về "NO_INFO".
         """
         try:
             response = AIService.call_openrouter(
