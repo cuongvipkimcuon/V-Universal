@@ -68,15 +68,23 @@ Trả về ĐÚNG MỘT JSON: {{ "sufficient": true hoặc false }}"""
         return True
 
 
-def evaluate_step_outcome(intent: str, ctx_text: str, sources: List[str]) -> Tuple[bool, str]:
+def evaluate_step_outcome(
+    intent: str,
+    ctx_text: str,
+    sources: List[str],
+    step_plan: Optional[Dict] = None,
+) -> Tuple[bool, str]:
     """
     Đánh giá bước vừa chạy: có "thất bại" (không tìm thấy dữ liệu) cần cân nhắc re-plan không.
     Returns: (should_consider_replan, reason).
     """
     if not intent or intent in ("chat_casual", "ask_user_clarification", "unified", "web_search"):
         return False, ""
+
     ctx_upper = (ctx_text or "").upper()
     src_list = sources or []
+    should_replan = False
+    base_reason = ""
 
     if intent == "search_context":
         has_any = (
@@ -85,15 +93,35 @@ def evaluate_step_outcome(intent: str, ctx_text: str, sources: List[str]) -> Tup
             or "Timeline" in ctx_upper or "Chunk" in str(src_list) or "chunk" in str(src_list).lower()
         )
         if not has_any or (len(ctx_text or "") < 200):
-            return True, "search_context: không có dữ liệu Bible, chapter, timeline hay chunk"
-        return False, ""
+            should_replan = True
+            base_reason = "search_context: không có dữ liệu Bible, chapter, timeline hay chunk"
 
-    if intent == "query_Sql":
+    elif intent == "query_Sql":
         if "KNOWLEDGE BASE (query_Sql" not in ctx_text and "🔍 Query SQL" not in str(src_list):
-            return True, "query_Sql: không có dữ liệu Bible/đối tượng"
+            should_replan = True
+            base_reason = "query_Sql: không có dữ liệu Bible/đối tượng"
+
+    if not should_replan:
         return False, ""
 
-    return False, ""
+    # Bổ sung thêm thông tin từ kế hoạch (task_name, output_spec) nếu có, để reason dễ hiểu hơn.
+    if step_plan:
+        try:
+            args_plan = step_plan.get("args") or {}
+            task_name = (args_plan.get("task_name") or step_plan.get("intent") or intent or "").strip()
+            output_spec = (args_plan.get("output_spec") or "").strip()
+            extra_bits: List[str] = []
+            if task_name:
+                extra_bits.append(f"task={task_name}")
+            if output_spec:
+                extra_bits.append(f"expected={output_spec}")
+            if extra_bits:
+                base_reason = f"{base_reason} ({', '.join(extra_bits)})"
+        except Exception:
+            # Không để lỗi phụ làm hỏng nhánh evaluate.
+            pass
+
+    return True, base_reason
 
 
 def replan_after_step(

@@ -1282,12 +1282,42 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                                     if replan_events:
                                         for ev in replan_events:
                                             st.caption(f"🔄 Re-plan (sau step {ev.get('step_id')}): {ev.get('reason', '')[:80]}... → {ev.get('action', '')}")
+                                    # Tạo summary ngắn gọn cho toàn bộ plan + kết quả từng bước để đưa vào context cuối.
+                                    plan_summary_block = ""
+                                    try:
+                                        if plan and step_results:
+                                            plan_by_step_id = {
+                                                s.get("step_id"): s for s in plan if isinstance(s, dict)
+                                            }
+                                            lines = ["[V7 PLAN SUMMARY]"]
+                                            for sr in step_results:
+                                                sid = sr.get("step_id")
+                                                ps = plan_by_step_id.get(sid) or {}
+                                                args_ps = ps.get("args") or {}
+                                                intent_sr = sr.get("intent", "")
+                                                task_name = args_ps.get("task_name") or f"{intent_sr}_{sid}"
+                                                output_spec = args_ps.get("output_spec") or ""
+                                                status = (sr.get("evaluation_status") or "ok").upper()
+                                                line = f"- Step {sid} ({task_name} – {intent_sr}): {status}"
+                                                lines.append(line)
+                                                if output_spec:
+                                                    lines.append(f"  Expected: {output_spec}")
+                                                reason = sr.get("evaluation_reason") or ""
+                                                if reason and status != "OK":
+                                                    lines.append(f"  Note: {reason}")
+                                            plan_summary_block = "\n".join(lines)
+                                    except Exception:
+                                        plan_summary_block = ""
+
                                     st.write("📝 Generating draft...")
                                     can_draft = max_llm_calls_per_turn == 0 or llm_calls_this_turn[0] < max_llm_calls_per_turn
                                     if not can_draft:
                                         draft_response = f"(Đã đạt giới hạn {max_llm_calls_per_turn} lần gọi LLM cho lượt này. Có thể tăng trong **Settings → V8 & Observability**.)"
                                     else:
-                                        system_content = (active_persona.get("system_prompt") or "") + "\n\nQUY TẮC: Chỉ trả lời dựa trên CONTEXT bên dưới. Không bịa đặt, không thêm thông tin ngoài context.\n\n--- CONTEXT (Các bước đã thực thi) ---\n" + cumulative_context
+                                        system_content = (active_persona.get("system_prompt") or "") + "\n\nQUY TẮC: Chỉ trả lời dựa trên CONTEXT bên dưới. Không bịa đặt, không thêm thông tin ngoài context.\n"
+                                        if plan_summary_block:
+                                            system_content += "\n\n--- V7 PLAN SUMMARY ---\n" + plan_summary_block
+                                        system_content += "\n\n--- CONTEXT (Các bước đã thực thi) ---\n" + cumulative_context
                                         user_content = prompt
                                         draft_resp = AIService.call_openrouter(
                                             messages=[

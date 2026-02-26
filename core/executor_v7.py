@@ -37,6 +37,70 @@ def step_to_router_result(step: Dict, user_prompt: str) -> Dict:
     }
 
 
+def _build_router_result_with_router_3step_for_search(
+    step: Dict,
+    user_prompt: str,
+    project_id: str,
+    chat_history_text: str = "",
+) -> Dict:
+    """
+    Dùng lại Context Planner cho intent search_context trong V7 (giảm tải intent_only):
+    1) context_planner (quyết định context_needs, targets... từ query_refined + overview DB)
+    2) Áp dụng override từ plan (chapter_range, context_needs, targets) để giữ ý định của B1.
+    """
+    try:
+        from ai.router import SmartAIRouter
+    except Exception:
+        # Fallback: dùng schema từ plan như cũ nếu không import được Router.
+        return step_to_router_result(step, user_prompt)
+
+    args = step.get("args") or {}
+    query_refined = args.get("query_refined") or user_prompt
+    # Chỉ dùng context_planner (bỏ intent_only để giảm 1 lần gọi LLM/step).
+    ctx_router = SmartAIRouter.context_planner(
+        query_refined,
+        "search_context",
+        chat_history_text,
+        project_id,
+        relevant_rules="",
+    )
+    # Override bằng thông tin chi tiết từ plan (nếu có) để "ưu tiên ý" của B1.
+    # 1) context_needs / context_priority
+    plan_needs = args.get("context_needs")
+    if isinstance(plan_needs, list) and plan_needs:
+        ctx_router["context_needs"] = plan_needs
+    plan_priority = args.get("context_priority")
+    if isinstance(plan_priority, list) and plan_priority:
+        ctx_router["context_priority"] = plan_priority
+    # 2) chapter_range + mode + count
+    if "chapter_range" in args and args.get("chapter_range") is not None:
+        ctx_router["chapter_range"] = args.get("chapter_range")
+        if args.get("chapter_range_mode") is not None:
+            ctx_router["chapter_range_mode"] = args.get("chapter_range_mode")
+        if args.get("chapter_range_count") is not None:
+            ctx_router["chapter_range_count"] = args.get("chapter_range_count")
+    # 3) Các target chi tiết (nếu B1 đã sinh): ưu tiên target từ plan khi có.
+    for key in (
+        "target_bible_entities",
+        "target_chunk_keywords",
+        "target_relation_entities",
+        "target_timeline_keywords",
+        "inferred_prefixes",
+        "query_target",
+        "data_operation_type",
+        "data_operation_target",
+    ):
+        val = args.get(key)
+        if isinstance(val, list):
+            if val:
+                ctx_router[key] = val
+        elif val:
+            ctx_router[key] = val
+    # 4) Gắn lại rewritten_query = query_refined để ContextManager dùng đúng câu step này.
+    ctx_router["rewritten_query"] = query_refined
+    return ctx_router
+
+
 def _normalize_step(step: Dict, step_id: int, user_prompt: str) -> Dict:
     """Chuẩn hóa step từ LLM re-plan (có thể thiếu key) thành format đủ args."""
     args = step.get("args") if isinstance(step.get("args"), dict) else {}
@@ -77,6 +141,8 @@ def execute_plan(
     max_steps_per_turn: int = 10,
     max_replan_rounds: int = 2,
     llm_budget_ref: Optional[List[int]] = None,
+    max_distinct_intents: int = 3,
+    max_retries_per_intent: int = 1,
 ) -> Tuple[str, List[str], List[Dict], List[Dict], List[Dict]]:
     """
     Thực thi plan; sau mỗi bước có thể re-plan (đổi phần còn lại nếu bước vừa thất bại).
@@ -102,6 +168,8 @@ def execute_plan(
     remaining_steps = list(plan)
     steps_executed = 0
     replan_count = 0
+    distinct_intents = set()
+    retry_count_per_intent: Dict[str, int] = {}
 
     while remaining_steps and steps_executed < max_steps_per_turn:
         step = remaining_steps[0]
@@ -109,6 +177,26 @@ def execute_plan(
         intent = step.get("intent", "chat_casual")
         args = step.get("args") or {}
         op_target = (args.get("data_operation_target") or "").strip()
+
+        # Giới hạn số loại intent khác nhau được thực thi trong một lượt.
+        # Unified/update_data được coi là thao tác nền, không tính vào giới hạn này.
+        if intent not in ("update_data", "unified"):
+            if intent not in distinct_intents:
+                if len(distinct_intents) >= max_distinct_intents:
+                    skip_note = (
+                        f"[SKIP] Bỏ qua STEP {step_id} (intent={intent}) "
+                        f"vì đã đạt giới hạn {max_distinct_intents} loại tác vụ trong một lượt."
+                    )
+                    cumulative_parts.append(f"\n--- [STEP {step_id}: {intent}] ---\n{skip_note}\n")
+                    step_results.append({
+                        "step_id": step_id,
+                        "intent": intent,
+                        "context_snippet": "",
+                        "executor_result": None,
+                        "evaluation_status": "skipped",
+                    })
+                    break
+                distinct_intents.add(intent)
 
         # Bước unified (hoặc legacy update_data): thu thập để chạy job unified_chapter_range sau, không build context.
         if intent in ("update_data", "unified") and op_target == "unified":
@@ -128,7 +216,13 @@ def execute_plan(
                 data_operation_steps.append({"operation_type": op_type, "target": "unified", "chapter_range": [ch_num, ch_num]})
             block = f"\n--- [STEP {step_id}: unified] ---\n(Unified analyze chương — chờ xác nhận để thực hiện)\n"
             cumulative_parts.append(block)
-            step_results.append({"step_id": step_id, "intent": intent, "context_snippet": "", "executor_result": None})
+            step_results.append({
+                "step_id": step_id,
+                "intent": intent,
+                "context_snippet": "",
+                "executor_result": None,
+                "evaluation_status": "n/a",
+            })
             steps_executed += 1
             remaining_steps = remaining_steps[1:]
             continue
@@ -160,14 +254,19 @@ def execute_plan(
                 branch_blocks: List[str] = []
                 all_branch_sources: List[str] = []
 
+                # Gọi context_planner một lần cho toàn khoảng chương, rồi reuse cho các segment bằng cách override chapter_range.
+                base_router_result = _build_router_result_with_router_3step_for_search(
+                    step,
+                    user_prompt,
+                    project_id,
+                    chat_history_text="",
+                )
+
                 for idx, (seg_start, seg_end) in enumerate(segments, 1):
-                    # Dùng cùng args, chỉ thay chapter_range cho sub-range; intent con là search_context để lấy context chuẩn.
-                    seg_step = dict(step)
-                    seg_args = dict(args)
-                    seg_args["chapter_range"] = [seg_start, seg_end]
-                    seg_step["args"] = seg_args
-                    seg_step["intent"] = "search_context"
-                    seg_router_result = step_to_router_result(seg_step, user_prompt)
+                    # Copy từ router_result gốc, chỉ thay chapter_range cho sub-range; intent con là search_context.
+                    seg_router_result = dict(base_router_result)
+                    seg_router_result["intent"] = "search_context"
+                    seg_router_result["chapter_range"] = [seg_start, seg_end]
                     seg_ctx_text, seg_sources, _, _ = ContextManager.build_context(
                         seg_router_result,
                         project_id,
@@ -244,7 +343,25 @@ def execute_plan(
                 remaining_after = remaining_steps[1:]
 
                 # Vẫn cho phép re-plan dựa trên outcome tổng hợp của bước multi_chapter_analysis (nhưng các LLM call con không tạo thêm bước).
-                should_replan, outcome_reason = evaluate_step_outcome(intent, ctx_text, all_branch_sources or [])
+                if retry_count_per_intent.get(intent, 0) >= max_retries_per_intent:
+                    should_replan, outcome_reason = (False, "")
+                else:
+                    should_replan, outcome_reason = evaluate_step_outcome(
+                        intent,
+                        ctx_text,
+                        all_branch_sources or [],
+                        step,
+                    )
+                evaluation_status = "ok"
+                evaluation_reason = ""
+                if should_replan:
+                    evaluation_status = "failed"
+                    evaluation_reason = outcome_reason
+                # Ghi lại đánh giá cho step vừa chạy.
+                if step_results:
+                    step_results[-1]["evaluation_status"] = evaluation_status
+                    if evaluation_reason:
+                        step_results[-1]["evaluation_reason"] = evaluation_reason
                 if should_replan and remaining_after and replan_count < max_replan_rounds:
                     action, reason, new_plan = replan_after_step(
                         user_prompt,
@@ -263,6 +380,7 @@ def execute_plan(
                     })
                     if action == "replace" and new_plan:
                         replan_count += 1
+                        retry_count_per_intent[intent] = retry_count_per_intent.get(intent, 0) + 1
                         normalized = []
                         for i, s in enumerate(new_plan):
                             normalized.append(_normalize_step(s, len(step_results) + 1 + i, user_prompt))
@@ -275,7 +393,15 @@ def execute_plan(
                 continue
 
         # Các intent còn lại: build context chuẩn rồi để final LLM (user model) dùng.
-        router_result = step_to_router_result(step, user_prompt)
+        if intent == "search_context":
+            router_result = _build_router_result_with_router_3step_for_search(
+                step,
+                user_prompt,
+                project_id,
+                chat_history_text="",
+            )
+        else:
+            router_result = step_to_router_result(step, user_prompt)
 
         ctx_text, sources, _, _ = ContextManager.build_context(
             router_result,
@@ -303,7 +429,24 @@ def execute_plan(
             steps_executed += 1
             cumulative_so_far = "\n".join(cumulative_parts)
             remaining_after = remaining_steps[1:]
-            should_replan, outcome_reason = evaluate_step_outcome(intent, ctx_text, sources or [])
+            if retry_count_per_intent.get(intent, 0) >= max_retries_per_intent:
+                should_replan, outcome_reason = (False, "")
+            else:
+                should_replan, outcome_reason = evaluate_step_outcome(
+                    intent,
+                    ctx_text,
+                    sources or [],
+                    step,
+                )
+            evaluation_status = "ok"
+            evaluation_reason = ""
+            if should_replan:
+                evaluation_status = "failed"
+                evaluation_reason = outcome_reason
+            if step_results:
+                step_results[-1]["evaluation_status"] = evaluation_status
+                if evaluation_reason:
+                    step_results[-1]["evaluation_reason"] = evaluation_reason
             if should_replan and remaining_after and replan_count < max_replan_rounds:
                 action, reason, new_plan = replan_after_step(
                     user_prompt, cumulative_so_far, step_results, step, outcome_reason, remaining_after, project_id,
@@ -361,18 +504,35 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
         block = f"\n--- [STEP {step_id}: {intent}] ---\n{ctx_text}\n"
         cumulative_parts.append(block)
         all_sources.extend([f"Step {step_id}: {intent}"] + (sources or []))
-        step_results.append({
-            "step_id": step_id,
-            "intent": intent,
-            "context_snippet": ctx_text[:2000],
-            "executor_result": executor_result,
-        })
+            step_results.append({
+                "step_id": step_id,
+                "intent": intent,
+                "context_snippet": ctx_text[:2000],
+                "executor_result": executor_result,
+            })
         steps_executed += 1
         cumulative_so_far = "\n".join(cumulative_parts)
         remaining_after = remaining_steps[1:]
 
         # Dynamic re-planning: đánh giá outcome và có thể thay plan còn lại
-        should_replan, outcome_reason = evaluate_step_outcome(intent, ctx_text, sources or [])
+        if retry_count_per_intent.get(intent, 0) >= max_retries_per_intent:
+            should_replan, outcome_reason = (False, "")
+        else:
+            should_replan, outcome_reason = evaluate_step_outcome(
+                intent,
+                ctx_text,
+                sources or [],
+                step,
+            )
+        evaluation_status = "ok"
+        evaluation_reason = ""
+        if should_replan:
+            evaluation_status = "failed"
+            evaluation_reason = outcome_reason
+        if step_results:
+            step_results[-1]["evaluation_status"] = evaluation_status
+            if evaluation_reason:
+                step_results[-1]["evaluation_reason"] = evaluation_reason
         if should_replan and remaining_after and replan_count < max_replan_rounds:
             action, reason, new_plan = replan_after_step(
                 user_prompt,

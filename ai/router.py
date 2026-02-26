@@ -640,12 +640,13 @@ QUY TẮC:
 - **multi_chapter_analysis (V7, khoảng chương lớn):** Khi user yêu cầu phân tích/tổng hợp trên một khoảng chương RỘNG (vd "chương 1 đến 30", "từ chương 5-40") và câu hỏi phức tạp (so sánh, thống kê, logic hole...), dùng **một bước** intent `multi_chapter_analysis` với args.chapter_range = [start, end]. Executor sẽ tự chia khoảng này thành nhiều đoạn nhỏ (1–10, 11–20, 21–30, ...) để xử lý nội bộ và gom kết quả lại. KHÔNG cần thêm nhiều bước `search_context` riêng lẻ cho từng đoạn.
 - **Nhiều bước (plan 2+ step):** Chỉ khi user nói RÕ nhiều việc (vd "tóm tắt chương 1 rồi so sánh với timeline") -> tách nhiều bước, dependency khi cần.
 - unified chỉ khi ra lệnh chạy unified theo chương; args có chapter_range. query_Sql chỉ khi XEM/LIỆT KÊ dữ liệu thô; args có query_target. check_chapter_logic khi user hỏi về lỗi logic/mâu thuẫn/điểm vô lý của chương — điền chapter_range. dependency: null cho unified, query_Sql, web_search, ask_user_clarification, chat_casual, check_chapter_logic. verification_required: true nếu plan có numerical_calculation, search_context, query_Sql, check_chapter_logic, multi_chapter_analysis.
+- **Mô tả kế hoạch dạng todo:** Mỗi bước nên có thêm: `task_name` (tên ngắn, dễ đọc), `input_spec` (user-query con / phạm vi dữ liệu dùng cho bước này), `output_spec` (kết quả mong đợi, ví dụ: "bảng số liệu win/loss", "tóm tắt timeline 1-10"...).
 
 Trả về ĐÚNG MỘT JSON:
 - **analysis**: Mô tả ngắn; nếu dùng LỊCH SỬ thì ghi rõ: "Đã làm: ...; Cần làm: ..." để plan chỉ chạy đúng bước còn lại.
 - **plan**: Chỉ gồm các bước **CẦN LÀM** (không lặp bước đã làm). Mỗi bước có args.query_refined = nội dung chỉ cho bước đó.
 
-{{ "analysis": "...", "plan": [ {{ "step_id": 1, "intent": "...", "args": {{ "query_refined": "...", "context_needs": [], "target_files": [], "target_bible_entities": [], "chapter_range": null, "chapter_range_mode": null, "chapter_range_count": 5, "data_operation_type": "", "data_operation_target": "", "query_target": "" }}, "dependency": null }} ], "verification_required": true }}
+{{ "analysis": "...", "plan": [ {{ "step_id": 1, "intent": "...", "args": {{ "task_name": "search_context_main", "input_spec": "tóm tắt chương 1-10", "output_spec": "tóm tắt ngắn gọn", "query_refined": "...", "context_needs": [], "target_files": [], "target_bible_entities": [], "chapter_range": null, "chapter_range_mode": null, "chapter_range_count": 5, "data_operation_type": "", "data_operation_target": "", "query_target": "" }}, "dependency": null }} ], "verification_required": true }}
 Chỉ trả về JSON."""
 
         try:
@@ -711,6 +712,9 @@ Chỉ trả về JSON."""
                 "step_id": step_id,
                 "intent": intent,
                 "args": {
+                    "task_name": args.get("task_name") or f"{intent}_{step_id}",
+                    "input_spec": args.get("input_spec") or user_prompt,
+                    "output_spec": args.get("output_spec") or "",
                     "query_refined": args.get("query_refined") or args.get("rewritten_query") or user_prompt,
                     "context_needs": args.get("context_needs") if isinstance(args.get("context_needs"), list) else [],
                     "context_priority": args.get("context_priority") if isinstance(args.get("context_priority"), list) else [],
@@ -831,6 +835,9 @@ Hãy trả về ĐÚNG MỘT JSON với format:
       "step_id": 1,
       "intent": "search_context | multi_chapter_analysis | check_chapter_logic | unified | numerical_calculation | query_Sql | web_search | chat_casual | ask_user_clarification",
       "args": {{
+        "task_name": "search_context_main",
+        "input_spec": "tóm tắt chương 1-10",
+        "output_spec": "tóm tắt ngắn gọn",
         "query_refined": "...", 
         "context_needs": [], 
         "chapter_range": null, 
@@ -900,6 +907,9 @@ LƯU Ý:
                 "step_id": step_id,
                 "intent": intent,
                 "args": {
+                    "task_name": args.get("task_name") or f"{intent}_{step_id}",
+                    "input_spec": args.get("input_spec") or user_prompt,
+                    "output_spec": args.get("output_spec") or "",
                     "query_refined": args.get("query_refined") or args.get("rewritten_query") or user_prompt,
                     "context_needs": args.get("context_needs") if isinstance(args.get("context_needs"), list) else [],
                     "context_priority": args.get("context_priority") if isinstance(args.get("context_priority"), list) else [],
@@ -950,6 +960,9 @@ LƯU Ý:
                 "step_id": 1,
                 "intent": intent,
                 "args": {
+                    "task_name": f"{intent}_1",
+                    "input_spec": user_prompt,
+                    "output_spec": "",
                     "query_refined": single_router_result.get("rewritten_query") or user_prompt,
                     "context_needs": single_router_result.get("context_needs") or [],
                     "context_priority": single_router_result.get("context_priority") or [],
