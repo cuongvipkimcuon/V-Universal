@@ -23,7 +23,7 @@ from ai.router import is_multi_intent_request
 from persona import PersonaSystem
 from utils.auth_manager import check_permission, submit_pending_change
 from utils.python_executor import PythonExecutor
-from ai.utils import infer_bible_entities_from_prompt
+from ai.utils import infer_bible_entities_from_prompt, parse_chapter_range_from_query
 
 
 def _get_logic_reminder(project_id):
@@ -1040,6 +1040,59 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                                 )
                             plan = plan_result.get("plan") or []
                             first_intent = (plan[0].get("intent", "") if plan else "") or "chat_casual"
+                            # Hard override: nếu Planner chọn ask_user_clarification nhưng câu hỏi đã rất rõ chương/khoảng chương
+                            # và mục tiêu phân tích, thì ép về intent phân tích thay vì hỏi lại user.
+                            if plan and first_intent == "ask_user_clarification":
+                                low_prompt_v7 = (prompt or "").strip().lower()
+                                chapter_range_v7 = None
+                                try:
+                                    chapter_range_v7 = parse_chapter_range_from_query(prompt or "")
+                                except Exception:
+                                    chapter_range_v7 = None
+                                has_clear_range = isinstance(chapter_range_v7, (list, tuple)) and len(chapter_range_v7) >= 1
+                                analysis_keywords = [
+                                    "tóm tắt",
+                                    "tom tat",
+                                    "phân tích",
+                                    "phan tich",
+                                    "logic",
+                                    "mâu thuẫn",
+                                    "mau thuan",
+                                    "plot hole",
+                                    "so sánh",
+                                    "so sanh",
+                                    "% thắng",
+                                    "% thang",
+                                    "tỷ lệ thắng",
+                                    "ty le thang",
+                                    "phần trăm thắng",
+                                    "phan tram thang",
+                                ]
+                                has_analysis_goal = any(k in low_prompt_v7 for k in analysis_keywords)
+                                if has_clear_range and has_analysis_goal:
+                                    step0 = plan[0] or {}
+                                    args0 = (step0.get("args") or {}).copy()
+                                    # Chuẩn hóa chapter_range từ parser
+                                    if isinstance(chapter_range_v7, (list, tuple)) and len(chapter_range_v7) >= 2:
+                                        try:
+                                            start_cr = int(chapter_range_v7[0])
+                                            end_cr = int(chapter_range_v7[1])
+                                            args0.setdefault("chapter_range", [start_cr, end_cr])
+                                        except (ValueError, TypeError):
+                                            pass
+                                    elif isinstance(chapter_range_v7, (list, tuple)) and len(chapter_range_v7) == 1:
+                                        try:
+                                            ch = int(chapter_range_v7[0])
+                                            args0.setdefault("chapter_range", [ch, ch])
+                                        except (ValueError, TypeError):
+                                            pass
+                                    args0.setdefault("chapter_range_mode", "range")
+                                    step0["intent"] = "multi_chapter_analysis"
+                                    step0["args"] = args0
+                                    plan[0] = step0
+                                    first_intent = "multi_chapter_analysis"
+                                    if isinstance(plan_result, dict):
+                                        plan_result["plan"] = plan
                         else:
                             plan_result = None
                             plan = []
