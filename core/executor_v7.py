@@ -401,7 +401,8 @@ def execute_plan(
                 continue
 
         # Các intent còn lại: build context chuẩn rồi để final LLM (user model) dùng.
-        if intent == "search_context":
+        # numerical_calculation tắt tạm: xử lý như search_context (không chạy Python Executor).
+        if intent == "search_context" or intent == "numerical_calculation":
             router_result = _build_router_result_with_router_3step_for_search(
                 step,
                 user_prompt,
@@ -478,7 +479,8 @@ def execute_plan(
 
         executor_result = None
         can_use_llm = llm_budget_ref is None or (len(llm_budget_ref) >= 2 and llm_budget_ref[0] < llm_budget_ref[1])
-        if intent == "numerical_calculation" and run_numerical_executor and PythonExecutor and not free_chat_mode and can_use_llm:
+        # Python Executor tắt tạm (tránh rủi ro); numerical_calculation chỉ build context như search_context.
+        if False and intent == "numerical_calculation" and run_numerical_executor and PythonExecutor and not free_chat_mode and can_use_llm:
             try:
                 code_prompt = f"""User hỏi: "{user_prompt}"
 Context có sẵn:
@@ -508,7 +510,7 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
             except Exception as ex:
                 executor_result = f"(Lỗi: {ex})"
                 ctx_text += f"\n\n--- KẾT QUẢ TÍNH TOÁN ---\n{executor_result}"
-        elif intent == "numerical_calculation" and not can_use_llm and llm_budget_ref:
+        elif False and intent == "numerical_calculation" and not can_use_llm and llm_budget_ref:
             ctx_text += "\n\n--- KẾT QUẢ TÍNH TOÁN ---\n(Bỏ qua: đã đạt giới hạn gọi LLM cho lượt này.)"
 
         block = f"\n--- [STEP {step_id}: {intent}] ---\n{ctx_text}\n"

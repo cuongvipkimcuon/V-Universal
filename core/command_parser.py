@@ -21,8 +21,8 @@ BUILTIN_TRIGGERS = {
     "manage_timeline": "search_context",
     "mixed": "search_context",
     "mixed_context": "search_context",
-    "calc": "numerical_calculation",
-    "numerical_calculation": "numerical_calculation",
+    "calc": "search_context",  # numerical tắt tạm; @@calc xử lý như search_context
+    "numerical_calculation": "search_context",
     "web": "web_search",
     "web_search": "web_search",
     "remember": "remember_rule",
@@ -45,7 +45,8 @@ COMMAND_TO_ROUTER = {
     "search_chunks": ("search_context", None, None),
     "manage_timeline": ("search_context", None, None),
     "mixed_context": ("search_context", None, None),
-    "numerical_calculation": ("numerical_calculation", None, None),
+    "search_context": ("search_context", None, None),  # @@calc / numerical_calculation tắt → dùng search_context
+    "numerical_calculation": ("search_context", None, None),  # tắt numerical, dùng search_context
     "web_search": ("web_search", None, None),
     "remember_rule": ("chat_casual", None, None),
     "query_sql": ("query_Sql", None, None),

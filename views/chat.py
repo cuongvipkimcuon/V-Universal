@@ -1667,7 +1667,8 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                             query_embedding_for_context = query_embedding_cache[1]
                         else:
                             query_embedding_for_context = AIService.get_embedding(canonical_query) if canonical_query else None
-                        if intent == "numerical_calculation" and not free_chat_mode:
+                        # Numerical calculation tắt tạm (tránh rủi ro Python Executor); xử lý như search_context.
+                        if False and intent == "numerical_calculation" and not free_chat_mode:
                             context_text, sources, context_tokens, context_parts_meta = ContextManager.build_context(
                                 router_out, project_id, active_persona,
                                 st.session_state.get('strict_mode', False),

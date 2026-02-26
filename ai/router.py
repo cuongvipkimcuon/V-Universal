@@ -20,6 +20,30 @@ from ai.utils import (
 )
 
 
+def _is_simple_math_only(query: str) -> bool:
+    """
+    True nếu câu hỏi chỉ là tính toán đơn giản (số, phép +-*/, không cần dữ liệu dự án).
+    Khi đó ép numerical -> chat_casual để LLM trả lời trực tiếp (vd. 1+1 bằng mấy).
+    """
+    if not query or len(query.strip()) > 120:
+        return False
+    q = query.strip().lower()
+    # Từ khóa gắn với dữ liệu dự án → không coi là "simple math"
+    project_keywords = (
+        "chương", "chapter", "chap ", "nhân vật", "character", "bible", "timeline",
+        "dự án", "project", "file", "excel", "cột", "doanh thu", "thống kê", "đếm",
+        "relation", "quan hệ", "arc ", "summary", "tóm tắt đã", "chunk", "rule",
+    )
+    if any(k in q for k in project_keywords):
+        return False
+    # Có vẻ chỉ là số + phép tính: có digit và (bằng | bao nhiêu | tính | cộng | trừ | nhân | chia hoặc + - * /)
+    has_digit = bool(re.search(r"\d", q))
+    math_cue = any(
+        x in q for x in ("bằng", "bao nhiêu", "tính", "cộng", "trừ", "nhân", "chia", "+", "-", "*", "/", "x ")
+    )
+    return has_digit and math_cue
+
+
 def is_multi_step_update_data_request(query: str) -> bool:
     """
     Bộ lọc nhỏ: phát hiện câu hỏi có yêu cầu 2+ thao tác update_data (extract/update/delete bible, relation, timeline, chunking).
@@ -214,6 +238,9 @@ Trả về JSON với đủ key:
             # Legacy: LLM trả về update_data → coi là unified (chỉ thao tác theo chương).
             if intent == "update_data":
                 intent = "unified"
+            # Tạm tắt numerical_calculation (không chạy Python Executor): câu hỏi tính đơn giản (1+1...) -> chat_casual; còn lại -> search_context.
+            if intent == "numerical_calculation":
+                intent = "chat_casual" if _is_simple_math_only(user_prompt or "") else "search_context"
             needs_data = intent not in INTENTS_NO_DATA
             relevant_rules = (data.get("relevant_rules") or "").strip()
             raw_new_rules = data.get("new_rules") or []

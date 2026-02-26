@@ -70,7 +70,7 @@ TAB_STRUCTURE = {
         ("data_analyze", "📊 Data Analyze", "render_data_analyze_tab", False),
         ("background_tasks", "🔄 Background Jobs", "render_background_tasks_tab", False),
         ("review", "🤖 Review", "render_review_tab", False),
-        ("python_executor", "🧮 Python Executor", "render_python_executor_tab", False),
+        # ("python_executor", "🧮 Python Executor", "render_python_executor_tab", False),  # Ẩn tạm: tránh rủi ro, không triển khai numerical
     ],
     "knowledge": [
         ("bible", "📖 Bible", "render_bible_tab", True),
