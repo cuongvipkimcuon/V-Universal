@@ -921,71 +921,86 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                         debug_notes.append(f"🎯 Semantic match {int(semantic_match.get('similarity',0)*100)}%")
                     elif router_out is None and not is_v_home:
                         # Mô hình 3 bước (chung Router & Planner): (1) Intent (2) Plan hoặc context_planner (3) Execute + trả lời. Giới hạn LLM/turn (verification không tính).
-                        can_call = max_llm_calls_per_turn == 0 or llm_calls_this_turn[0] < max_llm_calls_per_turn
-                        if can_call:
-                            step1 = SmartAIRouter.intent_only_classifier(prompt, recent_history_text, project_id)
-                            llm_calls_this_turn[0] += 1
-                        else:
+                        use_v7 = st.session_state.get("use_v7_planner", False)
+
+                        if use_v7:
+                            # Khi đã bật V7 Planner: bỏ qua bước LLM intent_only_classifier, để Planner tự quyết định intent.
                             step1 = {
                                 "intent": "chat_casual",
-                                "needs_data": False,
+                                "needs_data": True,
                                 "rewritten_query": prompt,
                                 "clarification_question": "",
                                 "relevant_rules": "",
                                 "new_rules": [],
                             }
-                        intent_step1 = step1.get("intent", "chat_casual")
-                        needs_data = step1.get("needs_data", False)
-                        low_prompt = (prompt or "").strip().lower()
-                        # Heuristic: Câu rất ngắn, chủ yếu là than vãn cảm xúc, không nhắc tới nội dung dự án → ép về chat_casual.
-                        emotion_keywords = [
-                            "buồn",
-                            "bùn",
-                            "mệt",
-                            "mệt mỏi",
-                            "chán",
-                            "chán nản",
-                            "stress",
-                            "căng thẳng",
-                            "cô đơn",
-                            "tuyệt vọng",
-                            "nản",
-                            "tụt mood",
-                        ]
-                        project_keywords = [
-                            "chương",
-                            "chapter",
-                            "chap ",
-                            "nhân vật",
-                            "timeline",
-                            "cốt truyện",
-                            "plot",
-                            "story",
-                            "dự án",
-                            "project",
-                        ]
-                        words = [w for w in low_prompt.split() if w]
-                        is_very_short = len(low_prompt) <= 40 and len(words) <= 6
-                        has_emotion = any(k in low_prompt for k in emotion_keywords)
-                        mentions_project = any(k in low_prompt for k in project_keywords)
-                        if is_very_short and has_emotion and not mentions_project:
-                            intent_step1 = "chat_casual"
-                            needs_data = False
-                        # Ghi nhớ luật / ưu tiên ("từ giờ luật là", "hãy nhớ rằng", "V nghiêm khắc khi...") → chat_casual (add rule đã tách khỏi unified).
-                        if intent_step1 == "unified" and any(
-                            key in low_prompt
-                            for key in [
-                                "từ giờ, luật là",
-                                "tu gio, luat la",
-                                "hãy nhớ rằng",
-                                "hay nho rang",
-                                "nghiêm khắc khi",
-                                "luật là",
+                            intent_step1 = step1["intent"]
+                            needs_data = step1["needs_data"]
+                        else:
+                            can_call = max_llm_calls_per_turn == 0 or llm_calls_this_turn[0] < max_llm_calls_per_turn
+                            if can_call:
+                                step1 = SmartAIRouter.intent_only_classifier(prompt, recent_history_text, project_id)
+                                llm_calls_this_turn[0] += 1
+                            else:
+                                step1 = {
+                                    "intent": "chat_casual",
+                                    "needs_data": False,
+                                    "rewritten_query": prompt,
+                                    "clarification_question": "",
+                                    "relevant_rules": "",
+                                    "new_rules": [],
+                                }
+                            intent_step1 = step1.get("intent", "chat_casual")
+                            needs_data = step1.get("needs_data", False)
+                            low_prompt = (prompt or "").strip().lower()
+                            # Heuristic: Câu rất ngắn, chủ yếu là than vãn cảm xúc, không nhắc tới nội dung dự án → ép về chat_casual.
+                            emotion_keywords = [
+                                "buồn",
+                                "bùn",
+                                "mệt",
+                                "mệt mỏi",
+                                "chán",
+                                "chán nản",
+                                "stress",
+                                "căng thẳng",
+                                "cô đơn",
+                                "tuyệt vọng",
+                                "nản",
+                                "tụt mood",
                             ]
-                        ) and not any(k in low_prompt for k in ("chương", "chapter", "chap ")):
-                            intent_step1 = "chat_casual"
-                            needs_data = False
-                        use_v7 = st.session_state.get("use_v7_planner", False)
+                            project_keywords = [
+                                "chương",
+                                "chapter",
+                                "chap ",
+                                "nhân vật",
+                                "timeline",
+                                "cốt truyện",
+                                "plot",
+                                "story",
+                                "dự án",
+                                "project",
+                            ]
+                            words = [w for w in low_prompt.split() if w]
+                            is_very_short = len(low_prompt) <= 40 and len(words) <= 6
+                            has_emotion = any(k in low_prompt for k in emotion_keywords)
+                            mentions_project = any(k in low_prompt for k in project_keywords)
+                            if is_very_short and has_emotion and not mentions_project:
+                                intent_step1 = "chat_casual"
+                                needs_data = False
+                            # Ghi nhớ luật / ưu tiên ("từ giờ luật là", "hãy nhớ rằng", "V nghiêm khắc khi...") → chat_casual (add rule đã tách khỏi unified).
+                            if intent_step1 == "unified" and any(
+                                key in low_prompt
+                                for key in [
+                                    "từ giờ, luật là",
+                                    "tu gio, luat la",
+                                    "hãy nhớ rằng",
+                                    "hay nho rang",
+                                    "nghiêm khắc khi",
+                                    "luật là",
+                                ]
+                            ) and not any(k in low_prompt for k in ("chương", "chapter", "chap ")):
+                                intent_step1 = "chat_casual"
+                                needs_data = False
+
                         # Nếu user đã bật V7 Planner thì luôn ưu tiên chạy V7,
                         # còn nếu không thì chỉ chạy khi RÕ RÀNG cần nhiều bước: router suggest_v7 VÀ câu có cụm đa intent.
                         if use_v7:
