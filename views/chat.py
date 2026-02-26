@@ -986,8 +986,12 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                             intent_step1 = "chat_casual"
                             needs_data = False
                         use_v7 = st.session_state.get("use_v7_planner", False)
-                        # Chỉ chạy V7 khi RÕ RÀNG cần nhiều bước: router suggest_v7 VÀ câu có cụm đa intent (tránh câu đơn bị ép V7)
-                        want_multi = (intent_step1 == "suggest_v7") and is_multi_intent_request(prompt)
+                        # Nếu user đã bật V7 Planner thì luôn ưu tiên chạy V7,
+                        # còn nếu không thì chỉ chạy khi RÕ RÀNG cần nhiều bước: router suggest_v7 VÀ câu có cụm đa intent.
+                        if use_v7:
+                            want_multi = True
+                        else:
+                            want_multi = (intent_step1 == "suggest_v7") and is_multi_intent_request(prompt)
 
                         if use_v7 and want_multi:
                             can_call_plan = max_llm_calls_per_turn == 0 or llm_calls_this_turn[0] < max_llm_calls_per_turn
