@@ -95,6 +95,9 @@ INTENT_HANDLER_MAP = {
     "query_Sql": "llm_with_context",
     "numerical_calculation": "llm_with_context",
     "check_chapter_logic": "llm_with_context",
+    # V7: intent đặc biệt cho phân tích nhiều chương (executor xử lý nhiều sub-range bên trong),
+    # vẫn dùng handler llm_with_context cho từng sub-range.
+    "multi_chapter_analysis": "llm_with_context",
     "unified": "data_operation",
 }
 
@@ -633,8 +636,9 @@ INPUT USER: "{user_prompt}"
 QUY TẮC:
 - **Tham chiếu chat cũ — phân định ĐÃ LÀM / CẦN LÀM:** Khi user tham chiếu lệnh trước (vd "làm đi", "cái đó", "tiếp đi"): (1) Từ LỊCH SỬ xác định **ĐÃ LÀM GÌ** (các bước/intent đã thực thi, kết quả model đã trả lời). (2) Xác định **CẦN LÀM GÌ** (phần còn lại user muốn, hoặc câu hỏi mới). (3) Chỉ lên plan cho phần **CẦN LÀM**; không thêm bước lặp lại việc đã làm. (4) Mỗi bước trong plan: **query_refined** = câu hỏi/nội dung **chỉ dành cho bước đó** (phần cần làm của bước đó), không gộp cả "đã làm".
 - **search_context (intent thống nhất):** Mọi câu hỏi cần tra cứu/đọc (lore, nhân vật, quan hệ, timeline, chunk, tóm tắt chương) -> ĐÚNG MỘT bước intent `search_context`. BẮT BUỘC điền **context_needs** trong args: mảng ["bible"] | ["relation"] | ["timeline"] | ["chunk"] | ["chapter"] hoặc kết hợp. read_full_content KHÔNG dùng; chỉ fallback nội bộ khi trả lời chưa đủ.
+- **multi_chapter_analysis (V7, khoảng chương lớn):** Khi user yêu cầu phân tích/tổng hợp trên một khoảng chương RỘNG (vd "chương 1 đến 30", "từ chương 5-40") và câu hỏi phức tạp (so sánh, thống kê, logic hole...), dùng **một bước** intent `multi_chapter_analysis` với args.chapter_range = [start, end]. Executor sẽ tự chia khoảng này thành nhiều đoạn nhỏ (1–10, 11–20, 21–30, ...) để xử lý nội bộ và gom kết quả lại. KHÔNG cần thêm nhiều bước `search_context` riêng lẻ cho từng đoạn.
 - **Nhiều bước (plan 2+ step):** Chỉ khi user nói RÕ nhiều việc (vd "tóm tắt chương 1 rồi so sánh với timeline") -> tách nhiều bước, dependency khi cần.
-- unified chỉ khi ra lệnh chạy unified theo chương; args có chapter_range. query_Sql chỉ khi XEM/LIỆT KÊ dữ liệu thô; args có query_target. check_chapter_logic khi user hỏi về lỗi logic/mâu thuẫn/điểm vô lý của chương — điền chapter_range. dependency: null cho unified, query_Sql, web_search, ask_user_clarification, chat_casual, check_chapter_logic. verification_required: true nếu plan có numerical_calculation, search_context, query_Sql, check_chapter_logic.
+- unified chỉ khi ra lệnh chạy unified theo chương; args có chapter_range. query_Sql chỉ khi XEM/LIỆT KÊ dữ liệu thô; args có query_target. check_chapter_logic khi user hỏi về lỗi logic/mâu thuẫn/điểm vô lý của chương — điền chapter_range. dependency: null cho unified, query_Sql, web_search, ask_user_clarification, chat_casual, check_chapter_logic. verification_required: true nếu plan có numerical_calculation, search_context, query_Sql, check_chapter_logic, multi_chapter_analysis.
 
 Trả về ĐÚNG MỘT JSON:
 - **analysis**: Mô tả ngắn; nếu dùng LỊCH SỬ thì ghi rõ: "Đã làm: ...; Cần làm: ..." để plan chỉ chạy đúng bước còn lại.
@@ -667,7 +671,7 @@ Chỉ trả về JSON."""
             return SmartAIRouter._single_intent_to_plan(single, user_prompt)
         analysis = data.get("analysis", "")
         verification_required = bool(data.get("verification_required", False))
-        valid_intents = {"numerical_calculation", "search_context", "web_search", "ask_user_clarification", "unified", "query_Sql", "check_chapter_logic", "chat_casual"}
+        valid_intents = {"numerical_calculation", "search_context", "web_search", "ask_user_clarification", "unified", "query_Sql", "check_chapter_logic", "chat_casual", "multi_chapter_analysis"}
         normalized_plan = []
         for i, s in enumerate(plan):
             if not isinstance(s, dict):
@@ -719,7 +723,19 @@ Chỉ trả về JSON."""
         if not normalized_plan:
             single = SmartAIRouter.ai_router_pro_v2(user_prompt, chat_history_text, project_id)
             return SmartAIRouter._single_intent_to_plan(single, user_prompt)
-        intents_need_verify = {"numerical_calculation", "search_context", "query_Sql", "check_chapter_logic"}
+        # Auto-upgrade search_context trên khoảng chương rất rộng thành multi_chapter_analysis để V7 executor xử lý nhiều sub-range nội bộ.
+        for s in normalized_plan:
+            if s.get("intent") == "search_context":
+                args_s = s.get("args") or {}
+                cr = args_s.get("chapter_range")
+                if isinstance(cr, (list, tuple)) and len(cr) >= 2:
+                    try:
+                        start_cr, end_cr = int(cr[0]), int(cr[1])
+                        if end_cr - start_cr + 1 >= 20:
+                            s["intent"] = "multi_chapter_analysis"
+                    except (ValueError, TypeError):
+                        pass
+        intents_need_verify = {"numerical_calculation", "search_context", "query_Sql", "check_chapter_logic", "multi_chapter_analysis"}
         if any(s.get("intent") in intents_need_verify for s in normalized_plan):
             verification_required = True
         return {"analysis": analysis, "plan": normalized_plan, "verification_required": verification_required}
@@ -775,7 +791,7 @@ Chỉ trả về JSON."""
         plan = plan[:3]
         analysis = data.get("analysis", "")
         verification_required = bool(data.get("verification_required", False))
-        valid_intents = {"numerical_calculation", "search_context", "web_search", "ask_user_clarification", "unified", "query_Sql", "check_chapter_logic", "chat_casual"}
+        valid_intents = {"numerical_calculation", "search_context", "web_search", "ask_user_clarification", "unified", "query_Sql", "check_chapter_logic", "chat_casual", "multi_chapter_analysis"}
         normalized_plan = []
         for i, s in enumerate(plan):
             if not isinstance(s, dict):
@@ -816,7 +832,19 @@ Chỉ trả về JSON."""
         if not normalized_plan:
             single = SmartAIRouter.ai_router_pro_v2(user_prompt, chat_history_text, project_id)
             return SmartAIRouter._single_intent_to_plan(single, user_prompt)
-        if any(s.get("intent") in {"numerical_calculation", "search_context", "query_Sql", "check_chapter_logic"} for s in normalized_plan):
+        # Áp dụng multi_chapter_analysis cho search_context với khoảng chương rất rộng trong bản light.
+        for s in normalized_plan:
+            if s.get("intent") == "search_context":
+                args_s = s.get("args") or {}
+                cr = args_s.get("chapter_range")
+                if isinstance(cr, (list, tuple)) and len(cr) >= 2:
+                    try:
+                        start_cr, end_cr = int(cr[0]), int(cr[1])
+                        if end_cr - start_cr + 1 >= 20:
+                            s["intent"] = "multi_chapter_analysis"
+                    except (ValueError, TypeError):
+                        pass
+        if any(s.get("intent") in {"numerical_calculation", "search_context", "query_Sql", "check_chapter_logic", "multi_chapter_analysis"} for s in normalized_plan):
             verification_required = True
         return {"analysis": analysis, "plan": normalized_plan, "verification_required": verification_required}
 
@@ -847,5 +875,5 @@ Chỉ trả về JSON."""
                 },
                 "dependency": None,
             }],
-            "verification_required": intent in ("numerical_calculation", "search_context", "query_Sql", "check_chapter_logic"),
+            "verification_required": intent in ("numerical_calculation", "search_context", "query_Sql", "check_chapter_logic", "multi_chapter_analysis"),
         }

@@ -107,7 +107,6 @@ def execute_plan(
         step = remaining_steps[0]
         step_id = step.get("step_id", len(step_results) + 1)
         intent = step.get("intent", "chat_casual")
-        router_result = step_to_router_result(step, user_prompt)
         args = step.get("args") or {}
         op_target = (args.get("data_operation_target") or "").strip()
 
@@ -133,6 +132,150 @@ def execute_plan(
             steps_executed += 1
             remaining_steps = remaining_steps[1:]
             continue
+
+        # Intent đặc biệt: multi_chapter_analysis (V7) — phân tích khoảng chương lớn bằng cách chia thành nhiều đoạn nhỏ.
+        if intent == "multi_chapter_analysis":
+            ch_range = args.get("chapter_range")
+            start = end = None
+            if isinstance(ch_range, (list, tuple)) and len(ch_range) >= 2:
+                try:
+                    start, end = int(ch_range[0]), int(ch_range[1])
+                    start, end = min(start, end), max(start, end)
+                except (ValueError, TypeError):
+                    start = end = None
+            # Nếu không xác định được khoảng chương, fallback về search_context thông thường.
+            if start is None or end is None:
+                intent = "search_context"
+            else:
+                total_chapters = end - start + 1
+                # Chia thành các đoạn "gần đều", mặc định kích thước ~10 chương (ví dụ 1–30 -> 1–10,11–20,21–30).
+                segment_size = 10 if total_chapters > 10 else total_chapters
+                segments: List[Tuple[int, int]] = []
+                cur = start
+                while cur <= end:
+                    seg_end = min(cur + segment_size - 1, end)
+                    segments.append((cur, seg_end))
+                    cur = seg_end + 1
+
+                branch_blocks: List[str] = []
+                all_branch_sources: List[str] = []
+
+                for idx, (seg_start, seg_end) in enumerate(segments, 1):
+                    # Dùng cùng args, chỉ thay chapter_range cho sub-range; intent con là search_context để lấy context chuẩn.
+                    seg_step = dict(step)
+                    seg_args = dict(args)
+                    seg_args["chapter_range"] = [seg_start, seg_end]
+                    seg_step["args"] = seg_args
+                    seg_step["intent"] = "search_context"
+                    seg_router_result = step_to_router_result(seg_step, user_prompt)
+                    seg_ctx_text, seg_sources, _, _ = ContextManager.build_context(
+                        seg_router_result,
+                        project_id,
+                        persona,
+                        strict_mode=strict_mode,
+                        current_arc_id=current_arc_id,
+                        session_state=session_state,
+                        free_chat_mode=free_chat_mode,
+                        max_context_tokens=token_limit,
+                    )
+
+                    # Gọi LLM tool model cho từng đoạn, với retry tối đa 2 lần khi lỗi.
+                    system_content = (
+                        f"{persona.get('core_instruction', '')}\n\n"
+                        f"- Bạn đang xử lý PHẦN {idx} trong khoảng chương {seg_start}-{seg_end}.\n"
+                        f"- Chỉ phân tích và trả lời cho các chương trong khoảng {seg_start}-{seg_end}.\n"
+                        f"- Kết quả sẽ được hệ thống gom lại để tạo câu trả lời cuối cùng."
+                    )
+                    user_content = (
+                        f"CONTEXT (chỉ cho các chương {seg_start}-{seg_end}):\n{seg_ctx_text}\n\n"
+                        f"YÊU CẦU GỐC CỦA USER:\n{user_prompt}\n\n"
+                        f"Hãy chỉ phân tích phần câu hỏi này dựa trên các chương {seg_start}-{seg_end}, "
+                        f"trả lời súc tích nhưng đủ ý; KHÔNG tổng kết cho toàn bộ {start}-{end} chương."
+                    )
+                    messages = [
+                        {"role": "system", "content": system_content},
+                        {"role": "user", "content": user_content},
+                    ]
+
+                    branch_answer = ""
+                    last_error: Optional[Exception] = None
+                    for attempt in range(3):
+                        try:
+                            model = _get_default_tool_model()
+                            resp = AIService.call_openrouter(
+                                messages=messages,
+                                model=model,
+                                temperature=0.1,
+                                max_tokens=2000,
+                            )
+                            content = (resp.choices[0].message.content or "").strip()
+                            if content:
+                                branch_answer = content
+                                if llm_budget_ref and len(llm_budget_ref) >= 1:
+                                    llm_budget_ref[0] += 1
+                                break
+                        except Exception as ex:
+                            last_error = ex
+                            continue
+
+                    if not branch_answer:
+                        branch_answer = f"(Lỗi khi xử lý đoạn chương {seg_start}-{seg_end}: {last_error})"
+
+                    block_hdr = f"#### PHÂN TÍCH ĐOẠN CHƯƠNG {seg_start}–{seg_end}\n"
+                    branch_blocks.append(f"{block_hdr}\n{branch_answer}")
+                    all_branch_sources.extend(seg_sources or [])
+
+                # Gom tất cả phần trả lời nhánh thành context cho step này; final LLM (user model) sẽ tổng hợp lại.
+                ctx_text = (
+                    f"[MULTI-CHAPTER ANALYSIS] Khoảng chương {start}-{end}, chia thành {len(segments)} đoạn.\n\n"
+                    + "\n\n".join(branch_blocks)
+                )
+                block = f"\n--- [STEP {step_id}: {intent}] ---\n{ctx_text}\n"
+                cumulative_parts.append(block)
+                all_sources.extend([f"Step {step_id}: {intent}"] + all_branch_sources)
+                step_results.append({
+                    "step_id": step_id,
+                    "intent": intent,
+                    "context_snippet": ctx_text[:2000],
+                    "executor_result": None,
+                })
+                steps_executed += 1
+                cumulative_so_far = "\n".join(cumulative_parts)
+                remaining_after = remaining_steps[1:]
+
+                # Vẫn cho phép re-plan dựa trên outcome tổng hợp của bước multi_chapter_analysis (nhưng các LLM call con không tạo thêm bước).
+                should_replan, outcome_reason = evaluate_step_outcome(intent, ctx_text, all_branch_sources or [])
+                if should_replan and remaining_after and replan_count < max_replan_rounds:
+                    action, reason, new_plan = replan_after_step(
+                        user_prompt,
+                        cumulative_so_far,
+                        step_results,
+                        step,
+                        outcome_reason,
+                        remaining_after,
+                        project_id,
+                    )
+                    replan_events.append({
+                        "step_id": step_id,
+                        "reason": reason or outcome_reason,
+                        "action": action,
+                        "new_plan_summary": [s.get("intent") for s in new_plan] if new_plan else [],
+                    })
+                    if action == "replace" and new_plan:
+                        replan_count += 1
+                        normalized = []
+                        for i, s in enumerate(new_plan):
+                            normalized.append(_normalize_step(s, len(step_results) + 1 + i, user_prompt))
+                        remaining_steps = normalized
+                        continue
+                    if action == "abort":
+                        remaining_steps = []
+                        break
+                remaining_steps = remaining_after
+                continue
+
+        # Các intent còn lại: build context chuẩn rồi để final LLM (user model) dùng.
+        router_result = step_to_router_result(step, user_prompt)
 
         ctx_text, sources, _, _ = ContextManager.build_context(
             router_result,

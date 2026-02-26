@@ -394,7 +394,7 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
                         if n not in prioritized:
                             prioritized.append(n)
                     # Giới hạn số chương auto-load để tránh bùng token
-                    MAX_AUTO_REVERSE_CHAPTERS = 4
+                    MAX_AUTO_REVERSE_CHAPTERS = 15
                     chosen = prioritized[:MAX_AUTO_REVERSE_CHAPTERS]
                     if chosen:
                         services = init_services()
@@ -407,16 +407,42 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
                             if auto_files:
                                 # Dùng token_limit riêng cho auto reverse lookup để tránh chiếm hết context
                                 auto_token_limit = max_context_tokens // 3 if max_context_tokens else 12000
-                                extra_text, extra_sources = ContextManager.load_full_content(
-                                    auto_files, project_id, token_limit=auto_token_limit
-                                )
-                                if extra_text:
-                                    context_parts.append(f"\n--- 🕵️ AUTO-DETECTED CONTEXT (REVERSE LOOKUP) ---\n{extra_text}")
-                                    sources.extend([f"{s} (Auto)" for s in extra_sources])
-                                    total_tokens += AIService.estimate_tokens(extra_text)
-                                    context_parts_meta.append(
-                                        {"source": "chunk", "chapter_numbers": chosen, "text": extra_text}
+                                if max_context_tokens is not None:
+                                    # Không để tổng token vượt quá max_context_tokens
+                                    remaining_budget = max_context_tokens - total_tokens
+                                    if remaining_budget <= 0:
+                                        auto_files = []
+                                    else:
+                                        auto_token_limit = min(auto_token_limit, max(1000, remaining_budget))
+                                if auto_files:
+                                    extra_text, extra_sources = ContextManager.load_full_content(
+                                        auto_files, project_id, token_limit=auto_token_limit
                                     )
+                                    if extra_text:
+                                        # Khi đã load full chapter cho một số chương, loại bỏ bớt
+                                        # các block chunk/bible/timeline/relation trùng chương đó để tránh lặp.
+                                        try:
+                                            chosen_set = set(chosen)
+                                            to_remove_texts = set()
+                                            for meta in list(context_parts_meta):
+                                                src = meta.get("source")
+                                                if src in ("chunk", "bible", "timeline", "relation"):
+                                                    ch_nums = set(meta.get("chapter_numbers") or [])
+                                                    if ch_nums & chosen_set:
+                                                        txt = meta.get("text") or ""
+                                                        if txt:
+                                                            to_remove_texts.add(txt)
+                                                        context_parts_meta.remove(meta)
+                                            if to_remove_texts:
+                                                context_parts[:] = [p for p in context_parts if p not in to_remove_texts]
+                                        except Exception:
+                                            pass
+                                        context_parts.append(f"\n--- 🕵️ AUTO-DETECTED CONTEXT (REVERSE LOOKUP) ---\n{extra_text}")
+                                        sources.extend([f"{s} (Auto)" for s in extra_sources])
+                                        total_tokens += AIService.estimate_tokens(extra_text)
+                                        context_parts_meta.append(
+                                            {"source": "chunk", "chapter_numbers": chosen, "text": extra_text}
+                                        )
         except Exception as e:
             print(f"Reverse lookup error: {e}")
 
