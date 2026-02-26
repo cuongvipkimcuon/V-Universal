@@ -759,16 +759,86 @@ Chỉ trả về JSON."""
             bible_index = get_bible_index(project_id, max_tokens=1200)
         chat_history_capped = cap_chat_history_to_tokens(chat_history_text or "")
         chapter_list_str = get_chapter_list_for_router(project_id) if project_id else "(Trống)"
-        planner_prompt = f"""Bạn là Planner. Intent từ bước 1: {intent_from_step1 or "search_context"}. Nhiệm vụ: đưa ra KẾ HOẠCH tối đa 3 bước.
+        planner_prompt = f"""### VAI TRÒ
+Bạn là **Planner V7** cho hệ thống V7-Universal. Nhiệm vụ: từ câu hỏi của User, đưa ra **KẾ HOẠCH tối đa 3 bước**, mỗi bước 1 intent rõ ràng để Executor V7 có thể:
+- Lấy đúng context cần thiết (theo chương, Bible, timeline, relation, chunk...)
+- Thực hiện các thao tác phân tích / thống kê / unified / web_search tương ứng.
 
-DỮ LIỆU: QUY TẮC={rules_context[:800]} | BIBLE={bible_index[:1000] if bible_index else "(Trống)"} | CHƯƠNG={chapter_list_str} | LỊCH SỬ={chat_history_capped[:600]}
+### 1. DỮ LIỆU ĐẦU VÀO (CHỈ DÙNG ĐỂ QUYẾT ĐỊNH PLAN, KHÔNG PHẢI NỘI DUNG CHÍNH XÁC)
+- QUY TẮC DỰ ÁN (rút gọn): {rules_context[:800]}
+- DANH SÁCH ENTITY (Bible - index rút gọn): {bible_index[:1000] if bible_index else "(Trống)"}
+- DANH SÁCH CHƯƠNG (số - tên): {chapter_list_str}
+- LỊCH SỬ CHAT (rút gọn): {chat_history_capped[:600]}
+- GỢI Ý TỪ BƯỚC 1 (intent_only): {intent_from_step1 or "search_context"} — chỉ dùng tham khảo, bạn được quyền chọn intent khác nếu hợp lý hơn.
 
-INPUT: "{user_prompt}"
+### 2. DANH SÁCH INTENT HỖ TRỢ
+- **search_context**: Mọi câu hỏi cần tra cứu/nội dung dự án (Bible, relation, timeline, chunk, chapter). BẮT BUỘC có `context_needs` (mảng giá trị trong: "bible", "relation", "timeline", "chunk", "chapter").
+- **multi_chapter_analysis**: Phân tích **một khoảng chương lớn** (ví dụ 1–30) theo yêu cầu cụ thể (tóm tắt, so sánh, tìm plot hole...). Dùng khi user nói rõ khoảng chương (vd. "chương 1 đến 30", "từ chương 5 tới 15") và muốn phân tích tổng hợp trên khoảng đó.
+- **check_chapter_logic**: Soát lỗi logic / mâu thuẫn / plot hole của **chương hoặc khoảng chương đã nêu rõ**. BẮT BUỘC có `chapter_range`.
+- **unified**: User ra lệnh **chạy unified theo chương** (extract / phân tích dữ liệu chương) với từ khóa rõ ràng ("unified", "chạy unified", "run unified") và có `chapter_range`.
+- **numerical_calculation**: Tính toán số liệu, thống kê, so sánh định lượng.
+- **query_Sql**: User chỉ muốn XEM/LIỆT KÊ dữ liệu thô (bảng, danh sách...), không phải câu hỏi tự nhiên.
+- **web_search**: Thông tin thời gian thực / ngoài dự án (tỷ giá, tin tức...).
+- **chat_casual**: Chào hỏi, trò chuyện, bàn luận chung **không cần tra cứu dữ liệu dự án**.
+- **ask_user_clarification**: CHỈ dùng khi câu hỏi **quá mơ hồ**, không thể suy ra chương / khoảng chương / entity / mục tiêu cụ thể nào, và cả lịch sử chat cũng không đủ để đoán.
 
-QUY TẮC: Mỗi bước một intent. Intent: search_context, query_Sql, numerical_calculation, unified, check_chapter_logic, web_search, chat_casual, ask_user_clarification. search_context bắt buộc args.context_needs (mảng). unified cần chapter_range. Tối đa 3 bước.
+### 3. QUY TẮC QUAN TRỌNG KHI LẬP KẾ HOẠCH
+1. **Khi user đã nói rõ chương hoặc khoảng chương** (vd. "chương 1", "chương 1 đến 30", "chương 5-10"):
+   - Nếu họ hỏi **nội dung / tóm tắt / phân tích thông thường** -> dùng `search_context` với:
+     - `chapter_range` tương ứng với chương/khoảng chương user nêu.
+     - `context_needs` chứa ít nhất "chapter", có thể thêm "bible", "relation", "timeline" tùy câu hỏi.
+   - Nếu họ hỏi **về điểm vô lý / mâu thuẫn / plot hole / logic** -> ưu tiên `check_chapter_logic` hoặc `multi_chapter_analysis` (khi khoảng chương lớn), luôn có `chapter_range`.
 
-Trả về ĐÚNG MỘT JSON: {{ "analysis": "1 câu", "plan": [ {{ "step_id": 1, "intent": "...", "args": {{ "query_refined": "...", "context_needs": [], "chapter_range": null, "data_operation_type": "", "data_operation_target": "", "query_target": "" }}, "dependency": null }} ], "verification_required": true }}
-Chỉ trả về JSON."""
+2. **Khi user nhắc tới khoảng chương RẤT RỘNG** (vd. 1–20, 1–30, 10–50) và yêu cầu phân tích/tổng hợp/phát hiện logic hole trên khoảng đó:
+   - Ưu tiên tạo 1 step với intent `multi_chapter_analysis`, `args.chapter_range = [start, end]`.
+   - Không dùng `ask_user_clarification` trong trường hợp này nếu user đã ghi rõ khoảng chương và mục tiêu (tóm tắt, so sánh, tìm plot hole...).
+
+3. **Hạn chế tối đa `ask_user_clarification`**:
+   - CHỈ chọn `ask_user_clarification` khi:
+     - Câu hỏi cực kỳ ngắn hoặc chung chung (ví dụ: "Kiểm tra giúp", "Sửa lại đi") VÀ
+     - Không nhắc đến chương, khoảng chương, arc, nhân vật, hệ thống, hoặc mục tiêu rõ ràng (tóm tắt / so sánh / tìm lỗi logic...), VÀ
+     - Lịch sử chat không chứa câu hỏi cụ thể ngay trước đó để tham chiếu.
+   - Nếu user đã nói rõ **chương, entity, hệ thống, hoặc mục tiêu** thì PHẢI chọn intent cụ thể (`search_context`, `multi_chapter_analysis`, `check_chapter_logic`, `unified`, v.v.), KHÔNG dùng `ask_user_clarification`.
+
+4. **Khi một câu hỏi có thể chia thành nhiều thao tác rõ ràng** (ví dụ "tóm tắt chương 1 rồi so sánh với timeline chương 2", "so sánh sức mạnh Cường ở chương 5 và chương 20"):
+   - Bạn được phép tạo tối đa 3 bước, mỗi bước 1 intent, ví dụ:
+     - B1: `search_context` hoặc `multi_chapter_analysis` cho chương/khoảng chương đầu.
+     - B2: `search_context` hoặc `multi_chapter_analysis` cho chương/khoảng chương sau.
+     - B3: `numerical_calculation` hoặc `search_context` để so sánh/tổng hợp nếu cần.
+
+### 4. ĐỊNH DẠNG OUTPUT
+INPUT CỦA USER: "{user_prompt}"
+
+Hãy trả về ĐÚNG MỘT JSON với format:
+{{ 
+  "analysis": "1 câu tóm tắt ngắn gọn về kế hoạch xử lý câu hỏi này.",
+  "plan": [
+    {{
+      "step_id": 1,
+      "intent": "search_context | multi_chapter_analysis | check_chapter_logic | unified | numerical_calculation | query_Sql | web_search | chat_casual | ask_user_clarification",
+      "args": {{
+        "query_refined": "...", 
+        "context_needs": [], 
+        "chapter_range": null, 
+        "chapter_range_mode": null,
+        "chapter_range_count": 5,
+        "data_operation_type": "", 
+        "data_operation_target": "", 
+        "query_target": "",
+        "target_files": [],
+        "target_bible_entities": [],
+        "clarification_question": ""
+      }},
+      "dependency": null
+    }}
+  ],
+  "verification_required": true
+}}
+
+LƯU Ý:
+- Tối đa 3 bước trong `plan`.
+- Nếu chỉ cần 1 bước thì vẫn trả về mảng `plan` với 1 phần tử.
+- **Không** trả lời tự nhiên, **chỉ** trả về JSON đúng format trên."""
 
         try:
             response = AIService.call_openrouter(
