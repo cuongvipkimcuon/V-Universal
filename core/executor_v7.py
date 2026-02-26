@@ -504,12 +504,12 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
         block = f"\n--- [STEP {step_id}: {intent}] ---\n{ctx_text}\n"
         cumulative_parts.append(block)
         all_sources.extend([f"Step {step_id}: {intent}"] + (sources or []))
-            step_results.append({
-                "step_id": step_id,
-                "intent": intent,
-                "context_snippet": ctx_text[:2000],
-                "executor_result": executor_result,
-            })
+        step_results.append({
+            "step_id": step_id,
+            "intent": intent,
+            "context_snippet": ctx_text[:2000],
+            "executor_result": executor_result,
+        })
         steps_executed += 1
         cumulative_so_far = "\n".join(cumulative_parts)
         remaining_after = remaining_steps[1:]
