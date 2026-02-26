@@ -438,13 +438,13 @@ Bạn là AI Điều Phối Viên (Router) cho hệ thống V7-Universal. Nhiệ
 | art | Nghệ thuật, style | "Nghệ thuật chương 1", "Style tác phẩm" |
 
 ### 3. HƯỚNG DẪN XỬ LÝ ĐẶC BIỆT (CRITICAL RULES)
-1. **Quy tắc "Chương / đọc nội dung":** User nhắc "Chương X" hoặc "tóm tắt chương" / "xem nội dung chương" -> chọn **search_context** với **context_needs** chứa "chapter", điền chapter_range. **read_full_content KHÔNG bao giờ chọn** — chỉ dùng nội bộ khi search_context trả lời chưa đủ. Nếu user **ra lệnh chạy unified** theo chương (extract/ phân tích dữ liệu chương) -> `unified`, điền chapter_range.
+1. **Quy tắc "Chương / đọc nội dung":** User nhắc "Chương X" hoặc "tóm tắt chương" / "xem nội dung chương" -> chọn **search_context** với **context_needs** chứa "chapter", điền chapter_range. **read_full_content KHÔNG bao giờ chọn** — chỉ dùng nội bộ khi search_context trả lời chưa đủ. Nếu user **ra lệnh chạy unified** theo chương (extract/ phân tích dữ liệu chương) với từ khóa rõ ràng (vd. "chạy unified", "run unified", "Unified chương X đến Y") -> `unified`, điền chapter_range.
 2. **Quy tắc "Thực Tế":** Hỏi tỷ giá, tin tức, thời tiết -> BẮT BUỘC `web_search`.
 3. **Quy tắc "Làm Rõ":** Câu quá ngắn/mơ hồ -> `ask_user_clarification`, điền `clarification_question`.
 4. **Quy tắc "Tham chiếu chat cũ":** Tin nhắn chỉ tham chiếu lệnh trước (vd "làm cái đó", "ok làm đi") -> từ LỊCH SỬ CHAT: (1) **Phân định**: ĐÃ LÀM GÌ (bước/intent đã thực thi, kết quả đã có) vs CẦN LÀM GÌ (phần user muốn thực hiện tiếp hoặc câu hỏi còn lại). (2) Chỉ trả về intent và rewritten_query cho phần **CẦN LÀM**; không lặp lại bước đã làm. Lấy intent/rewritten_query từ tin nhắn user gần nhất có nội dung cụ thể.
 5. **Quy tắc "Tham chiếu nội dung chat (crystallize)":** User nói đã bàn về X -> `search_context`, context_needs: ["bible"], rewritten_query: X.
 6. **Quy tắc "Nhiều bước (suggest_v7)":** Câu hỏi rõ ràng cần 2+ intent hoặc 2+ thao tác -> `suggest_v7`.
-7. **Quy tắc "unified vs chat_casual":** Chỉ khi user **ra lệnh chạy unified** theo chương (có nói rõ chương/khoảng chương) -> `unified`. "Hãy nhớ rằng", "từ giờ luật là", "V hãy nghiêm khắc khi..." -> `chat_casual`. Chỉ xem/tóm tắt/hỏi -> KHÔNG unified.
+7. **Quy tắc "unified vs chat_casual":** Chỉ khi user **ra lệnh chạy unified** theo chương với từ khóa rõ ràng như "unified", "chạy unified", "run unified" và có nói rõ chương/khoảng chương -> `unified`. "Hãy nhớ rằng", "từ giờ luật là", "V hãy nghiêm khắc khi..." -> `chat_casual`. Các câu hỏi tra cứu/thảo luận/tóm tắt (kể cả nói về nhiều chương) nhưng KHÔNG có lệnh rõ "chạy unified" -> **KHÔNG unified**, mà dùng `search_context`.
 8. **Quy tắc "Tra cứu":** Tra cứu ngoài (tỷ giá, tin) -> `web_search`. Tra cứu nội dung dự án -> `search_context`.
 9. **Quy tắc "query_Sql":** CHỈ khi user muốn XEM/LIỆT KÊ dữ liệu thô. Câu hỏi tự nhiên về quan hệ/timeline -> `search_context`. Điền **query_target** khi intent = query_Sql.
 10. **Quy tắc "search_context — context_needs":** Luôn điền **context_needs** (mảng): hỏi quan hệ -> ["bible","relation"]; hỏi timeline/sự kiện -> ["timeline"] hoặc ["bible","timeline"]; hỏi chi tiết vụn (ai nói, câu nào) -> ["chunk"]; hỏi trong chương X kết hợp Bible -> ["bible","relation","chapter"] hoặc ["bible","chapter"]; chỉ tóm tắt chương -> ["chapter"]. Có thể kết hợp nhiều: ["bible","relation","timeline","chunk","chapter"] tùy câu hỏi.
@@ -546,6 +546,19 @@ Bạn là AI Điều Phối Viên (Router) cho hệ thống V7-Universal. Nhiệ
             result.setdefault("query_target", "")
             result.setdefault("context_needs", [])
             result.setdefault("context_priority", [])
+            # Guardrail unified: chỉ giữ intent=unified khi user RA LỆNH rõ ràng và có chapter_range hợp lệ.
+            intent_raw = (result.get("intent") or "chat_casual").strip().lower()
+            user_low = (user_prompt or "").lower()
+            if intent_raw == "unified":
+                trigger_phrases = ("unified", "chạy unified", "run unified")
+                has_trigger = any(p in user_low for p in trigger_phrases)
+                ch = result.get("chapter_range")
+                has_valid_range = isinstance(ch, (list, tuple)) and len(ch) >= 1
+                if (not has_trigger) or (not has_valid_range):
+                    # Hạ unified về search_context cho các câu Q&A/tra cứu bình thường.
+                    result["intent"] = "search_context"
+                    if not result.get("context_needs"):
+                        result["context_needs"] = ["bible", "relation", "chapter", "timeline", "chunk"]
             # Legacy: update_data -> unified (chỉ còn nhánh unified cho thao tác theo chương).
             if result.get("intent") == "update_data":
                 result["intent"] = "unified"

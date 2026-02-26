@@ -1263,6 +1263,15 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                         debug_notes = [f"Intent: {router_out.get('intent', 'chat_casual')}"] + debug_notes
 
                 if not v7_handled:
+                    # Nếu router trả về unified nhưng user không có quyền ghi hoặc chưa bật nút ghi data,
+                    # hạ unified -> search_context để vẫn trả lời Q&A bình thường theo context.
+                    if router_out is not None:
+                        allow_data_flag = st.session_state.get("allow_data_changing_actions", False)
+                        if router_out.get("intent") == "unified" and (not can_write or not allow_data_flag):
+                            router_out["intent"] = "search_context"
+                            if not router_out.get("context_needs"):
+                                router_out["context_needs"] = ["bible", "relation", "chapter", "timeline", "chunk"]
+
                     intent = router_out.get('intent', 'chat_casual')
                     targets = router_out.get('target_files', [])
                     rewritten_query = router_out.get('rewritten_query', prompt)
