@@ -1093,6 +1093,48 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                                     first_intent = "multi_chapter_analysis"
                                     if isinstance(plan_result, dict):
                                         plan_result["plan"] = plan
+                            # Bổ sung hậu xử lý: dọn clarification_question thừa và tự động điền chapter_range
+                            # cho các intent phân tích khi planner bỏ trống nhưng câu hỏi đã nêu rõ khoảng chương.
+                            if plan:
+                                # 1) Xóa clarification_question cho mọi bước KHÔNG phải ask_user_clarification
+                                for s in plan:
+                                    if not isinstance(s, dict):
+                                        continue
+                                    intent_s = (s.get("intent") or "").strip().lower()
+                                    if intent_s != "ask_user_clarification":
+                                        args_s = s.get("args") or {}
+                                        if isinstance(args_s, dict) and args_s.get("clarification_question"):
+                                            args_s = dict(args_s)
+                                            args_s["clarification_question"] = ""
+                                            s["args"] = args_s
+                                # 2) Nếu bước đầu là intent phân tích mà chưa có chapter_range, thử parse từ câu hỏi.
+                                step0 = plan[0] or {}
+                                intent0 = (step0.get("intent") or "").strip().lower()
+                                args0 = (step0.get("args") or {}) if isinstance(step0.get("args"), dict) else {}
+                                has_range = isinstance(args0.get("chapter_range"), (list, tuple)) and len(args0.get("chapter_range")) >= 1
+                                if intent0 in ("multi_chapter_analysis", "check_chapter_logic", "search_context") and not has_range:
+                                    cr_auto = None
+                                    try:
+                                        cr_auto = parse_chapter_range_from_query(prompt or "")
+                                    except Exception:
+                                        cr_auto = None
+                                    if isinstance(cr_auto, (list, tuple)) and len(cr_auto) >= 1:
+                                        args0 = dict(args0)
+                                        try:
+                                            if len(cr_auto) >= 2:
+                                                start_cr = int(cr_auto[0])
+                                                end_cr = int(cr_auto[1])
+                                            else:
+                                                ch = int(cr_auto[0])
+                                                start_cr, end_cr = ch, ch
+                                            args0["chapter_range"] = [start_cr, end_cr]
+                                            args0.setdefault("chapter_range_mode", "range")
+                                            step0["args"] = args0
+                                            plan[0] = step0
+                                            if isinstance(plan_result, dict):
+                                                plan_result["plan"] = plan
+                                        except (ValueError, TypeError):
+                                            pass
                         else:
                             plan_result = None
                             plan = []
