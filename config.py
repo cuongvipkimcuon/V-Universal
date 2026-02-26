@@ -390,7 +390,7 @@ class SessionManager:
 
                     col_btn1, col_btn2 = st.columns(2)
                     with col_btn1:
-                        if st.button("Login", type="primary", use_container_width=True):
+                        if st.button("Login", type="primary", width="stretch"):
                             if email and password:
                                 try:
                                     services = init_services()
@@ -418,7 +418,7 @@ class SessionManager:
                                     st.error(f"Login failed: {str(e)}")
 
                     with col_btn2:
-                        if st.button("Forgot Password?", use_container_width=True):
+                        if st.button("Forgot Password?", width="stretch"):
                             if email:
                                 try:
                                     services = init_services()
@@ -435,7 +435,7 @@ class SessionManager:
                     reg_pass_confirm = st.text_input("🔑 Confirm Password", type="password", key="reg_pass_confirm")
                     reg_invite_code = st.text_input("🎟️ Mã khách mời", key="reg_invite_code")
 
-                    if st.button("Register", type="secondary", use_container_width=True):
+                    if st.button("Register", type="secondary", width="stretch"):
                         if not reg_email or not reg_pass or not reg_pass_confirm or not reg_invite_code:
                             st.error("Please fill all fields correctly")
                         elif reg_pass != reg_pass_confirm:

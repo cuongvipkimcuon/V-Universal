@@ -504,7 +504,7 @@ def render_bible_tab(project_id, persona):
             col_del, col_merge, col_export = st.columns(3)
 
             with col_del:
-                if st.button("🗑️ Delete Selected", use_container_width=True):
+                if st.button("🗑️ Delete Selected", width="stretch"):
                     user_id = getattr(st.session_state.get("user"), "id", None) or ""
                     user_email = getattr(st.session_state.get("user"), "email", None) or ""
                     if check_permission(user_id, user_email, project_id, "delete"):
@@ -521,7 +521,7 @@ def render_bible_tab(project_id, persona):
                         st.warning("Chỉ Owner mới được xóa entry.")
 
             with col_merge:
-                if st.button("🧬 AI Merge Selected", use_container_width=True):
+                if st.button("🧬 AI Merge Selected", width="stretch"):
                     user_id = getattr(st.session_state.get("user"), "id", None) or ""
                     user_email = getattr(st.session_state.get("user"), "email", None) or ""
                     if not check_permission(user_id, user_email, project_id, "write"):
@@ -560,7 +560,7 @@ def render_bible_tab(project_id, persona):
                             st.error(f"Merge error: {e}")
 
             with col_export:
-                if st.button("📤 Export Selected", use_container_width=True):
+                if st.button("📤 Export Selected", width="stretch"):
                     export_data = []
                     for entry in selected_entries:
                         export_data.append({
@@ -575,7 +575,7 @@ def render_bible_tab(project_id, persona):
                         data=df_export.to_csv(index=False).encode('utf-8'),
                         file_name=f"bible_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                         mime="text/csv",
-                        use_container_width=True
+                        width="stretch",
                     )
 
         for entry in bible_data:
@@ -805,7 +805,7 @@ def render_bible_tab(project_id, persona):
     st.markdown("---")
     with st.expander("💀 Danger Zone", expanded=False):
         if not st.session_state.get('confirm_delete_all_bible'):
-            if st.button("💣 Clear All Bible Entries", type="secondary", use_container_width=True):
+            if st.button("💣 Clear All Bible Entries", type="secondary", width="stretch"):
                 st.session_state['confirm_delete_all_bible'] = True
 
         else:
@@ -814,11 +814,11 @@ def render_bible_tab(project_id, persona):
             col_yes, col_no = st.columns(2)
 
             with col_no:
-                if st.button("❌ Thôi, giữ lại", use_container_width=True):
+                if st.button("❌ Thôi, giữ lại", width="stretch"):
                     st.session_state['confirm_delete_all_bible'] = False
 
             with col_yes:
-                if st.button("✅ Tôi chắc chắn. Xóa!", type="primary", use_container_width=True):
+                if st.button("✅ Tôi chắc chắn. Xóa!", type="primary", width="stretch"):
                     uid = getattr(st.session_state.get("user"), "id", None) or ""
                     uem = getattr(st.session_state.get("user"), "email", None) or ""
                     if check_permission(uid, uem, project_id, "delete"):

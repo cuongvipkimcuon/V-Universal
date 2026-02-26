@@ -622,7 +622,7 @@ def render_chat_tab(project_id, persona, chat_mode=None):
             active_persona = {"icon": "🏠", "role": "Assistant", "core_instruction": "Bạn là trợ lý thân thiện. Trả lời ngắn gọn, hữu ích. Ngôn ngữ: ưu tiên Tiếng Việt.", "system_prompt": "", "max_tokens": 4000}
             st.session_state['enable_history'] = False
             st.caption("Chat tự do — không lưu vào DB dự án. Context = 10 tin cuối của topic.")
-            if st.button("🔄 Reset topic", use_container_width=True, key=f"chat_btn_reset_topic_{chat_mode}", help="Bắt đầu topic mới: từ giờ chỉ đưa tin nhắn sau thời điểm này vào context."):
+            if st.button("🔄 Reset topic", width="stretch", key=f"chat_btn_reset_topic_{chat_mode}", help="Bắt đầu topic mới: từ giờ chỉ đưa tin nhắn sau thời điểm này vào context."):
                 _v_home_reset_topic(user_id, project_id)
                 st.toast("Đã bắt đầu topic mới.")
         else:
@@ -639,10 +639,10 @@ def render_chat_tab(project_id, persona, chat_mode=None):
             active_persona = PersonaSystem.get_persona(selected_persona_key)
             st.session_state['enable_history'] = True
 
-            if st.button("🧹 Clear Screen", use_container_width=True, key=f"chat_btn_clear_{chat_mode}"):
+            if st.button("🧹 Clear Screen", width="stretch", key=f"chat_btn_clear_{chat_mode}"):
                 st.session_state['chat_cutoff'] = datetime.utcnow().isoformat()
 
-            if st.button("🔄 Show All", use_container_width=True, key=f"chat_btn_show_all_{chat_mode}"):
+            if st.button("🔄 Show All", width="stretch", key=f"chat_btn_show_all_{chat_mode}"):
                 st.session_state['chat_cutoff'] = "1970-01-01"
 
         if not is_v_home:
@@ -1297,13 +1297,13 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                                                 intent_sr = sr.get("intent", "")
                                                 task_name = args_ps.get("task_name") or f"{intent_sr}_{sid}"
                                                 output_spec = args_ps.get("output_spec") or ""
-                                                status = (sr.get("evaluation_status") or "ok").upper()
-                                                line = f"- Step {sid} ({task_name} – {intent_sr}): {status}"
+                                                eval_status = (sr.get("evaluation_status") or "ok").upper()
+                                                line = f"- Step {sid} ({task_name} – {intent_sr}): {eval_status}"
                                                 lines.append(line)
                                                 if output_spec:
                                                     lines.append(f"  Expected: {output_spec}")
                                                 reason = sr.get("evaluation_reason") or ""
-                                                if reason and status != "OK":
+                                                if reason and eval_status != "OK":
                                                     lines.append(f"  Note: {reason}")
                                             plan_summary_block = "\n".join(lines)
                                     except Exception:

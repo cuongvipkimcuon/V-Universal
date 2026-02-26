@@ -111,11 +111,11 @@ def render_sidebar(session_manager):
 
         st.markdown("---")
         st.subheader("⚡ Quick Actions")
-        if st.button("🔄 Refresh", use_container_width=True, help="Tải lại dữ liệu và giao diện"):
+        if st.button("🔄 Refresh", width="stretch", help="Tải lại dữ liệu và giao diện"):
             full_refresh()
 
         st.markdown("---")
-        if st.button("🚪 Logout", use_container_width=True, type="secondary"):
+        if st.button("🚪 Logout", width="stretch", type="secondary"):
             st.session_state['logging_out'] = True
             try:
                 session_manager.cookie_manager.delete("supabase_access_token", key="del_access_logout")

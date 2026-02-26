@@ -86,7 +86,7 @@ def render_review_tab(project_id, persona=None):
     col_review_btn, col_save, col_del = st.columns([1, 1, 1])
 
     with col_review_btn:
-        if st.button("🤖 Review (gọi AI)", type="primary", key="review_ai_btn", use_container_width=True):
+        if st.button("🤖 Review (gọi AI)", type="primary", key="review_ai_btn", width="stretch"):
             with st.spinner("Đang gọi AI review..."):
                 chapter_id = selected_row.get("id") if selected_row else None
                 logic_context = build_logic_context_for_chapter(
@@ -128,9 +128,9 @@ NỘI DUNG CHƯƠNG CẦN REVIEW:
                     st.error(f"Lỗi gọi AI: {e}")
 
     with col_save:
-        save_clicked = st.button("💾 Lưu review hiện tại", key="review_save_btn", use_container_width=True, disabled=not show_review_block)
+        save_clicked = st.button("💾 Lưu review hiện tại", key="review_save_btn", width="stretch", disabled=not show_review_block)
     with col_del:
-        if st.button("🗑️ Xóa review (trong DB)", key="review_del_btn", use_container_width=True):
+        if st.button("🗑️ Xóa review (trong DB)", key="review_del_btn", width="stretch"):
             supabase.table("chapters").update({"review_content": ""}).eq("story_id", project_id).eq("chapter_number", chap_num).execute()
             st.session_state.pop("review_unsaved", None)
             st.session_state.pop("review_unsaved_chap", None)

@@ -150,7 +150,7 @@ def render_workstation_tab(project_id, persona):
                 print(f"Background metadata update error: {e}")
 
         with btn_cols[1]:
-            if st.button("💾 Lưu", use_container_width=True, key="ws_save_btn"):
+            if st.button("💾 Lưu", width="stretch", key="ws_save_btn"):
                 current_content = st.session_state.get(f"file_content_{chap_num}", "")
                 current_title = st.session_state.get(f"file_title_{chap_num}", db_title)
                 if current_content:
@@ -193,10 +193,10 @@ def render_workstation_tab(project_id, persona):
                         st.error(f"Lỗi lưu: {e}")
 
         with btn_cols[2]:
-            if st.button("📂 Import", use_container_width=True, key="ws_import_btn"):
+            if st.button("📂 Import", width="stretch", key="ws_import_btn"):
                 st.session_state["workstation_import_mode"] = True
         with btn_cols[3]:
-            if chap_num and st.button("🗑️ Xóa", use_container_width=True, key="ws_delete_current"):
+            if chap_num and st.button("🗑️ Xóa", width="stretch", key="ws_delete_current"):
                 uid = getattr(st.session_state.get("user"), "id", None) or ""
                 uem = getattr(st.session_state.get("user"), "email", None) or ""
                 if check_permission(uid, uem, project_id, "write"):
@@ -224,7 +224,7 @@ def render_workstation_tab(project_id, persona):
             confirm_clear_all = st.checkbox(
                 "Xóa hết", key="ws_confirm_clear_all_top", help="Bật để kích hoạt nút xóa sạch.",
             )
-            if confirm_clear_all and st.button("🔥 Xóa sạch", type="secondary", use_container_width=True, key="ws_clear_all_btn_top"):
+            if confirm_clear_all and st.button("🔥 Xóa sạch", type="secondary", width="stretch", key="ws_clear_all_btn_top"):
                 uid = getattr(st.session_state.get("user"), "id", None) or ""
                 uem = getattr(st.session_state.get("user"), "email", None) or ""
                 if check_permission(uid, uem, project_id, "write"):
@@ -285,7 +285,7 @@ def render_workstation_tab(project_id, persona):
                     is_pdf = import_ext == ".pdf"
                     col_replace, col_append, col_cut, col_cancel = st.columns(4)
                     with col_replace:
-                        if st.button("✅ Thay thế", type="primary", use_container_width=True, key="imp_replace", help="Thay nội dung chương hiện tại bằng file."):
+                        if st.button("✅ Thay thế", type="primary", width="stretch", key="imp_replace", help="Thay nội dung chương hiện tại bằng file."):
                             st.session_state[f"file_content_{chap_num}"] = text
                             st.session_state["workstation_import_mode"] = False
                             st.session_state.pop("workstation_imported_text", None)
@@ -293,7 +293,7 @@ def render_workstation_tab(project_id, persona):
                             st.session_state.pop("workstation_import_ext", None)
                             st.success("Đã thay thế. Nhớ bấm Save để lưu DB.")
                     with col_append:
-                        if st.button("➕ Thêm vào cuối", use_container_width=True, key="imp_append", help="Nối file vào cuối chương hiện tại."):
+                        if st.button("➕ Thêm vào cuối", width="stretch", key="imp_append", help="Nối file vào cuối chương hiện tại."):
                             current = st.session_state.get(f"file_content_{chap_num}", db_content or "")
                             st.session_state[f"file_content_{chap_num}"] = (current.rstrip() + "\n\n" + text.lstrip()) if current else text
                             st.session_state["workstation_import_mode"] = False
@@ -303,13 +303,13 @@ def render_workstation_tab(project_id, persona):
                             st.success("Đã thêm vào cuối. Nhớ bấm Save.")
                     with col_cut:
                         if not is_pdf:
-                            if st.button("✂️ Cắt", use_container_width=True, key="imp_smart_split", help="AI cắt theo chương/entity/sheet, đề xuất nhiều phần để lưu thành nhiều chương."):
+                            if st.button("✂️ Cắt", width="stretch", key="imp_smart_split", help="AI cắt theo chương/entity/sheet, đề xuất nhiều phần để lưu thành nhiều chương."):
                                 st.session_state["workstation_split_mode"] = True
                                 st.session_state["workstation_imported_text"] = text
                         else:
                             st.caption("⚠️ PDF: không hỗ trợ cắt tự động.")
                     with col_cancel:
-                        if st.button("❌ Hủy", use_container_width=True, key="imp_cancel"):
+                        if st.button("❌ Hủy", width="stretch", key="imp_cancel"):
                             st.session_state["workstation_import_mode"] = False
                             st.session_state.pop("workstation_imported_text", None)
                             st.session_state.pop("workstation_split_preview", None)

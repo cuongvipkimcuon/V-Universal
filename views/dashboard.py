@@ -84,7 +84,7 @@ def render_dashboard_tab(project_id):
                 df_files["updated_at"] = pd.to_datetime(df_files["updated_at"]).dt.strftime("%Y-%m-%d %H:%M")
             st.dataframe(
                 df_files.rename(columns={"title": "File", "updated_at": "Last Updated"}),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
         else:
@@ -92,14 +92,14 @@ def render_dashboard_tab(project_id):
 
     with col_right:
         st.subheader("🚀 Quick Actions")
-        if st.button("📥 Import Bible from Files", use_container_width=True, key="dash_import_bible"):
+        if st.button("📥 Import Bible from Files", width="stretch", key="dash_import_bible"):
             st.session_state["import_bible_mode"] = True
         confirm_clean = st.checkbox(
             "Tôi chắc chắn muốn xóa TOÀN BỘ lịch sử chat và điểm nhớ [CHAT] (crystallize) của tôi",
             key="dash_confirm_clean_chats",
             help="Xóa chat_history + Bible [CHAT] đã crystallize + reset counter crystallize. Không hoàn tác được.",
         )
-        if st.button("🧹 Clean ALL Chats", use_container_width=True, key="dash_clean_chats"):
+        if st.button("🧹 Clean ALL Chats", width="stretch", key="dash_clean_chats"):
             if not confirm_clean:
                 st.warning("Vui lòng tick xác nhận trước khi xóa toàn bộ chat.")
             else:
@@ -119,9 +119,9 @@ def render_dashboard_tab(project_id):
                     invalidate_cache()
                 except Exception as e:
                     st.error(f"Lỗi khi xóa chat: {e}")
-        if st.button("🔄 Re-index Bible", use_container_width=True, key="dash_reindex"):
+        if st.button("🔄 Re-index Bible", width="stretch", key="dash_reindex"):
             st.info("Re-indexing would update all embeddings")
-        if st.button("📤 Export Project", use_container_width=True, key="dash_export"):
+        if st.button("📤 Export Project", width="stretch", key="dash_export"):
             st.info("Export functionality would be implemented here")
 
     st.markdown("---")
@@ -153,7 +153,7 @@ def render_dashboard_tab(project_id):
         current_name = st.session_state.current_project.get('title', 'Untitled')
         new_name = st.text_input("New Project Name", value=current_name)
 
-        if st.button("Update Name", use_container_width=True):
+        if st.button("Update Name", width="stretch"):
             if new_name and new_name != current_name:
                 try:
                     supabase.table("stories").update({
@@ -170,18 +170,18 @@ def render_dashboard_tab(project_id):
         st.warning("Delete this project and ALL associated data (Chapters, Bible, Chat).")
 
         if not st.session_state.get('confirm_delete_project'):
-            if st.button("💣 Delete Project", type="primary", use_container_width=True):
+            if st.button("💣 Delete Project", type="primary", width="stretch"):
                 st.session_state['confirm_delete_project'] = True
         else:
             st.error("⚠️ Are you sure? This cannot be undone!")
             c1, c2 = st.columns(2)
 
             with c1:
-                if st.button("❌ Cancel", use_container_width=True):
+                if st.button("❌ Cancel", width="stretch"):
                     st.session_state['confirm_delete_project'] = False
 
             with c2:
-                if st.button("✅ YES, DELETE", type="primary", use_container_width=True):
+                if st.button("✅ YES, DELETE", type="primary", width="stretch"):
                     try:
                         supabase.table("stories").delete().eq("id", project_id).execute()
                         from utils.cache_helpers import invalidate_cache

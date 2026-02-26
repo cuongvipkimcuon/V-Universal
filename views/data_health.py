@@ -114,7 +114,7 @@ def render_data_health_tab(project_id):
     else:
         logic_dimensions = [d for d in selected_dims if d in LOGIC_DIMENSIONS]
 
-    if st.button("🔍 Soát chương này", type="primary", key="data_health_scan_btn", use_container_width=True):
+    if st.button("🔍 Soát chương này", type="primary", key="data_health_scan_btn", width="stretch"):
         spinner_msg = "Đang soát logic (5 dimensions)..." if logic_dimensions is None else "Đang soát logic (%s)..." % ", ".join(logic_dimensions)
         with st.spinner(spinner_msg):
             issues, resolved_count, check_id, err = run_chapter_logic_check(

@@ -184,7 +184,7 @@ def main():
     cols_main = st.columns(len(main_labels))
     for i, (col, label) in enumerate(zip(cols_main, main_labels)):
         with col:
-            if st.button(label, key="main_tab_%d" % i, type="primary" if main_idx == i else "secondary", use_container_width=True):
+            if st.button(label, key="main_tab_%d" % i, type="primary" if main_idx == i else "secondary", width="stretch"):
                 st.session_state["main_tab_idx"] = i
                 if "sub_tab_idx_%s" % main_keys[i] not in st.session_state:
                     st.session_state["sub_tab_idx_%s" % main_keys[i]] = 0
@@ -216,7 +216,7 @@ def main():
                     continue
                 with cols_sub[j]:
                     label = sub_labels[i]
-                    if st.button(label, key="sub_%s_%d" % (main_tab_key, i), type="primary" if sub_idx == i else "secondary", use_container_width=True):
+                    if st.button(label, key="sub_%s_%d" % (main_tab_key, i), type="primary" if sub_idx == i else "secondary", width="stretch"):
                         st.session_state[sub_key] = i
                         st.rerun()
 
