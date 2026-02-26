@@ -299,33 +299,33 @@ def _render_extract_bible_relations_chunking(project_id, content, chap_num, sele
             )
             if (
                 st.session_state.get("da_confirm_delete_bible_range")
-                and st.button(f\"▶️ Unified analyze chương {ch_start}–{ch_end}\", type=\"primary\", key=\"da_unified_range_btn\")
+                and st.button(f"▶️ Unified analyze chương {ch_start}–{ch_end}", type="primary", key="da_unified_range_btn")
             ):
                 s, e = sorted([int(ch_start), int(ch_end)])
                 created = 0
                 for ch in range(s, e + 1):
-                    label_ch = f\"Unified chương {ch}\"
+                    label_ch = f"Unified chương {ch}"
                     job_id = create_job(
                         story_id=project_id,
                         user_id=uid or None,
-                        job_type=\"unified_chapter_analyze\",
+                        job_type="unified_chapter_analyze",
                         label=label_ch,
-                        payload={\"chapter_number\": ch},
+                        payload={"chapter_number": ch},
                         post_to_chat=False,
                     )
                     if job_id:
                         created += 1
                 if created > 0:
                     ensure_background_job_runner()
-                    st.toast(f\"Đã xếp hàng Unified cho {created} chương. Xem tab Background Jobs.\")
-                    st.session_state[\"update_trigger\"] = st.session_state.get(\"update_trigger\", 0) + 1
+                    st.toast(f"Đã xếp hàng Unified cho {created} chương. Xem tab Background Jobs.")
+                    st.session_state["update_trigger"] = st.session_state.get("update_trigger", 0) + 1
                 else:
-                    st.error(\"Không tạo được job nào trong khoảng chương đã chọn.\")
+                    st.error("Không tạo được job nào trong khoảng chương đã chọn.")
         else:
-            st.info(\"Không xác định được danh sách chương để chạy Unified nhiều chương.\")
+            st.info("Không xác định được danh sách chương để chạy Unified nhiều chương.")
 
-    st.markdown(\"---\")
-    st.subheader(\"➕ Thêm trên nền có sẵn (không xóa)\")
+    st.markdown("---")
+    st.subheader("➕ Thêm trên nền có sẵn (không xóa)")
     st.caption("Trích xuất từ chương đã chọn và **thêm** vào dữ liệu hiện có (không xóa Bible/Timeline/Chunks/Relations của chương). Khác với Unified là xóa rồi làm lại.")
     if can_write:
         col_b, col_r, col_t, col_c = st.columns(4)
