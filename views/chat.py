@@ -1184,7 +1184,7 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                                     parsed = parse_chapter_range_from_query(
                                         prompt or router_out.get("rewritten_query") or ""
                                     )
-                                    if parsed and len(parsed) >= 2:
+                                    if parsed:
                                         router_out["chapter_range"] = [int(parsed[0]), int(parsed[1])]
                                         router_out["chapter_range_mode"] = "range"
                                 except Exception:
@@ -1699,20 +1699,20 @@ Context có sẵn:
 Nhiệm vụ: Tạo code Python (pandas/numpy) để trả lời. Gán kết quả cuối vào biến result.
 Chỉ trả về code trong block ```python ... ```, không giải thích."""
                             can_num = max_llm_calls_per_turn == 0 or llm_calls_this_turn[0] < max_llm_calls_per_turn
-                                try:
-                                    if can_num:
-                                        llm_calls_this_turn[0] += 1
-                                        code_resp = AIService.call_openrouter(
-                                            messages=[{"role": "user", "content": code_prompt}],
-                                            model=st.session_state.get('selected_model', Config.DEFAULT_MODEL),
-                                            temperature=0.1,
-                                            max_tokens=2000,
-                                        )
-                                    else:
-                                        code_resp = None
-                                    raw = ""
-                                    if code_resp and getattr(code_resp, "choices", None) and len(code_resp.choices) > 0:
-                                        raw = (code_resp.choices[0].message.content or "").strip()
+                            try:
+                                if can_num:
+                                    llm_calls_this_turn[0] += 1
+                                    code_resp = AIService.call_openrouter(
+                                        messages=[{"role": "user", "content": code_prompt}],
+                                        model=st.session_state.get('selected_model', Config.DEFAULT_MODEL),
+                                        temperature=0.1,
+                                        max_tokens=2000,
+                                    )
+                                else:
+                                    code_resp = None
+                                raw = ""
+                                if code_resp and getattr(code_resp, "choices", None) and len(code_resp.choices) > 0:
+                                    raw = (code_resp.choices[0].message.content or "").strip()
                                 import re
                                 m = re.search(r'```(?:python)?\s*(.*?)```', raw, re.DOTALL) if raw else None
                                 code = (m.group(1).strip() if m else raw) if raw else ""

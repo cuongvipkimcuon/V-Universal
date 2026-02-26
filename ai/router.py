@@ -309,6 +309,10 @@ Trả về JSON với đủ key:
 
         planner_prompt = f"""Bạn là Context Planner. Intent đã xác định: **{intent}**. Nhiệm vụ: dựa vào BỨC TRANH TỔNG QUAN dữ liệu dự án dưới đây, quyết định (1) cần LẤY DỮ LIỆU NÀO từ DB (bible, chapter, timeline, relation, chunk), (2) cần đưa LUẬT NÀO vào context (từ các quy tắc liên quan bước 1 đã lọc), (3) chọn rõ các TARGET theo từng nguồn (tên entity trong Bible, từ khóa chunk, entity để xem quan hệ, từ khóa timeline). Trả về JSON.
 
+ƯU TIÊN HÀNG ĐẦU — LẤY TỪ CÂU HỎI USER (đây là phần chính để build context đúng):
+- Nếu câu user có nói RÕ khoảng chương (vd. "chương 1 đến 30", "từ chương 5 tới 10", "các chương 1–20") thì BẮT BUỘC điền chapter_range = [start, end] theo đúng số chương user nói và chapter_range_mode = "range". Đây là thông tin then chốt cho search_context.
+- Nếu câu user nhắc tên nhân vật / entity (vd. "Cường", "trận chiến của X", "Võ Quốc Thanh") thì BẮT BUỘC đưa các tên đó vào target_bible_entities (chỉ phần tên, không prefix). Ví dụ: "kể lại các trận chiến của Cường từ chương 1 đến 30" → chapter_range = [1, 30], target_bible_entities = ["Cường"].
+
 QUY TẮC CỰC KỲ QUAN TRỌNG VỀ CHAPTER RANGE (KHÔNG ĐƯỢC VI PHẠM):
 - TUYỆT ĐỐI KHÔNG tự ý bịa hoặc suy đoán chương khi USER KHÔNG nói rõ chương / khoảng chương / số chương.
 - CHỈ đặt chapter_range khi:
