@@ -47,17 +47,19 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
             temperature=0.1,
             max_tokens=2000,
         )
-        raw = (code_resp.choices[0].message.content or "").strip()
-        m = re.search(r"```(?:python)?\s*(.*?)```", raw, re.DOTALL)
-        code = (m.group(1).strip() if m else raw).strip()
+        raw = ""
+        if code_resp and getattr(code_resp, "choices", None) and len(code_resp.choices) > 0:
+            raw = (code_resp.choices[0].message.content or "").strip()
+        m = re.search(r"```(?:python)?\s*(.*?)```", raw, re.DOTALL) if raw else None
+        code = (m.group(1).strip() if m else raw).strip() if raw else ""
         if not code:
-            return None, "Không thể tính toán"
+            return None, "Không sinh được code (API không trả về code trong block ```python ... ```)."
         val, err = PythonExecutor.execute(code, result_variable="result")
         if err:
-            return None, "Không thể tính toán"
+            return None, "Executor: %s" % err
         return str(val) if val is not None else "null", None
     except Exception as ex:
-        return None, "Không thể tính toán"
+        return None, "Lỗi: %s" % getattr(ex, "message", str(ex))
 
 
 def render_python_executor_tab(project_id):

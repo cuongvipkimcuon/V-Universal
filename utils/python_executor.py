@@ -139,6 +139,8 @@ class PythonExecutor:
         except Exception as e:
             return None, str(e)
         out = l.get(result_variable)
+        if result_variable not in l:
+            return None, "Code không gán biến '%s'. Hãy gán kết quả cuối vào biến %s." % (result_variable, result_variable)
         return out, None
 
     @staticmethod

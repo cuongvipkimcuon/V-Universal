@@ -24,8 +24,8 @@ def _cosine_sim(a: List[float], b: List[float]) -> float:
 CONTEXT_DEDUPE_SIMILARITY_THRESHOLD = 0.90
 
 # Ngưỡng tối thiểu để coi relation/timeline là đủ liên quan khi đưa vào context (cosine sim)
-RELATION_MIN_SIM_FOR_CONTEXT = 0.75
-TIMELINE_MIN_SIM_FOR_CONTEXT = 0.75
+RELATION_MIN_SIM_FOR_CONTEXT = 0.6
+TIMELINE_MIN_SIM_FOR_CONTEXT = 0.6
 
 
 def filter_context_items_by_embedding(
@@ -313,14 +313,14 @@ def get_relevant_info_rules(
     project_id: str,
     user_prompt: str,
     arc_id: Optional[str] = None,
-    threshold: float = 0.75,
+    threshold: float = 0.6,
     candidate_rules_block: Optional[str] = None,
     query_embedding: Optional[List[float]] = None,
 ) -> str:
     """
     Lấy các Info Rule (type='Info', approve=TRUE) có embedding giống câu hỏi hiện tại.
     - Dùng embedding câu hỏi so với embedding rule (cosine similarity).
-    - Chỉ chọn các rule có similarity >= threshold (mặc định 0.75).
+    - Chỉ chọn các rule có similarity >= threshold (mặc định 0.6).
     - Ưu tiên scope: global + project (+ arc nếu có).
     - query_embedding: nếu truyền vào thì dùng luôn, không gọi API embedding.
     """

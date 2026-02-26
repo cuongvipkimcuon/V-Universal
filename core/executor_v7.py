@@ -98,6 +98,13 @@ def _build_router_result_with_router_3step_for_search(
             ctx_router[key] = val
     # 4) Gắn lại rewritten_query = query_refined để ContextManager dùng đúng câu step này.
     ctx_router["rewritten_query"] = query_refined
+    # V7: search_context luôn theo kiến trúc V8 — full 4 nguồn + chapter, ưu tiên chunk, bible, relation, timeline.
+    try:
+        from ai.context_schema import FULL_CONTEXT_NEEDS_V8
+        ctx_router["context_needs"] = list(FULL_CONTEXT_NEEDS_V8)
+        ctx_router["context_priority"] = ["chunk", "bible", "relation", "timeline", "chapter"]
+    except Exception:
+        pass
     return ctx_router
 
 
@@ -276,6 +283,7 @@ def execute_plan(
                         session_state=session_state,
                         free_chat_mode=free_chat_mode,
                         max_context_tokens=token_limit,
+                        for_v7_segment=True,
                     )
 
                     # Gọi LLM tool model cho từng đoạn, với retry tối đa 2 lần khi lỗi.
@@ -305,7 +313,7 @@ def execute_plan(
                                 messages=messages,
                                 model=model,
                                 temperature=0.1,
-                                max_tokens=2000,
+                                max_tokens=8000,
                             )
                             content = (resp.choices[0].message.content or "").strip()
                             if content:
@@ -488,12 +496,14 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
                 if llm_budget_ref and len(llm_budget_ref) >= 1:
                     llm_budget_ref[0] += 1
                 import re
-                raw = (resp.choices[0].message.content or "").strip()
-                m = re.search(r'```(?:python)?\s*(.*?)```', raw, re.DOTALL)
-                code = (m.group(1).strip() if m else raw).strip()
+                raw = ""
+                if resp and getattr(resp, "choices", None) and len(resp.choices) > 0:
+                    raw = (resp.choices[0].message.content or "").strip()
+                m = re.search(r'```(?:python)?\s*(.*?)```', raw, re.DOTALL) if raw else None
+                code = (m.group(1).strip() if m else raw).strip() if raw else ""
                 if code:
                     val, err = PythonExecutor.execute(code, result_variable="result")
-                    executor_result = str(val) if val is not None else f"(Lỗi: {err})"
+                    executor_result = str(val) if val is not None else (f"(Lỗi: {err})" if err else "null")
                     ctx_text += f"\n\n--- KẾT QUẢ TÍNH TOÁN (Python Executor) ---\n{executor_result}"
             except Exception as ex:
                 executor_result = f"(Lỗi: {ex})"

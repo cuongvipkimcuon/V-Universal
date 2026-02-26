@@ -516,7 +516,7 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
 
     # Kiến trúc giống router: primary = retrieval (chunk, bible, timeline, relation); fallback = load full chương khi retrieval mỏng.
     # Fallback khi: (1) không có semantic nào, HOẶC (2) tổng retrieval < ngưỡng → load full chương; khi load vẫn giữ bible/chunk... (dùng remaining budget).
-    MIN_RETRIEVAL_TOKENS_FOR_NO_CHAPTER_FALLBACK = 2000
+    MIN_RETRIEVAL_TOKENS_FOR_NO_CHAPTER_FALLBACK = 5000
     if intent == "search_context" and range_bounds_bible and not _over_budget():
         has_semantic_context = False
         for meta in context_parts_meta or []:
@@ -792,7 +792,7 @@ class ContextManager:
         project_id: str,
         user_prompt: str,
         arc_id: Optional[str] = None,
-        threshold: float = 0.75,
+        threshold: float = 0.6,
         candidate_block: Optional[str] = None,
         query_embedding: Optional[List[float]] = None,
     ) -> str:
@@ -812,6 +812,44 @@ class ContextManager:
             return ""
 
     @staticmethod
+    def get_crystallize_context(project_id: str, arc_id: Optional[str] = None, limit: int = 30) -> str:
+        """Lấy block text từ chat_crystallize_entries (scope project + arc nếu có), theo scope khoảng chương/arc."""
+        if not project_id:
+            return ""
+        try:
+            from config import init_services
+            services = init_services()
+            if not services or not services.get("supabase"):
+                return ""
+            supabase = services["supabase"]
+            lines = []
+            seen_ids = set()
+            q_project = supabase.table("chat_crystallize_entries").select("id, title, description").eq("scope", "project").eq("story_id", project_id)
+            for row in (q_project.order("created_at", desc=True).limit(limit).execute().data or []):
+                rid = row.get("id")
+                if rid and rid not in seen_ids:
+                    seen_ids.add(rid)
+                    title = (row.get("title") or "").strip()
+                    desc = (row.get("description") or "").strip()[:800]
+                    if title or desc:
+                        lines.append(f"  • {title}: {desc}")
+            if arc_id:
+                q_arc = supabase.table("chat_crystallize_entries").select("id, title, description").eq("scope", "arc").eq("story_id", project_id).eq("arc_id", arc_id)
+                for row in (q_arc.order("created_at", desc=True).limit(limit).execute().data or []):
+                    rid = row.get("id")
+                    if rid and rid not in seen_ids:
+                        seen_ids.add(rid)
+                        title = (row.get("title") or "").strip()
+                        desc = (row.get("description") or "").strip()[:800]
+                        if title or desc:
+                            lines.append(f"  • {title}: {desc}")
+            if not lines:
+                return ""
+            return "[CHAT CRYSTALLIZE - Điểm nhớ từ hội thoại]\n" + "\n".join(lines)
+        except Exception:
+            return ""
+
+    @staticmethod
     def build_context(
         router_result: Dict,
         project_id: str,
@@ -822,15 +860,18 @@ class ContextManager:
         free_chat_mode: bool = False,
         max_context_tokens: Optional[int] = None,
         query_embedding: Optional[List[float]] = None,
+        for_v7_segment: bool = False,
     ) -> Tuple[str, List[str], int]:
-        """Xây dựng context từ router result. query_embedding: embedding câu hỏi (rewritten hoặc gốc) đã tính sẵn để tránh gọi API nhiều lần."""
+        """Xây dựng context từ router result. query_embedding: embedding câu hỏi (rewritten hoặc gốc) đã tính sẵn để tránh gọi API nhiều lần.
+        for_v7_segment: True khi build context cho từng segment V7 — bỏ persona/style; thêm Method, Info, crystallize (scope chương/arc)."""
         context_parts = []
         sources = []
         total_tokens = 0
 
-        persona_text = f"🎭 PERSONA: {persona['role']}\n{persona['core_instruction']}\n"
-        context_parts.append(persona_text)
-        total_tokens += AIService.estimate_tokens(persona_text)
+        if not for_v7_segment:
+            persona_text = f"🎭 PERSONA: {persona['role']}\n{persona['core_instruction']}\n"
+            context_parts.append(persona_text)
+            total_tokens += AIService.estimate_tokens(persona_text)
 
         if free_chat_mode:
             rules_text = ContextManager.get_mandatory_rules(project_id)
@@ -864,15 +905,22 @@ class ContextManager:
             total_tokens += AIService.estimate_tokens(strict_text)
 
         # Bước 3: Rules theo type
-        # - Style: luôn bơm vào context cuối (ảnh hưởng phong cách/thoại).
+        # - Style: luôn bơm vào context cuối (ảnh hưởng phong cách/thoại). V7 segment: bỏ qua (chỉ nạp vào LLM trả lời cuối).
         # - Unknown: bơm nguyên văn (chưa phân loại).
-        # - Info: lọc bằng vector (similarity >= 0.75 với câu hỏi) rồi mới bơm.
-        # - Method: chỉ dùng ở bước 1 intent, không bơm vào context cuối.
-        style_block = ContextManager.get_rules_block_by_type(project_id, current_arc_id, ["Style"])
-        if style_block:
-            rules_text = "\n🔥 --- STYLE RULES ---\n" + style_block + "\n"
-            context_parts.append(rules_text)
-            total_tokens += AIService.estimate_tokens(rules_text)
+        # - Info: lọc bằng vector (similarity >= 0.6 với câu hỏi) rồi mới bơm.
+        # - Method: chỉ dùng ở bước 1 intent khi không V7 segment; V7 segment: tiêm vào từng segment.
+        if not for_v7_segment:
+            style_block = ContextManager.get_rules_block_by_type(project_id, current_arc_id, ["Style"])
+            if style_block:
+                rules_text = "\n🔥 --- STYLE RULES ---\n" + style_block + "\n"
+                context_parts.append(rules_text)
+                total_tokens += AIService.estimate_tokens(rules_text)
+        if for_v7_segment:
+            method_block = ContextManager.get_rules_block_by_type(project_id, current_arc_id, ["Method"])
+            if method_block:
+                rules_text = "\n🔥 --- METHOD RULES ---\n" + method_block + "\n"
+                context_parts.append(rules_text)
+                total_tokens += AIService.estimate_tokens(rules_text)
         unknown_block = ContextManager.get_rules_block_by_type(project_id, current_arc_id, ["Unknown"])
         if unknown_block:
             rules_text = "\n🔥 --- PROJECT RULES ---\n" + unknown_block + "\n"
@@ -882,7 +930,7 @@ class ContextManager:
             project_id,
             router_result.get("rewritten_query") or router_result.get("reason") or "",
             arc_id=current_arc_id,
-            threshold=0.75,
+            threshold=0.6,
             candidate_block=(router_result.get("included_rules_text") or router_result.get("relevant_rules") or ""),
             query_embedding=query_embedding,
         )
@@ -890,6 +938,12 @@ class ContextManager:
             rules_text = "\n🔥 --- INFO RULES (gần với câu hỏi) ---\n" + info_block + "\n"
             context_parts.append(rules_text)
             total_tokens += AIService.estimate_tokens(rules_text)
+        if for_v7_segment:
+            crystallize_block = ContextManager.get_crystallize_context(project_id, current_arc_id, limit=30)
+            if crystallize_block:
+                context_parts.append("\n" + crystallize_block + "\n")
+                total_tokens += AIService.estimate_tokens(crystallize_block)
+                sources.append("💎 Chat Crystallize")
 
         intent = router_result.get("intent", "chat_casual")
         target_files = router_result.get("target_files", [])
