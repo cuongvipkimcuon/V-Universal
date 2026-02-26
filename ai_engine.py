@@ -514,8 +514,9 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
                 context_parts.append("[TIMELINE] Chưa có dữ liệu timeline_events. Trả lời dựa trên Bible/chương nếu có.")
                 sources.append("📅 Timeline (empty)")
 
-    # Fallback: nếu intent=search_context, có chapter_range đã resolve mà không có chunk/bible/timeline/relation nào đáng kể
-    # thì load full chương theo khoảng đó và đưa vào context. Áp dụng chung cho router V6/V8 và cả V7 multi_chapter_analysis.
+    # Kiến trúc giống router: primary = retrieval (chunk, bible, timeline, relation); fallback = load full chương khi retrieval mỏng.
+    # Fallback khi: (1) không có semantic nào, HOẶC (2) tổng retrieval < ngưỡng → load full chương; khi load vẫn giữ bible/chunk... (dùng remaining budget).
+    MIN_RETRIEVAL_TOKENS_FOR_NO_CHAPTER_FALLBACK = 2000
     if intent == "search_context" and range_bounds_bible and not _over_budget():
         has_semantic_context = False
         for meta in context_parts_meta or []:
@@ -525,13 +526,14 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
                 if text_meta:
                     has_semantic_context = True
                     break
-        if not has_semantic_context:
+        retrieval_below_threshold = total_tokens < MIN_RETRIEVAL_TOKENS_FOR_NO_CHAPTER_FALLBACK
+        if not has_semantic_context or retrieval_below_threshold:
             try:
                 start_rb, end_rb = int(range_bounds_bible[0]), int(range_bounds_bible[1])
             except (TypeError, ValueError, IndexError):
                 start_rb = end_rb = None
             if start_rb is not None and end_rb is not None and start_rb <= end_rb:
-                # Tôn trọng giới hạn context tổng: chỉ dùng phần budget còn lại (nếu có), nhưng không vượt quá DEFAULT_CHAPTER_TOKEN_LIMIT.
+                # Dùng budget còn lại để load full chương, không vượt DEFAULT_CHAPTER_TOKEN_LIMIT; giữ nguyên bible/chunk đã có.
                 token_limit_for_fallback = ContextManager.DEFAULT_CHAPTER_TOKEN_LIMIT
                 if max_context_tokens is not None:
                     remaining_budget = max_context_tokens - total_tokens
@@ -551,7 +553,7 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
                     )
                     if fallback_text:
                         context_parts.append(
-                            "\n--- NỘI DUNG CHƯƠNG (FALLBACK - đọc toàn văn khi không tìm được dữ liệu Bible/chunk/timeline/relation) ---\n"
+                            "\n--- NỘI DUNG CHƯƠNG (FALLBACK - retrieval dưới ngưỡng hoặc không có semantic; vẫn giữ Bible/chunk nếu còn token) ---\n"
                             + fallback_text
                         )
                         total_tokens += AIService.estimate_tokens(fallback_text)
