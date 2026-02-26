@@ -241,6 +241,11 @@ Trả về JSON với đủ key:
             # Tạm tắt numerical_calculation (không chạy Python Executor): câu hỏi tính đơn giản (1+1...) -> chat_casual; còn lại -> search_context.
             if intent == "numerical_calculation":
                 intent = "chat_casual" if _is_simple_math_only(user_prompt or "") else "search_context"
+            # Guardrail unified (V6): chỉ giữ unified khi user RA LỆNH rõ "unified"/"chạy unified"/"run unified". "Kể lại trận chiến chương 1-30" -> search_context.
+            if intent == "unified":
+                user_low = (user_prompt or "").strip().lower()
+                if not any(p in user_low for p in ("unified", "chạy unified", "run unified")):
+                    intent = "search_context"
             needs_data = intent not in INTENTS_NO_DATA
             relevant_rules = (data.get("relevant_rules") or "").strip()
             raw_new_rules = data.get("new_rules") or []

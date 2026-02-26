@@ -1176,6 +1176,20 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                             if isinstance(nr, list):
                                 router_out["_new_rules_from_step1"] = nr
 
+                        # Fallback: search_context mà planner không điền chapter_range thì parse từ câu hỏi (vd. "chương 1 đến 30")
+                        if router_out and router_out.get("intent") == "search_context":
+                            cr = router_out.get("chapter_range")
+                            if not cr or (isinstance(cr, (list, tuple)) and len(cr) < 1):
+                                try:
+                                    parsed = parse_chapter_range_from_query(
+                                        prompt or router_out.get("rewritten_query") or ""
+                                    )
+                                    if parsed and len(parsed) >= 2:
+                                        router_out["chapter_range"] = [int(parsed[0]), int(parsed[1])]
+                                        router_out["chapter_range_mode"] = "range"
+                                except Exception:
+                                    pass
+
                         if plan_result and plan and first_intent == "ask_user_clarification":
                             clarification_question = (plan[0].get("args") or {}).get("clarification_question", "") or "Bạn có thể nói rõ hơn câu hỏi hoặc chủ đề bạn muốn hỏi?"
                             with st.chat_message("assistant", avatar=active_persona['icon']):

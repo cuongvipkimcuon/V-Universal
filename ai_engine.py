@@ -516,7 +516,8 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
 
     # Kiến trúc giống router: primary = retrieval (chunk, bible, timeline, relation); fallback = load full chương khi retrieval mỏng.
     # Fallback khi: (1) không có semantic nào, HOẶC (2) tổng retrieval < ngưỡng → load full chương; khi load vẫn giữ bible/chunk... (dùng remaining budget).
-    MIN_RETRIEVAL_TOKENS_FOR_NO_CHAPTER_FALLBACK = 5000
+    # Ngưỡng 50k: áp dụng V6 + V7 (cùng build_context), tránh chỉ vài chunk đã đủ token nên không load full chương.
+    MIN_RETRIEVAL_TOKENS_FOR_NO_CHAPTER_FALLBACK = 50000
     if intent == "search_context" and range_bounds_bible and not _over_budget():
         has_semantic_context = False
         for meta in context_parts_meta or []:
@@ -526,7 +527,12 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
                 if text_meta:
                     has_semantic_context = True
                     break
-        retrieval_below_threshold = total_tokens < MIN_RETRIEVAL_TOKENS_FOR_NO_CHAPTER_FALLBACK
+        try:
+            start_rb, end_rb = int(range_bounds_bible[0]), int(range_bounds_bible[1])
+            threshold = MIN_RETRIEVAL_TOKENS_FOR_NO_CHAPTER_FALLBACK
+        except (TypeError, ValueError, IndexError):
+            threshold = MIN_RETRIEVAL_TOKENS_FOR_NO_CHAPTER_FALLBACK
+        retrieval_below_threshold = total_tokens < threshold
         if not has_semantic_context or retrieval_below_threshold:
             try:
                 start_rb, end_rb = int(range_bounds_bible[0]), int(range_bounds_bible[1])
