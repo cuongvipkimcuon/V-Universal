@@ -168,6 +168,7 @@ CÁC INTENT:
 - web_search: Cần thông tin thực tế bên ngoài (tỷ giá, tin tức, thời tiết, tra cứu).
 - chat_casual: Chào hỏi, xã giao, cảm ơn, không yêu cầu tra cứu hay dữ liệu. Nếu câu chỉ là than vãn cảm xúc (buồn, mệt, chán, stress, cô đơn, nản, tuyệt vọng, "tụt mood"...) và không có yêu cầu tra cứu nội dung dự án (nhân vật, chương, timeline, dữ liệu...), hãy chọn intent = "chat_casual".
 - suggest_v7: Câu rõ ràng cần 2+ bước (vd "tóm tắt chương 1 rồi so sánh timeline").
+  Đặc biệt, nếu user yêu cầu phân tích/tổng hợp trên một khoảng chương RẤT RỘNG (ví dụ: "chương 1 đến 30", "từ chương 5-40") với nhiều ý phân tích (so sánh, tìm logic hole, thống kê...), hãy ưu tiên chọn intent = "suggest_v7" thay vì chỉ search_context/unified, để V7 Planner chia nhỏ khoảng chương và gom kết quả.
 - search_context: Tra cứu nội dung dự án (nhân vật, quan hệ, timeline, tóm tắt chương, nội dung chương).
 - query_Sql: User muốn XEM/LIỆT KÊ dữ liệu thô (list chương, luật, timeline dạng bảng).
 - unified: Ra lệnh chạy phân tích/trích xuất theo chương (Unified: Bible + Timeline + Chunks + Relations). Bắt buộc có chapter_range (ví dụ chương 1, chương 1 đến 5). Không dùng cho "ghi nhớ quy tắc".
