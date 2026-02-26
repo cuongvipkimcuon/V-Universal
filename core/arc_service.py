@@ -108,6 +108,62 @@ class ArcService:
         return "[Global Bible] + [Current Arc: %s] (Standalone)" % (arc.get("name") or current_arc_id[:8])
 
     @staticmethod
+    def get_arc_ids_in_scope(story_id: str, arc_id: Optional[str]) -> List[str]:
+        """
+        Trả về danh sách arc_id thuộc phạm vi soát: arc hiện tại + toàn bộ arc trước đó trong chuỗi sequential.
+        Dùng cho Data Health: Bible/Relation/Timeline/Rule lấy theo các chương thuộc các arc này.
+        Nếu arc_id None hoặc không có arc → trả về [] (caller hiểu là "toàn dự án").
+        """
+        if not arc_id:
+            return []
+        arc = ArcService.get_arc(arc_id)
+        if not arc or arc.get("story_id") != story_id:
+            return [arc_id]
+        out = [arc_id]
+        if arc.get("type") == ArcService.ARC_TYPE_SEQUENTIAL:
+            past = ArcService.get_past_arc_summaries(story_id, arc_id)
+            for a in past:
+                aid = a.get("id")
+                if aid and aid not in out:
+                    out.append(aid)
+        return out
+
+    @staticmethod
+    def get_chapter_scope(story_id: str, arc_id: Optional[str]) -> Dict[str, Any]:
+        """
+        Phạm vi chương cho search/context: arc hiện tại + sequential.
+        Nếu arc_id None → toàn dự án (tất cả chapter).
+        Returns: {"chapter_ids": [...], "chapter_numbers": set(...), "arc_ids": [...]}
+        """
+        out = {"chapter_ids": [], "chapter_numbers": set(), "arc_ids": []}
+        supabase = ArcService._supabase()
+        if not supabase or not story_id:
+            return out
+        arc_ids = ArcService.get_arc_ids_in_scope(story_id, arc_id)
+        if not arc_ids:
+            try:
+                r = supabase.table("chapters").select("id, chapter_number").eq("story_id", story_id).execute()
+                rows = r.data or []
+            except Exception:
+                rows = []
+        else:
+            try:
+                r = (
+                    supabase.table("chapters")
+                    .select("id, chapter_number")
+                    .eq("story_id", story_id)
+                    .in_("arc_id", list(arc_ids))
+                    .execute()
+                )
+                rows = r.data or []
+            except Exception:
+                rows = []
+        out["chapter_ids"] = [x["id"] for x in rows if x.get("id") is not None]
+        out["chapter_numbers"] = {int(x["chapter_number"]) for x in rows if x.get("chapter_number") is not None}
+        out["arc_ids"] = arc_ids
+        return out
+
+    @staticmethod
     def get_scope_for_search(
         story_id: str,
         current_arc_id: Optional[str],

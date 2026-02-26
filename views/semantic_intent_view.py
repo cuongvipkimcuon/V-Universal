@@ -8,6 +8,8 @@ from ai_engine import AIService
 from utils.auth_manager import check_permission
 from core.background_jobs import run_semantic_intent_embedding_backfill, is_embedding_backfill_running
 
+KNOWLEDGE_PAGE_SIZE = 10
+
 
 def _ensure_table(supabase):
     try:
@@ -161,18 +163,6 @@ def render_semantic_intent_tab(project_id):
 
     st.markdown("---")
 
-    # List (cả đã duyệt và chưa duyệt)
-    r = (
-        supabase.table("semantic_intent")
-        .select("*")
-        .eq("story_id", project_id)
-        .order("created_at", desc=True)
-        .execute()
-    )
-    items = r.data or []
-
-    st.metric("Tổng mẫu", len(items))
-
     # Filter trạng thái duyệt cho Semantic Intent
     status_filter = st.selectbox(
         "Trạng thái",
@@ -181,10 +171,59 @@ def render_semantic_intent_tab(project_id):
         key="si_status_filter",
         help="Lọc Semantic Intent theo trạng thái duyệt. Chỉ mẫu đã duyệt mới được dùng để match.",
     )
+
+    # Filter + phân trang ở DB (tối đa 10 mục/trang)
+    if st.session_state.get("si_status_prev") != status_filter:
+        st.session_state["si_page"] = 1
+    st.session_state["si_status_prev"] = status_filter
+    page = max(1, int(st.session_state.get("si_page", 1)))
+    q_count = (
+        supabase.table("semantic_intent")
+        .select("id", count="exact")
+        .eq("story_id", project_id)
+    )
     if status_filter == "Chỉ đã duyệt":
-        items = [x for x in items if bool(x.get("approve", True))]
+        q_count = q_count.eq("approve", True)
     elif status_filter == "Chỉ chưa duyệt":
-        items = [x for x in items if not bool(x.get("approve", True))]
+        q_count = q_count.eq("approve", False)
+    try:
+        total_si = getattr(q_count.limit(0).execute(), "count", None) or 0
+    except Exception:
+        total_si = 0
+    total_pages = max(1, (total_si + KNOWLEDGE_PAGE_SIZE - 1) // KNOWLEDGE_PAGE_SIZE)
+    page = max(1, min(page, total_pages))
+    st.session_state["si_page"] = page
+    offset = (page - 1) * KNOWLEDGE_PAGE_SIZE
+    q_data = (
+        supabase.table("semantic_intent")
+        .select("*")
+        .eq("story_id", project_id)
+        .order("created_at", desc=True)
+    )
+    if status_filter == "Chỉ đã duyệt":
+        q_data = q_data.eq("approve", True)
+    elif status_filter == "Chỉ chưa duyệt":
+        q_data = q_data.eq("approve", False)
+    try:
+        items = q_data.range(offset, offset + KNOWLEDGE_PAGE_SIZE - 1).execute().data or []
+    except Exception:
+        items = []
+        total_si = 0
+        total_pages = 1
+
+    st.metric("Tổng mẫu", total_si)
+    if total_pages > 1:
+        pcol1, pcol2, pcol3 = st.columns([1, 2, 1])
+        with pcol1:
+            if st.button("⬅️ Trang trước", key="si_prev", disabled=(page <= 1)):
+                st.session_state["si_page"] = max(1, page - 1)
+                st.rerun()
+        with pcol2:
+            st.caption(f"**Trang {page} / {total_pages}** (tối đa {KNOWLEDGE_PAGE_SIZE} mục/trang)")
+        with pcol3:
+            if st.button("Trang sau ➡️", key="si_next", disabled=(page >= total_pages)):
+                st.session_state["si_page"] = min(total_pages, page + 1)
+                st.rerun()
 
     if st.button("➕ Thêm mẫu", key="si_add") and can_write:
         st.session_state["si_adding"] = True
@@ -244,6 +283,12 @@ def render_semantic_intent_tab(project_id):
     if st.session_state.get("si_editing") and can_write:
         edit_id = st.session_state["si_editing"]
         row = next((x for x in items if str(x.get("id")) == str(edit_id)), None)
+        if not row:
+            try:
+                r = supabase.table("semantic_intent").select("*").eq("id", edit_id).eq("story_id", project_id).limit(1).execute()
+                row = (r.data or [None])[0] if r.data else None
+            except Exception:
+                row = None
         if row:
             st.markdown("---")
             with st.form("si_edit_form"):

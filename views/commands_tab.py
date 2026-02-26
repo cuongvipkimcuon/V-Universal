@@ -6,6 +6,8 @@ import streamlit as st
 
 from config import init_services
 
+KNOWLEDGE_PAGE_SIZE = 10
+
 
 def _get_command_definitions(project_id=None):
     """Lấy danh sách command_definitions từ DB; fallback built-in nếu chưa có bảng."""
@@ -100,18 +102,55 @@ def render_commands_tab(project_id, persona=None):
         st.info("Chọn một dự án để xem và tùy biến alias theo dự án.")
         project_id = None
 
-    commands = _get_command_definitions(project_id)
     aliases = _get_aliases(project_id) if project_id else []
     alias_by_cmd = {}
     for a in aliases:
         alias_by_cmd.setdefault(a.get("command_key"), []).append(a.get("alias"))
 
+    # Phân trang: ưu tiên DB (command_definitions), fallback builtin (slice 10/trang)
+    page = max(1, int(st.session_state.get("commands_page", 1)))
+    commands = []
+    total_commands = 0
+    total_pages = 1
+    try:
+        svc = init_services()
+        if svc:
+            count_res = svc["supabase"].table("command_definitions").select("id", count="exact").limit(0).execute()
+            total_commands = getattr(count_res, "count", None) or 0
+            if total_commands > 0:
+                total_pages = max(1, (total_commands + KNOWLEDGE_PAGE_SIZE - 1) // KNOWLEDGE_PAGE_SIZE)
+                page = max(1, min(page, total_pages))
+                offset = (page - 1) * KNOWLEDGE_PAGE_SIZE
+                r = svc["supabase"].table("command_definitions").select("*").order("sort_order").range(offset, offset + KNOWLEDGE_PAGE_SIZE - 1).execute()
+                commands = r.data or []
+    except Exception:
+        pass
+    if not commands and total_commands == 0:
+        builtin_all = _get_command_definitions(project_id)
+        total_commands = len(builtin_all)
+        total_pages = max(1, (total_commands + KNOWLEDGE_PAGE_SIZE - 1) // KNOWLEDGE_PAGE_SIZE)
+        page = max(1, min(page, total_pages))
+        offset = (page - 1) * KNOWLEDGE_PAGE_SIZE
+        commands = builtin_all[offset : offset + KNOWLEDGE_PAGE_SIZE]
+
+    st.session_state["commands_page"] = page
     st.subheader("Cấu trúc chỉ lệnh")
     st.markdown("""
     - **Kích hoạt:** `@@<trigger> [tham_số...]` (hai dấu @@, tránh nhầm email @)
     - **Trigger** có thể là tên mặc định (vd: `extract_bible`) hoặc **alias** bạn đặt (vd: `ex`).
     - **Tham số:** do hệ thống định nghĩa — *chương* (số hoặc khoảng `1-10`) hoặc *nội dung* (chuỗi sau trigger).
     """)
+    if total_pages > 1:
+        st.caption(f"**Trang {page} / {total_pages}** (tối đa {KNOWLEDGE_PAGE_SIZE} mục/trang, tổng {total_commands} lệnh)")
+        pc1, pc2, pc3 = st.columns([1, 2, 1])
+        with pc1:
+            if st.button("⬅️ Trang trước", key="cmd_prev", disabled=(page <= 1)):
+                st.session_state["commands_page"] = max(1, page - 1)
+                st.rerun()
+        with pc3:
+            if st.button("Trang sau ➡️", key="cmd_next", disabled=(page >= total_pages)):
+                st.session_state["commands_page"] = min(total_pages, page + 1)
+                st.rerun()
 
     for cmd in commands:
         key = cmd.get("command_key") or ""

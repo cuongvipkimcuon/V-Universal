@@ -11,6 +11,10 @@ from utils.auth_manager import check_permission, submit_pending_change
 from utils.cache_helpers import get_bible_list_cached, invalidate_cache
 from core.user_data_save_pipeline import run_logic_check_then_save_bible, run_logic_check_then_save_relation
 
+# Phân trang: tối đa 10 mục/trang, filter và phân trang thực hiện ở DB
+KNOWLEDGE_PAGE_SIZE = 10
+
+
 # Tiền tố khóa (chỉ sửa nội dung, không sửa tiền tố): lấy từ Config.PREFIX_SPECIAL_SYSTEM, bỏ OTHER.
 def _get_locked_prefixes():
     return tuple(f"[{k}]" for k in (getattr(Config, "PREFIX_SPECIAL_SYSTEM", ()) or ()) if k != "OTHER")
@@ -245,17 +249,85 @@ def render_bible_tab(project_id, persona):
 
     _bible_search_fragment()
 
+    # Filter theo chương (source_chapter)
+    try:
+        ch_list = supabase.table("chapters").select("chapter_number, title").eq("story_id", project_id).order("chapter_number").execute().data or []
+        chapter_options = ["Tất cả"] + [f"Chương {r.get('chapter_number', '')}: {r.get('title') or ''}" for r in ch_list]
+        chapter_nums = [None] + [r.get("chapter_number") for r in ch_list]
+    except Exception:
+        chapter_options = ["Tất cả"]
+        chapter_nums = [None]
+    bible_filter_chapter_idx = st.session_state.get("bible_filter_chapter", 0)
+    bible_filter_chapter_idx = max(0, min(bible_filter_chapter_idx, len(chapter_options) - 1))
+    filter_chapter_label = st.selectbox(
+        "Chương",
+        range(len(chapter_options)),
+        index=bible_filter_chapter_idx,
+        format_func=lambda i: chapter_options[i] if i < len(chapter_options) else "",
+        key="bible_filter_chapter_select",
+        help="Chỉ hiển thị Bible có source_chapter thuộc chương đã chọn.",
+    )
+    st.session_state["bible_filter_chapter"] = filter_chapter_label
+    filter_chapter_num = chapter_nums[filter_chapter_label] if filter_chapter_label < len(chapter_nums) else None
+
     filter_prefix_val = st.session_state.get("bible_filter_prefix", "All")
-    bible_data = [e for e in bible_data_all if filter_prefix_val == "All" or (e.get("entity_name") or "").startswith(filter_prefix_val)]
     search_active = bool((st.session_state.get("bible_search_input") or "").strip())
     if search_active:
         bible_data = []
+        total_bible = 0
+        total_pages_bible = 1
+        st.session_state["bible_page"] = 1
+    else:
+        # Filter + phân trang ở DB (tối đa 10 mục/trang)
+        if st.session_state.get("bible_filter_prefix_prev") != filter_prefix_val or st.session_state.get("bible_filter_chapter_prev") != filter_chapter_label:
+            st.session_state["bible_page"] = 1
+        st.session_state["bible_filter_prefix_prev"] = filter_prefix_val
+        st.session_state["bible_filter_chapter_prev"] = filter_chapter_label
+        page = max(1, int(st.session_state.get("bible_page", 1)))
+        try:
+            cq = (
+                supabase.table("story_bible")
+                .select("id", count="exact")
+                .eq("story_id", project_id)
+                .not_.ilike("entity_name", "[RULE]%")
+                .not_.ilike("entity_name", "[CHAT]%")
+            )
+            if filter_prefix_val != "All":
+                cq = cq.ilike("entity_name", f"{filter_prefix_val}%")
+            if filter_chapter_num is not None:
+                cq = cq.eq("source_chapter", filter_chapter_num)
+            count_res = cq.limit(0).execute()
+            total_bible = getattr(count_res, "count", None) or 0
+        except Exception:
+            total_bible = 0
+        total_pages_bible = max(1, (total_bible + KNOWLEDGE_PAGE_SIZE - 1) // KNOWLEDGE_PAGE_SIZE)
+        page = max(1, min(page, total_pages_bible))
+        st.session_state["bible_page"] = page
+        offset = (page - 1) * KNOWLEDGE_PAGE_SIZE
+        try:
+            dq = (
+                supabase.table("story_bible")
+                .select("*")
+                .eq("story_id", project_id)
+                .not_.ilike("entity_name", "[RULE]%")
+                .not_.ilike("entity_name", "[CHAT]%")
+                .order("created_at", desc=True)
+            )
+            if filter_prefix_val != "All":
+                dq = dq.ilike("entity_name", f"{filter_prefix_val}%")
+            if filter_chapter_num is not None:
+                dq = dq.eq("source_chapter", filter_chapter_num)
+            bible_data = dq.range(offset, offset + KNOWLEDGE_PAGE_SIZE - 1).execute().data or []
+        except Exception:
+            bible_data = []
+            total_bible = 0
+            total_pages_bible = 1
 
-    if bible_data:
+    if bible_data or (not search_active and total_bible > 0):
         col1, col2, col3, col4 = st.columns(4)
 
         with col1:
-            st.metric("Total", len(bible_data))
+            st.metric("Total", total_bible if not search_active else len(bible_data))
 
         with col2:
             prefix_counts = {}
@@ -275,6 +347,21 @@ def render_bible_tab(project_id, persona):
         with col4:
             rules = sum(1 for b in bible_data if '[RULE]' in b.get('entity_name', ''))
             st.metric("Rules", rules)
+
+        # Phân trang: điều khiển Trang / Prev / Next (filter + pagination đã thực hiện ở DB)
+        if not search_active and total_pages_bible > 1:
+            st.markdown("---")
+            pcol1, pcol2, pcol3 = st.columns([1, 2, 1])
+            with pcol1:
+                if st.button("⬅️ Trang trước", key="bible_prev_page", disabled=(page <= 1)):
+                    st.session_state["bible_page"] = max(1, page - 1)
+                    st.rerun()
+            with pcol2:
+                st.caption(f"**Trang {page} / {total_pages_bible}** (tối đa {KNOWLEDGE_PAGE_SIZE} mục/trang)")
+            with pcol3:
+                if st.button("Trang sau ➡️", key="bible_next_page", disabled=(page >= total_pages_bible)):
+                    st.session_state["bible_page"] = min(total_pages_bible, page + 1)
+                    st.rerun()
 
     parent_options = [{"id": None, "entity_name": "(None)"}] + [{"id": r["id"], "entity_name": r.get("entity_name", "")} for r in bible_data_all]
 

@@ -24,11 +24,13 @@ class HybridSearch:
         project_id: str,
         top_k: int = 10,
         inferred_prefixes: Optional[List[str]] = None,
+        query_embedding: Optional[List[float]] = None,
+        chapter_numbers: Optional[List[int]] = None,
     ) -> List[Dict]:
         try:
             services = init_services()
             supabase = services["supabase"]
-            query_vec = AIService.get_embedding(query_text)
+            query_vec = query_embedding if query_embedding is not None else AIService.get_embedding(query_text)
             candidate_limit = max(top_k * 3, 30)
 
             if query_vec:
@@ -71,6 +73,16 @@ class HybridSearch:
             if not raw_list:
                 return []
 
+            # Scope: chỉ giữ entry có source_chapter thuộc chapter_numbers (khi có)
+            if chapter_numbers is not None and len(chapter_numbers) > 0:
+                ch_set = set(int(x) for x in chapter_numbers)
+                raw_list = [
+                    r for r in raw_list
+                    if r.get("source_chapter") is not None and int(r.get("source_chapter", 0)) in ch_set
+                ]
+                if not raw_list:
+                    return []
+
             # V7.7: Loại entry đã archived (không đưa vào context)
             try:
                 archived_ids = get_archived_bible_ids(project_id)
@@ -90,11 +102,16 @@ class HybridSearch:
             return []
 
     @staticmethod
-    def smart_search_hybrid_raw_with_scores(query_text: str, project_id: str, top_k: int = 10) -> List[Dict]:
+    def smart_search_hybrid_raw_with_scores(
+        query_text: str,
+        project_id: str,
+        top_k: int = 10,
+        query_embedding: Optional[List[float]] = None,
+    ) -> List[Dict]:
         try:
             services = init_services()
             supabase = services["supabase"]
-            query_vec = AIService.get_embedding(query_text)
+            query_vec = query_embedding if query_embedding is not None else AIService.get_embedding(query_text)
             candidate_limit = max(top_k * 3, 30)
             if query_vec:
                 try:
@@ -180,6 +197,7 @@ def check_semantic_intent(
     query_text: str,
     project_id: str,
     threshold: float = 0.90,
+    query_embedding: Optional[List[float]] = None,
 ) -> Optional[Dict]:
     if not query_text or not project_id:
         return None
@@ -199,7 +217,7 @@ def check_semantic_intent(
                 threshold = max(0.85, min(1.0, float(t) / 100.0)) if t is not None else threshold
         except Exception:
             pass
-        query_vec = AIService.get_embedding(query_text)
+        query_vec = query_embedding if query_embedding is not None else AIService.get_embedding(query_text)
         if not query_vec:
             return None
         rows = (
@@ -243,16 +261,20 @@ def search_chunks_vector(
     query_text: str,
     project_id: str,
     arc_id: Optional[str] = None,
+    arc_ids: Optional[List[str]] = None,
     top_k: int = 10,
+    query_embedding: Optional[List[float]] = None,
 ) -> List[Dict]:
     try:
         services = init_services()
         if not services:
             return []
         supabase = services["supabase"]
-        query_vec = AIService.get_embedding(query_text)
+        query_vec = query_embedding if query_embedding is not None else AIService.get_embedding(query_text)
         q = supabase.table("chunks").select("id, chapter_id, arc_id, content, raw_content, meta_json, story_id").eq("story_id", project_id)
-        if arc_id:
+        if arc_ids:
+            q = q.in_("arc_id", list(arc_ids))
+        elif arc_id:
             q = q.eq("arc_id", arc_id)
         if query_vec:
             try:
@@ -264,8 +286,8 @@ def search_chunks_vector(
                     "match_count": top_k,
                 }).execute()
                 rows = list(r.data) if r.data else []
-                if arc_id and not rows and query_text and query_text.strip():
-                    rows = search_chunks_vector(query_text, project_id, arc_id=None, top_k=top_k)
+                if (arc_id or arc_ids) and not rows and query_text and query_text.strip():
+                    rows = search_chunks_vector(query_text, project_id, arc_id=None, arc_ids=None, top_k=top_k, query_embedding=query_vec)
                 return rows
             except Exception:
                 pass
@@ -273,8 +295,8 @@ def search_chunks_vector(
             pattern = "%" + str(query_text).strip() + "%"
             r = q.ilike("content", pattern).limit(top_k).execute()
             rows = list(r.data) if r.data else []
-            if arc_id and not rows:
-                rows = search_chunks_vector(query_text, project_id, arc_id=None, top_k=top_k)
+            if (arc_id or arc_ids) and not rows:
+                rows = search_chunks_vector(query_text, project_id, arc_id=None, arc_ids=None, top_k=top_k, query_embedding=query_vec)
             return rows
         return []
     except Exception as e:

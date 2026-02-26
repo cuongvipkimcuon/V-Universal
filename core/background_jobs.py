@@ -1,7 +1,8 @@
 # core/background_jobs.py - Background jobs (Data Analyze + Chat). "Background Jobs" tab shows status.
 """Create/update/list jobs. Workers run in thread; completion is not posted to chat (see Background Jobs tab)."""
 import logging
-from datetime import datetime, timezone
+import threading
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -69,6 +70,88 @@ def update_job(
         services["supabase"].table("background_jobs").update(payload).eq("id", job_id).execute()
     except Exception:
         pass
+
+
+_job_runner_lock = threading.Lock()
+_job_runner_running = False
+
+
+def _job_queue_loop() -> None:
+    """
+    Chạy lần lượt các job pending (toàn hệ thống), ưu tiên tính ổn định:
+    - Mỗi lần chỉ chạy 1 job (run_job_worker).
+    - Sau khi job đó completed/failed mới lấy job tiếp theo.
+    - Dừng khi không còn job pending.
+    """
+    global _job_runner_running
+    try:
+        from config import init_services
+
+        services = init_services()
+        if not services:
+            return
+        supabase = services["supabase"]
+
+        # Auto-expire các job pending quá lâu (ví dụ > 1 ngày) để tránh chạy lại.
+        try:
+            cutoff = datetime.now(tz=timezone.utc) - timedelta(days=1)
+            supabase.table("background_jobs").update(
+                {
+                    "status": "failed",
+                    "error_message": "Job quá hạn (> 1 ngày, auto bỏ qua).",
+                }
+            ).eq("status", "pending").lt("created_at", cutoff.isoformat()).execute()
+        except Exception as e:  # pragma: no cover
+            logger.warning("job_queue_loop: expire old pending jobs failed: %s", e)
+
+        while True:
+            try:
+                r = (
+                    supabase.table("background_jobs")
+                    .select("id")
+                    .eq("status", "pending")
+                    .order("created_at")
+                    .limit(1)
+                    .execute()
+                )
+            except Exception as e:  # pragma: no cover - log rồi dừng vòng queue
+                logger.warning("job_queue_loop: fetch pending job failed: %s", e)
+                break
+
+            rows = list(r.data or [])
+            if not rows:
+                break
+
+            job_id = rows[0].get("id")
+            if not job_id:
+                break
+
+            try:
+                run_job_worker(str(job_id))
+            except Exception as e:  # pragma: no cover - không để crash cả loop
+                logger.warning("job_queue_loop: run_job_worker failed: %s", e)
+                # Tiếp tục sang job kế (nếu có)
+                continue
+    finally:
+        # Khi hết job (hoặc lỗi), đánh dấu runner đã dừng để lần sau có thể khởi động lại.
+        global _job_runner_lock
+        with _job_runner_lock:
+            _job_runner_running = False
+
+
+def ensure_background_job_runner() -> None:
+    """
+    Đảm bảo có một thread nền xử lý hàng đợi job:
+    - Nếu đã chạy rồi → không làm gì.
+    - Nếu chưa → khởi động thread chạy _job_queue_loop().
+    """
+    global _job_runner_running
+    with _job_runner_lock:
+        if _job_runner_running:
+            return
+        _job_runner_running = True
+        t = threading.Thread(target=_job_queue_loop, daemon=True)
+        t.start()
 
 
 def retry_job_with_stored_data(job_id: str) -> Dict[str, Any]:
@@ -990,8 +1073,9 @@ def run_rules_embedding_backfill(project_id: str, limit: int = 200) -> int:
 
 def run_crystallize_embedding_backfill(project_id: str, limit: int = 200) -> int:
     """
-    Đồng bộ vector cho chat_crystallize_entries:
-    - Chỉ embed các entry của project hiện tại có embedding NULL.
+    Đồng bộ vector cho chat_crystallize_entries. Chỉ chạy khi user bấm "Đồng bộ vector (Chat Memory)" (tab Memory).
+    - Khi tạo crystallize (auto hoặc thủ công) không ghi embedding; cột embedding chỉ được set ở đây.
+    - Chỉ embed các entry của project có embedding NULL.
     - Text dùng để embed = title + \\n\\n + description (nếu có).
     """
     global _embedding_backfill_crystallize_running

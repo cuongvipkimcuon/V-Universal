@@ -26,7 +26,7 @@ def _run_at_at_mode(question: str, project_id: str) -> tuple:
     if semantic and semantic.get("intent") == "numerical_calculation" and semantic.get("related_data"):
         router_out["_semantic_data"] = semantic["related_data"]
     try:
-        context_text, sources, _ = ContextManager.build_context(
+        context_text, sources, _, _ = ContextManager.build_context(
             router_out, project_id, persona, False,
             current_arc_id=st.session_state.get("current_arc_id"),
             session_state=dict(st.session_state),

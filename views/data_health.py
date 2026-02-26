@@ -5,9 +5,12 @@
 """
 import streamlit as st
 
-from utils.active_sentry import get_pending_conflicts, resolve_conflict
+from config import init_services
+from utils.active_sentry import resolve_conflict
 from utils.cache_helpers import get_chapters_cached
 from core.chapter_logic_check import run_chapter_logic_check, get_chapter_logic_issues, LOGIC_DIMENSIONS
+
+KNOWLEDGE_PAGE_SIZE = 10
 
 
 def render_data_health_tab(project_id):
@@ -18,12 +21,40 @@ def render_data_health_tab(project_id):
         st.info("📁 Chọn Project ở thanh bên trái.")
         return
 
-    # ---------- Phần 1: Validation conflicts (Active Sentry) ----------
+    # ---------- Phần 1: Validation conflicts (Active Sentry) — phân trang ở DB ----------
     st.markdown("#### ⚠️ Conflicts (Bible / Cross-sheet)")
-    conflicts = get_pending_conflicts(project_id)
-    if not conflicts:
+    services = init_services()
+    conflicts = []
+    total_conflicts = 0
+    conflicts_page = 1
+    conflicts_total_pages = 1
+    if services:
+        try:
+            sb = services["supabase"]
+            count_res = sb.table("validation_logs").select("id", count="exact").eq("story_id", project_id).eq("status", "pending").limit(0).execute()
+            total_conflicts = getattr(count_res, "count", None) or 0
+            conflicts_total_pages = max(1, (total_conflicts + KNOWLEDGE_PAGE_SIZE - 1) // KNOWLEDGE_PAGE_SIZE)
+            conflicts_page = max(1, min(int(st.session_state.get("data_health_conflicts_page", 1)), conflicts_total_pages))
+            st.session_state["data_health_conflicts_page"] = conflicts_page
+            offset = (conflicts_page - 1) * KNOWLEDGE_PAGE_SIZE
+            r = sb.table("validation_logs").select("*").eq("story_id", project_id).eq("status", "pending").order("created_at", desc=True).range(offset, offset + KNOWLEDGE_PAGE_SIZE - 1).execute()
+            conflicts = r.data or []
+        except Exception:
+            pass
+    if not conflicts and total_conflicts == 0:
         st.success("✅ Không có xung đột đang chờ.")
     else:
+        if conflicts_total_pages > 1:
+            st.caption(f"**Trang {conflicts_page} / {conflicts_total_pages}** (tối đa {KNOWLEDGE_PAGE_SIZE} mục/trang, tổng {total_conflicts} xung đột)")
+            dc1, dc2, dc3 = st.columns([1, 2, 1])
+            with dc1:
+                if st.button("⬅️ Trang trước", key="dh_conf_prev", disabled=(conflicts_page <= 1)):
+                    st.session_state["data_health_conflicts_page"] = max(1, conflicts_page - 1)
+                    st.rerun()
+            with dc3:
+                if st.button("Trang sau ➡️", key="dh_conf_next", disabled=(conflicts_page >= conflicts_total_pages)):
+                    st.session_state["data_health_conflicts_page"] = min(conflicts_total_pages, conflicts_page + 1)
+                    st.rerun()
         for c in conflicts:
             log_id = c.get("id")
             msg = c.get("message", "")
@@ -94,10 +125,34 @@ def render_data_health_tab(project_id):
             else:
                 st.success("Phát hiện %s lỗi; đã đánh dấu khắc phục %s lỗi cũ. Bấm Refresh để tải lại danh sách." % (len(issues), resolved_count))
 
-    # Danh sách issues: active + resolved (đã khắc phục)
-    all_issues = get_chapter_logic_issues(project_id, chapter_id=ch_id, status_filter=None, limit=100)
+    # Danh sách issues: active + resolved (đã khắc phục) — phân trang ở DB (10 mục/trang)
+    issues_page = max(1, int(st.session_state.get("data_health_issues_page", 1)))
+    total_issues = 0
+    issues_total_pages = 1
+    if services:
+        try:
+            count_res = services["supabase"].table("chapter_logic_issues").select("id", count="exact").eq("story_id", project_id).eq("chapter_id", ch_id).limit(0).execute()
+            total_issues = getattr(count_res, "count", None) or 0
+            issues_total_pages = max(1, (total_issues + KNOWLEDGE_PAGE_SIZE - 1) // KNOWLEDGE_PAGE_SIZE)
+            issues_page = max(1, min(issues_page, issues_total_pages))
+            st.session_state["data_health_issues_page"] = issues_page
+        except Exception:
+            pass
+    all_issues = get_chapter_logic_issues(project_id, chapter_id=ch_id, status_filter=None, limit=KNOWLEDGE_PAGE_SIZE, offset=(issues_page - 1) * KNOWLEDGE_PAGE_SIZE)
     active = [i for i in all_issues if i.get("status") == "active"]
     resolved = [i for i in all_issues if i.get("status") == "resolved"]
+
+    if issues_total_pages > 1:
+        st.caption(f"**Trang {issues_page} / {issues_total_pages}** (tối đa {KNOWLEDGE_PAGE_SIZE} lỗi/trang, tổng {total_issues})")
+        di1, di2, di3 = st.columns([1, 2, 1])
+        with di1:
+            if st.button("⬅️ Trang trước", key="dh_iss_prev", disabled=(issues_page <= 1)):
+                st.session_state["data_health_issues_page"] = max(1, issues_page - 1)
+                st.rerun()
+        with di3:
+            if st.button("Trang sau ➡️", key="dh_iss_next", disabled=(issues_page >= issues_total_pages)):
+                st.session_state["data_health_issues_page"] = min(issues_total_pages, issues_page + 1)
+                st.rerun()
 
     if active:
         st.markdown("**Lỗi đang có (cần sửa)**")

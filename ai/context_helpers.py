@@ -311,20 +311,21 @@ def get_relevant_info_rules(
     arc_id: Optional[str] = None,
     threshold: float = 0.75,
     candidate_rules_block: Optional[str] = None,
+    query_embedding: Optional[List[float]] = None,
 ) -> str:
     """
     Lấy các Info Rule (type='Info', approve=TRUE) có embedding giống câu hỏi hiện tại.
     - Dùng embedding câu hỏi so với embedding rule (cosine similarity).
     - Chỉ chọn các rule có similarity >= threshold (mặc định 0.75).
     - Ưu tiên scope: global + project (+ arc nếu có).
+    - query_embedding: nếu truyền vào thì dùng luôn, không gọi API embedding.
     """
     if not project_id or not user_prompt or threshold <= 0:
         return ""
     try:
         from ai.service import AIService  # tránh circular với ai_engine
 
-        q_vec_raw = AIService.get_embedding(user_prompt)
-        q_vec = _parse_embedding_vector(q_vec_raw)
+        q_vec = _parse_embedding_vector(query_embedding) if query_embedding is not None else _parse_embedding_vector(AIService.get_embedding(user_prompt))
         if not q_vec:
             return ""
 
@@ -571,22 +572,32 @@ def get_entity_relations(entity_id: Any, project_id: str) -> str:
     return "\n".join(lines) if lines else ""
 
 
-def get_top_relations_by_query(project_id: str, query_text: str, top_k: int = 5) -> str:
-    """Khi entity_relations đã có embedding: lấy quan hệ gần nhất với query (vector). Trả về chuỗi để đưa vào context; rỗng nếu không có embedding hoặc lỗi."""
+def get_top_relations_by_query(
+    project_id: str,
+    query_text: str,
+    top_k: int = 5,
+    query_embedding: Optional[List[float]] = None,
+    chapter_numbers: Optional[List[int]] = None,
+    max_relations: int = 80,
+) -> str:
+    """Khi entity_relations đã có embedding: lấy quan hệ gần nhất với query (vector). Trả về chuỗi để đưa vào context; rỗng nếu không có embedding hoặc lỗi. chapter_numbers: chỉ lấy relation có source_chapter trong scope."""
     if not query_text or not query_text.strip() or not project_id:
         return ""
     try:
         from ai.service import AIService
-        qvec = AIService.get_embedding(query_text.strip()[:4000])
+        qvec = query_embedding if query_embedding is not None else AIService.get_embedding(query_text.strip()[:4000])
         if not qvec:
             return ""
         services = init_services()
         if not services:
             return ""
         supabase = services["supabase"]
-        r = supabase.table("entity_relations").select(
-            "id, source_entity_id, target_entity_id, relation_type, description, embedding"
-        ).eq("story_id", project_id).not_.is_("embedding", "null").limit(80).execute()
+        q = supabase.table("entity_relations").select(
+            "id, source_entity_id, target_entity_id, relation_type, description, source_chapter, embedding"
+        ).eq("story_id", project_id).not_.is_("embedding", "null").limit(max_relations)
+        if chapter_numbers is not None and len(chapter_numbers) > 0:
+            q = q.in_("source_chapter", list(chapter_numbers))
+        r = q.execute()
         rows = list(r.data or [])
         if not rows:
             return ""
@@ -630,22 +641,35 @@ def get_top_relations_by_query(project_id: str, query_text: str, top_k: int = 5)
         return ""
 
 
-def get_top_timeline_by_query(project_id: str, query_text: str, top_k: int = 5) -> str:
-    """Khi timeline_events đã có embedding: lấy sự kiện gần nhất với query (vector). Trả về chuỗi để đưa vào context; rỗng nếu không có embedding hoặc lỗi."""
+def get_top_timeline_by_query(
+    project_id: str,
+    query_text: str,
+    top_k: int = 5,
+    query_embedding: Optional[List[float]] = None,
+    chapter_ids: Optional[List[Any]] = None,
+    arc_ids: Optional[List[str]] = None,
+    max_events: int = 80,
+) -> str:
+    """Khi timeline_events đã có embedding: lấy sự kiện gần nhất với query (vector). chapter_ids/arc_ids: scope (chỉ sự kiện thuộc các chương/arc đó)."""
     if not query_text or not query_text.strip() or not project_id:
         return ""
     try:
         from ai.service import AIService
-        qvec = AIService.get_embedding(query_text.strip()[:4000])
+        qvec = query_embedding if query_embedding is not None else AIService.get_embedding(query_text.strip()[:4000])
         if not qvec:
             return ""
         services = init_services()
         if not services:
             return ""
         supabase = services["supabase"]
-        r = supabase.table("timeline_events").select(
-            "id, title, description, raw_date, event_type, embedding"
-        ).eq("story_id", project_id).not_.is_("embedding", "null").limit(80).execute()
+        q = supabase.table("timeline_events").select(
+            "id, title, description, raw_date, event_type, chapter_id, arc_id, embedding"
+        ).eq("story_id", project_id).not_.is_("embedding", "null").limit(max_events)
+        if chapter_ids:
+            q = q.in_("chapter_id", chapter_ids[:500])
+        if arc_ids and not chapter_ids:
+            q = q.in_("arc_id", list(arc_ids))
+        r = q.execute()
         rows = list(r.data or [])
         if not rows:
             return ""

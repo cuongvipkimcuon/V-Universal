@@ -14,7 +14,7 @@ from ai_engine import (
 from utils.auth_manager import check_permission
 from utils.cache_helpers import get_chapters_cached, get_chapter_content_cached
 from persona import PersonaSystem
-from core.background_jobs import create_job, run_job_worker
+from core.background_jobs import create_job, ensure_background_job_runner
 
 
 def _get_existing_bible_entity_names_for_chapter(project_id, chap_num, supabase):
@@ -245,7 +245,7 @@ def _render_extract_bible_relations_chunking(project_id, content, chap_num, sele
             post_to_chat=True,
         )
         if job_id:
-            threading.Thread(target=run_job_worker, args=(job_id,), daemon=True).start()
+            ensure_background_job_runner()
             st.toast("Đã xếp hàng. Xem tab Background Jobs hoặc chat.")
             st.session_state["update_trigger"] = st.session_state.get("update_trigger", 0) + 1
         else:
@@ -267,13 +267,65 @@ def _render_extract_bible_relations_chunking(project_id, content, chap_num, sele
                 post_to_chat=False,
             )
             if job_id:
-                threading.Thread(target=run_job_worker, args=(job_id,), daemon=True).start()
+                ensure_background_job_runner()
                 st.toast("Đã xếp hàng. Xem tab Background Jobs.")
                 st.session_state["update_trigger"] = st.session_state.get("update_trigger", 0) + 1
             else:
                 st.error("Không tạo được job.")
     st.markdown("---")
-    st.subheader("➕ Thêm trên nền có sẵn (không xóa)")
+    st.subheader("📥 Unified nhiều chương (range)")
+    st.caption("Chạy Unified liên tiếp cho nhiều chương (xóa & tạo lại Bible/Timeline/Chunks/Relations cho từng chương trong khoảng).")
+    st.caption("Lưu ý: Khoảng chương này chỉ áp dụng cho Unified; các nút phân tích thành phần bên dưới vẫn dùng CHƯƠNG đang chọn ở trên.")
+    if can_write:
+        # Xác định khoảng chương khả dụng từ file_options
+        try:
+            chapter_numbers = sorted(set(int(v) for v in file_options.values()))
+        except Exception:
+            chapter_numbers = []
+        if chapter_numbers:
+            min_ch = chapter_numbers[0]
+            max_ch = chapter_numbers[-1]
+            default_range = (min_ch, max_ch)
+            ch_start, ch_end = st.slider(
+                "Khoảng chương Unified",
+                min_value=min_ch,
+                max_value=max_ch,
+                value=default_range,
+                key="da_unified_range_slider",
+            )
+            st.checkbox(
+                f"⚠️ Tôi hiểu: Unified sẽ **xóa toàn bộ** Bible, Timeline, Chunks, Relations và link của CÁC CHƯƠNG từ {ch_start} đến {ch_end} trước khi chạy.",
+                key="da_confirm_delete_bible_range",
+            )
+            if (
+                st.session_state.get("da_confirm_delete_bible_range")
+                and st.button(f\"▶️ Unified analyze chương {ch_start}–{ch_end}\", type=\"primary\", key=\"da_unified_range_btn\")
+            ):
+                s, e = sorted([int(ch_start), int(ch_end)])
+                created = 0
+                for ch in range(s, e + 1):
+                    label_ch = f\"Unified chương {ch}\"
+                    job_id = create_job(
+                        story_id=project_id,
+                        user_id=uid or None,
+                        job_type=\"unified_chapter_analyze\",
+                        label=label_ch,
+                        payload={\"chapter_number\": ch},
+                        post_to_chat=False,
+                    )
+                    if job_id:
+                        created += 1
+                if created > 0:
+                    ensure_background_job_runner()
+                    st.toast(f\"Đã xếp hàng Unified cho {created} chương. Xem tab Background Jobs.\")
+                    st.session_state[\"update_trigger\"] = st.session_state.get(\"update_trigger\", 0) + 1
+                else:
+                    st.error(\"Không tạo được job nào trong khoảng chương đã chọn.\")
+        else:
+            st.info(\"Không xác định được danh sách chương để chạy Unified nhiều chương.\")
+
+    st.markdown(\"---\")
+    st.subheader(\"➕ Thêm trên nền có sẵn (không xóa)\")
     st.caption("Trích xuất từ chương đã chọn và **thêm** vào dữ liệu hiện có (không xóa Bible/Timeline/Chunks/Relations của chương). Khác với Unified là xóa rồi làm lại.")
     if can_write:
         col_b, col_r, col_t, col_c = st.columns(4)
@@ -288,7 +340,7 @@ def _render_extract_bible_relations_chunking(project_id, content, chap_num, sele
                     post_to_chat=False,
                 )
                 if job_id:
-                    threading.Thread(target=run_job_worker, args=(job_id,), daemon=True).start()
+                    ensure_background_job_runner()
                     st.toast("Đã xếp hàng. Xem tab Background Jobs.")
                     st.session_state["update_trigger"] = st.session_state.get("update_trigger", 0) + 1
         with col_r:
@@ -302,7 +354,7 @@ def _render_extract_bible_relations_chunking(project_id, content, chap_num, sele
                     post_to_chat=False,
                 )
                 if job_id:
-                    threading.Thread(target=run_job_worker, args=(job_id,), daemon=True).start()
+                    ensure_background_job_runner()
                     st.toast("Đã xếp hàng. Xem tab Background Jobs.")
                     st.session_state["update_trigger"] = st.session_state.get("update_trigger", 0) + 1
         with col_t:
@@ -316,7 +368,7 @@ def _render_extract_bible_relations_chunking(project_id, content, chap_num, sele
                     post_to_chat=False,
                 )
                 if job_id:
-                    threading.Thread(target=run_job_worker, args=(job_id,), daemon=True).start()
+                    ensure_background_job_runner()
                     st.toast("Đã xếp hàng. Xem tab Background Jobs.")
                     st.session_state["update_trigger"] = st.session_state.get("update_trigger", 0) + 1
         with col_c:
@@ -330,7 +382,7 @@ def _render_extract_bible_relations_chunking(project_id, content, chap_num, sele
                     post_to_chat=False,
                 )
                 if job_id:
-                    threading.Thread(target=run_job_worker, args=(job_id,), daemon=True).start()
+                    ensure_background_job_runner()
                     st.toast("Đã xếp hàng. Xem tab Background Jobs.")
                     st.session_state["update_trigger"] = st.session_state.get("update_trigger", 0) + 1
     if not can_write:

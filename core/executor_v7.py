@@ -134,7 +134,7 @@ def execute_plan(
             remaining_steps = remaining_steps[1:]
             continue
 
-        ctx_text, sources, _ = ContextManager.build_context(
+        ctx_text, sources, _, _ = ContextManager.build_context(
             router_result,
             project_id,
             persona,

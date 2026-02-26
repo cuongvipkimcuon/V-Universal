@@ -172,8 +172,8 @@ def _start_data_operation_background(
                     "story_id": project_id, "user_id": str(user_id) if user_id else None, "role": "model", "content": running_msg, "created_at": now_timestamp, "metadata": {"data_operation_background": True},
                 }).execute()
             _after_save_history_v_work(project_id, user_id, active_persona.get("role", ""), allow_data_changing=True)
-        from core.background_jobs import create_job, run_job_worker
-        # steps toàn bộ là unified -> tạo 1 job unified_chapter_range (từ bước đầu)
+        from core.background_jobs import create_job, ensure_background_job_runner
+        # steps toàn bộ là unified -> tạo các job unified_chapter_analyze cho từng chương trong khoảng
         if steps and len(steps) and all((s.get("target") or "") == "unified" for s in steps) and (steps[0].get("chapter_range") or []):
             ur = steps[0]["chapter_range"]
             if isinstance(ur, (list, tuple)) and len(ur) >= 2:
@@ -185,17 +185,21 @@ def _start_data_operation_background(
         if unified_range and isinstance(unified_range, (list, tuple)) and len(unified_range) >= 2:
             s, e = int(unified_range[0]), int(unified_range[1])
             s, e = min(s, e), max(s, e)
-            label = (user_request[:200] if user_request else f"Unified chương {s}–{e}")
-            job_id = create_job(
-                story_id=project_id,
-                user_id=user_id,
-                job_type="unified_chapter_range",
-                label=label,
-                payload={"chapter_start": s, "chapter_end": e},
-                post_to_chat=True,
-            )
-            if job_id:
-                threading.Thread(target=run_job_worker, args=(job_id,), daemon=True).start()
+            created = 0
+            for ch in range(s, e + 1):
+                label_ch = f"Unified chương {ch}"
+                job_id = create_job(
+                    story_id=project_id,
+                    user_id=user_id,
+                    job_type="unified_chapter_analyze",
+                    label=label_ch,
+                    payload={"chapter_number": ch},
+                    post_to_chat=True,
+                )
+                if job_id:
+                    created += 1
+            if created > 0:
+                ensure_background_job_runner()
         if steps:
             label = (user_request[:200] if user_request else "Data operation batch")
             job_id = create_job(
@@ -207,7 +211,7 @@ def _start_data_operation_background(
                 post_to_chat=False,
             )
             if job_id:
-                threading.Thread(target=run_job_worker, args=(job_id,), daemon=True).start()
+                ensure_background_job_runner()
         elif single_op:
             from core.data_operation_jobs import run_data_operation
             threading.Thread(
@@ -542,6 +546,7 @@ def _auto_crystallize_background(project_id, user_id, persona_role):
             serial = 1
         title = f"{today} chat-{serial}"
         try:
+            # Không ghi embedding ở đây — embedding chỉ được tạo khi user bấm "Đồng bộ vector (Chat Memory)" trong tab Memory.
             ins = supabase.table("chat_crystallize_entries").insert({
                 "scope": "project",
                 "story_id": project_id,
@@ -843,6 +848,7 @@ def render_chat_tab(project_id, persona, chat_mode=None):
             with st.spinner("Thinking..."):
                 v7_handled = False
                 router_out = None
+                query_embedding_cache = None  # (canonical_text, embedding) để tái sử dụng, chỉ embed tối thiểu
                 free_chat_mode = is_v_home or st.session_state.get('free_chat_mode', False)
 
                 # Số tin đưa vào Router/Planner theo slider (0 = không dùng lịch sử).
@@ -901,7 +907,10 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                                 r = svc["supabase"].table("settings").select("value").eq("key", "semantic_intent_no_use").execute()
                                 no_use = r.data and r.data[0] and int(r.data[0].get("value", 0)) == 1
                                 if not no_use:
-                                    semantic_match = check_semantic_intent(prompt, project_id)
+                                    _emb = AIService.get_embedding(prompt)
+                                    if _emb:
+                                        query_embedding_cache = ((prompt or "").strip(), _emb)
+                                    semantic_match = check_semantic_intent(prompt, project_id, query_embedding=_emb)
                         except Exception:
                             semantic_match = check_semantic_intent(prompt, project_id)
                     if router_out is None and semantic_match:
@@ -1473,14 +1482,23 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                     else:
                         max_context_tokens = Config.CONTEXT_SIZE_TOKENS.get(st.session_state.get("context_size", "medium"))
                         exec_result = None
+                        context_parts_meta = []
+                        # Embed câu hỏi tối đa 1 lần: dùng cache nếu đã embed cho semantic, không thì embed canonical (rewritten hoặc gốc)
+                        canonical_query = (router_out.get("rewritten_query") or prompt or "").strip()
+                        if query_embedding_cache and query_embedding_cache[0] == canonical_query:
+                            query_embedding_for_context = query_embedding_cache[1]
+                        else:
+                            query_embedding_for_context = AIService.get_embedding(canonical_query) if canonical_query else None
                         if intent == "numerical_calculation" and not free_chat_mode:
-                            context_text, sources, context_tokens = ContextManager.build_context(
+                            context_text, sources, context_tokens, context_parts_meta = ContextManager.build_context(
                                 router_out, project_id, active_persona,
                                 st.session_state.get('strict_mode', False),
                                 current_arc_id=st.session_state.get('current_arc_id'),
                                 session_state=dict(st.session_state),
                                 max_context_tokens=max_context_tokens,
+                                query_embedding=query_embedding_for_context,
                             )
+                            context_parts_meta = context_parts_meta or []
                             code_prompt = f"""User hỏi: "{prompt}"
 Context có sẵn:
 {context_text[:6000]}
@@ -1522,7 +1540,7 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
                             ])
                             sources = []
                         elif exec_result is None:
-                            context_text, sources, context_tokens = ContextManager.build_context(
+                            context_text, sources, context_tokens, context_parts_meta = ContextManager.build_context(
                                 router_out,
                                 project_id,
                                 active_persona,
@@ -1531,7 +1549,9 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
                                 session_state=dict(st.session_state),
                                 free_chat_mode=free_chat_mode,
                                 max_context_tokens=max_context_tokens,
+                                query_embedding=query_embedding_for_context,
                             )
+                            context_parts_meta = context_parts_meta or []
                             if not free_chat_mode and router_out.get("_semantic_data"):
                                 context_text = f"[SEMANTIC INTENT - Data]\n{router_out['_semantic_data']}\n\n{context_text}"
                                 sources.append("🎯 Semantic Intent")
@@ -1615,7 +1635,7 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
                                     )
                                     full_response_text = (resp.choices[0].message.content or "").strip()
 
-                                    # Thẩm định đủ ý; nếu chưa đủ thì fallback đọc full content chương rồi mới hiển thị
+                                    # Thẩm định đủ ý; nếu chưa đủ thì fallback đọc full content chương (ưu tiên chương trong câu hỏi + chương được chunk/bible/timeline/relation nhắc nhiều)
                                     if full_response_text and not is_answer_sufficient(
                                         prompt,
                                         full_response_text,
@@ -1633,13 +1653,55 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
                                             )
                                             if related_nums:
                                                 start, end = min(related_nums), max(related_nums)
+                                        # Thêm chương xuất hiện nhiều trong context (chunk, bible, timeline, relation)
+                                        meta = context_parts_meta
+                                        if isinstance(meta, list) and meta:
+                                            from collections import Counter
+                                            cnt = Counter()
+                                            for p in meta:
+                                                src = (p.get("source") or "").strip().lower()
+                                                if src in ("chunk", "bible", "timeline", "relation"):
+                                                    for num in p.get("chapter_numbers") or []:
+                                                        try:
+                                                            cnt[int(num)] += 1
+                                                        except (TypeError, ValueError):
+                                                            pass
+                                            if cnt:
+                                                extra = [n for n, _ in cnt.most_common(5)]
+                                                all_nums = set(extra)
+                                                if start is not None:
+                                                    all_nums.add(start)
+                                                if end is not None:
+                                                    all_nums.add(end)
+                                                if all_nums:
+                                                    start = min(all_nums) if start is None else min(start, min(all_nums))
+                                                    end = max(all_nums) if end is None else max(end, max(all_nums))
                                         if start is not None and end is not None:
                                             fallback_text, _ = ContextManager.load_chapters_by_range(
                                                 project_id, start, end,
                                                 token_limit=ContextManager.DEFAULT_CHAPTER_TOKEN_LIMIT,
                                             )
                                             if fallback_text:
-                                                extended_context = (context_text or "") + "\n\n--- NỘI DUNG CHƯƠNG (FALLBACK - đọc đầy đủ để trả lời đủ ý) ---\n" + fallback_text[:8000]
+                                                # Bỏ CHUNK, BIBLE, TIMELINE, RELATION của các chương sắp load ra khỏi context để nhẹ
+                                                chapters_to_load = set(range(start, end + 1))
+                                                strip_sources = {"chunk", "bible", "timeline", "relation"}
+                                                base_parts = []
+                                                if meta:
+                                                    for p in meta:
+                                                        src = (p.get("source") or "").strip().lower()
+                                                        nums = set()
+                                                        for n in (p.get("chapter_numbers") or []):
+                                                            try:
+                                                                nums.add(int(n))
+                                                            except (TypeError, ValueError):
+                                                                pass
+                                                        if src in strip_sources and nums and (nums & chapters_to_load):
+                                                            continue
+                                                        base_parts.append(p.get("text") or "")
+                                                else:
+                                                    base_parts = [context_text or ""]
+                                                base_context = "\n\n".join(p for p in base_parts if (p or "").strip())
+                                                extended_context = (base_context or "") + "\n\n--- NỘI DUNG CHƯƠNG (FALLBACK - đọc đầy đủ để trả lời đủ ý) ---\n" + fallback_text[:8000]
                                                 retry_messages = [
                                                     {"role": "system", "content": run_instruction + "\n\nTHÔNG TIN NGỮ CẢNH (CONTEXT):\n" + extended_context + "\n\nTrả lời ĐẦY ĐỦ dựa trên context, đặc biệt nội dung chương vừa bổ sung."},
                                                     {"role": "user", "content": prompt},

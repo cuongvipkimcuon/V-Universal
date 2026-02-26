@@ -5,6 +5,8 @@ import streamlit as st
 from config import init_services
 from utils.auth_manager import check_permission
 
+KNOWLEDGE_PAGE_SIZE = 10
+
 
 def _ensure_chunks_table(supabase):
     """Đảm bảo bảng chunks tồn tại (schema v6)."""
@@ -78,16 +80,79 @@ def render_chunking_tab(project_id):
             st.toast("Đã bắt đầu đồng bộ vector (Chunks). Bấm Refresh sau vài giây để xem kết quả.")
             st.rerun()
 
-    r = supabase.table("chunks").select(
-        "id, content, raw_content, source_type, meta_json, arc_id, chapter_id, sort_order"
-    ).eq("story_id", project_id).order("sort_order").execute()
+    # Filter theo chương (chapter_id)
+    try:
+        ch_list = supabase.table("chapters").select("id, chapter_number, title").eq("story_id", project_id).order("chapter_number").execute().data or []
+        ck_chapter_options = ["Tất cả"] + [f"Chương {r.get('chapter_number', '')}: {r.get('title') or ''}" for r in ch_list]
+        ck_chapter_ids = [None] + [r.get("id") for r in ch_list]
+    except Exception:
+        ck_chapter_options = ["Tất cả"]
+        ck_chapter_ids = [None]
+    ck_filter_chapter_idx = st.session_state.get("chunking_filter_chapter", 0)
+    ck_filter_chapter_idx = max(0, min(ck_filter_chapter_idx, len(ck_chapter_options) - 1))
+    ck_filter_chapter_label = st.selectbox(
+        "Chương",
+        range(len(ck_chapter_options)),
+        index=ck_filter_chapter_idx,
+        format_func=lambda i: ck_chapter_options[i] if i < len(ck_chapter_options) else "",
+        key="chunking_filter_chapter_select",
+        help="Chỉ hiển thị chunk thuộc chương đã chọn.",
+    )
+    st.session_state["chunking_filter_chapter"] = ck_filter_chapter_label
+    ck_filter_chapter_id = ck_chapter_ids[ck_filter_chapter_label] if ck_filter_chapter_label < len(ck_chapter_ids) else None
+    if ck_filter_chapter_id is not None and st.session_state.get("chunking_filter_chapter_prev") != ck_filter_chapter_label:
+        st.session_state["chunking_page"] = 1
+    st.session_state["chunking_filter_chapter_prev"] = ck_filter_chapter_label
+
+    # Phân trang ở DB (tối đa 10 mục/trang)
+    page = max(1, int(st.session_state.get("chunking_page", 1)))
+    try:
+        count_q = supabase.table("chunks").select("id", count="exact").eq("story_id", project_id)
+        if ck_filter_chapter_id is not None:
+            count_q = count_q.eq("chapter_id", ck_filter_chapter_id)
+        count_res = count_q.limit(0).execute()
+        total_chunks = getattr(count_res, "count", None) or 0
+    except Exception:
+        total_chunks = 0
+    total_pages = max(1, (total_chunks + KNOWLEDGE_PAGE_SIZE - 1) // KNOWLEDGE_PAGE_SIZE)
+    page = max(1, min(page, total_pages))
+    st.session_state["chunking_page"] = page
+    offset = (page - 1) * KNOWLEDGE_PAGE_SIZE
+    r_q = (
+        supabase.table("chunks")
+        .select("id, content, raw_content, source_type, meta_json, arc_id, chapter_id, sort_order")
+        .eq("story_id", project_id)
+        .order("sort_order")
+    )
+    if ck_filter_chapter_id is not None:
+        r_q = r_q.eq("chapter_id", ck_filter_chapter_id)
+    r = r_q.range(offset, offset + KNOWLEDGE_PAGE_SIZE - 1).execute()
     chunks_list = r.data or []
     try:
-        null_emb = supabase.table("chunks").select("id").eq("story_id", project_id).is_("embedding", "NULL").execute()
-        ids_no_embedding = {row["id"] for row in (null_emb.data or []) if row.get("id")}
+        if chunks_list:
+            chunk_ids = [c.get("id") for c in chunks_list if c.get("id")]
+            if chunk_ids:
+                null_emb = supabase.table("chunks").select("id").in_("id", chunk_ids).is_("embedding", "NULL").execute()
+                ids_no_embedding = {row["id"] for row in (null_emb.data or []) if row.get("id")}
+            else:
+                ids_no_embedding = set()
+        else:
+            ids_no_embedding = set()
     except Exception:
         ids_no_embedding = set()
-    st.metric("Tổng chunks", len(chunks_list))
+    st.metric("Tổng chunks", total_chunks)
+    if total_pages > 1:
+        pcol1, pcol2, pcol3 = st.columns([1, 2, 1])
+        with pcol1:
+            if st.button("⬅️ Trang trước", key="chunk_prev_page", disabled=(page <= 1)):
+                st.session_state["chunking_page"] = max(1, page - 1)
+                st.rerun()
+        with pcol2:
+            st.caption(f"**Trang {page} / {total_pages}** (tối đa {KNOWLEDGE_PAGE_SIZE} mục/trang)")
+        with pcol3:
+            if st.button("Trang sau ➡️", key="chunk_next_page", disabled=(page >= total_pages)):
+                st.session_state["chunking_page"] = min(total_pages, page + 1)
+                st.rerun()
     for c in chunks_list:
             cid = c.get("id")
             content = (c.get("content") or c.get("raw_content") or "").strip()
@@ -138,7 +203,7 @@ def render_chunking_tab(project_id):
     st.markdown("---")
     with st.expander("💀 Danger Zone", expanded=False):
         st.markdown('<div class="danger-zone">', unsafe_allow_html=True)
-        if can_delete and chunks_list:
+        if can_delete and total_chunks:
             confirm = st.checkbox("Xóa sạch TẤT CẢ chunks", key="chunk_confirm_clear")
             if confirm and st.button("🗑️ Xóa sạch Chunks"):
                 supabase.table("chunks").delete().eq("story_id", project_id).execute()

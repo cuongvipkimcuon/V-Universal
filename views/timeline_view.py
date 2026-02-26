@@ -8,6 +8,8 @@ from utils.auth_manager import check_permission
 from utils.cache_helpers import full_refresh
 from core.user_data_save_pipeline import run_logic_check_then_save_timeline
 
+KNOWLEDGE_PAGE_SIZE = 10
+
 
 def render_timeline_tab(project_id):
     st.header("📅 Timeline")
@@ -64,10 +66,75 @@ def render_timeline_tab(project_id):
             st.toast("Đã bắt đầu đồng bộ vector (Timeline). Bấm Refresh sau vài giây.")
             st.rerun()
 
-    events = get_timeline_events(project_id, limit=200)
-    events_sorted = sorted(events, key=lambda x: (x.get("event_order", 0), x.get("title", "")))
+    # Filter theo chương (chapter_id)
+    try:
+        ch_list = supabase.table("chapters").select("id, chapter_number, title").eq("story_id", project_id).order("chapter_number").execute().data or []
+        tl_chapter_options = ["Tất cả"] + [f"Chương {r.get('chapter_number', '')}: {r.get('title') or ''}" for r in ch_list]
+        tl_chapter_ids = [None] + [r.get("id") for r in ch_list]
+    except Exception:
+        tl_chapter_options = ["Tất cả"]
+        tl_chapter_ids = [None]
+    tl_filter_chapter_idx = st.session_state.get("timeline_filter_chapter", 0)
+    tl_filter_chapter_idx = max(0, min(tl_filter_chapter_idx, len(tl_chapter_options) - 1))
+    tl_filter_chapter_label = st.selectbox(
+        "Chương",
+        range(len(tl_chapter_options)),
+        index=tl_filter_chapter_idx,
+        format_func=lambda i: tl_chapter_options[i] if i < len(tl_chapter_options) else "",
+        key="timeline_filter_chapter_select",
+        help="Chỉ hiển thị sự kiện thuộc chương đã chọn.",
+    )
+    st.session_state["timeline_filter_chapter"] = tl_filter_chapter_label
+    tl_filter_chapter_id = tl_chapter_ids[tl_filter_chapter_label] if tl_filter_chapter_label < len(tl_chapter_ids) else None
+    if tl_filter_chapter_id is not None and st.session_state.get("timeline_filter_chapter_prev") != tl_filter_chapter_label:
+        st.session_state["timeline_page"] = 1
+    st.session_state["timeline_filter_chapter_prev"] = tl_filter_chapter_label
+
+    # Phân trang ở DB (tối đa 10 mục/trang)
+    page = max(1, int(st.session_state.get("timeline_page", 1)))
+    try:
+        count_q = supabase.table("timeline_events").select("id", count="exact").eq("story_id", project_id)
+        if tl_filter_chapter_id is not None:
+            count_q = count_q.eq("chapter_id", tl_filter_chapter_id)
+        count_res = count_q.limit(0).execute()
+        total_events = getattr(count_res, "count", None) or 0
+    except Exception:
+        total_events = 0
+    total_pages = max(1, (total_events + KNOWLEDGE_PAGE_SIZE - 1) // KNOWLEDGE_PAGE_SIZE)
+    page = max(1, min(page, total_pages))
+    st.session_state["timeline_page"] = page
+    offset = (page - 1) * KNOWLEDGE_PAGE_SIZE
+    try:
+        r_q = (
+            supabase.table("timeline_events")
+            .select("id, event_order, title, description, raw_date, event_type, chapter_id, arc_id, embedding")
+            .eq("story_id", project_id)
+            .order("event_order")
+        )
+        if tl_filter_chapter_id is not None:
+            r_q = r_q.eq("chapter_id", tl_filter_chapter_id)
+        r = r_q.range(offset, offset + KNOWLEDGE_PAGE_SIZE - 1).execute()
+        events_sorted = list(r.data or [])
+    except Exception:
+        events_sorted = []
+        total_events = 0
+        total_pages = 1
+
     st.subheader("Danh sách sự kiện")
-    if not events_sorted:
+    if total_pages > 1:
+        pcol1, pcol2, pcol3 = st.columns([1, 2, 1])
+        with pcol1:
+            if st.button("⬅️ Trang trước", key="tl_prev_page", disabled=(page <= 1)):
+                st.session_state["timeline_page"] = max(1, page - 1)
+                st.rerun()
+        with pcol2:
+            st.caption(f"**Trang {page} / {total_pages}** (tối đa {KNOWLEDGE_PAGE_SIZE} mục/trang, tổng {total_events} sự kiện)")
+        with pcol3:
+            if st.button("Trang sau ➡️", key="tl_next_page", disabled=(page >= total_pages)):
+                st.session_state["timeline_page"] = min(total_pages, page + 1)
+                st.rerun()
+
+    if not events_sorted and total_events == 0:
         st.info("Chưa có sự kiện nào. Thêm mới bên dưới hoặc trích xuất từ chương trong Data Analyze → tab Timeline.")
     else:
         for i, ev in enumerate(events_sorted):

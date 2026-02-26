@@ -442,7 +442,10 @@ def get_timeline_events(
     limit: int = 50,
     chapter_range: Optional[Tuple[int, int]] = None,
     arc_id: Optional[str] = None,
+    chapter_ids: Optional[List[Any]] = None,
+    arc_ids: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
+    """Lấy timeline_events. Ưu tiên: chapter_ids/arc_ids (scope) > chapter_range > arc_id (đơn)."""
     if not project_id:
         return []
     try:
@@ -456,17 +459,21 @@ def get_timeline_events(
             .eq("story_id", project_id)
             .order("event_order")
         )
-        if arc_id:
+        if chapter_ids:
+            q = q.in_("chapter_id", chapter_ids[:500])
+        elif arc_ids:
+            q = q.in_("arc_id", list(arc_ids))
+        elif arc_id:
             q = q.eq("arc_id", arc_id)
-        if chapter_range and len(chapter_range) >= 2:
+        if chapter_range and len(chapter_range) >= 2 and not chapter_ids:
             start, end = int(chapter_range[0]), int(chapter_range[1])
             start, end = min(start, end), max(start, end)
             ch_res = supabase.table("chapters").select("id").eq(
                 "story_id", project_id
             ).gte("chapter_number", start).lte("chapter_number", end).execute()
-            chapter_ids = [row["id"] for row in (ch_res.data or []) if row.get("id")]
-            if chapter_ids:
-                q = q.in_("chapter_id", chapter_ids)
+            cids = [row["id"] for row in (ch_res.data or []) if row.get("id")]
+            if cids:
+                q = q.in_("chapter_id", cids)
         r = q.limit(limit).execute()
         return list(r.data) if r.data else []
     except Exception as e:

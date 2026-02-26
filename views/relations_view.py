@@ -8,6 +8,8 @@ from config import init_services
 from utils.auth_manager import check_permission
 from utils.cache_helpers import get_bible_list_cached, invalidate_cache, full_refresh
 
+KNOWLEDGE_PAGE_SIZE = 10
+
 
 def render_relations_tab(project_id, persona):
     st.header("🔗 Relations")
@@ -63,18 +65,78 @@ def render_relations_tab(project_id, persona):
             st.toast("Đã bắt đầu đồng bộ vector (Relations). Bấm Refresh sau vài giây.")
             st.rerun()
 
+    # Filter theo chương (source_chapter)
     try:
-        rel_res = supabase.table("entity_relations").select("*").eq("story_id", project_id).execute()
+        ch_list = supabase.table("chapters").select("chapter_number, title").eq("story_id", project_id).order("chapter_number").execute().data or []
+        rel_chapter_options = ["Tất cả"] + [f"Chương {r.get('chapter_number', '')}: {r.get('title') or ''}" for r in ch_list]
+        rel_chapter_nums = [None] + [r.get("chapter_number") for r in ch_list]
+    except Exception:
+        rel_chapter_options = ["Tất cả"]
+        rel_chapter_nums = [None]
+    rel_filter_chapter_idx = st.session_state.get("relations_filter_chapter", 0)
+    rel_filter_chapter_idx = max(0, min(rel_filter_chapter_idx, len(rel_chapter_options) - 1))
+    rel_filter_chapter_label = st.selectbox(
+        "Chương",
+        range(len(rel_chapter_options)),
+        index=rel_filter_chapter_idx,
+        format_func=lambda i: rel_chapter_options[i] if i < len(rel_chapter_options) else "",
+        key="relations_filter_chapter_select",
+        help="Chỉ hiển thị quan hệ có source_chapter thuộc chương đã chọn.",
+    )
+    st.session_state["relations_filter_chapter"] = rel_filter_chapter_label
+    rel_filter_chapter_num = rel_chapter_nums[rel_filter_chapter_label] if rel_filter_chapter_label < len(rel_chapter_nums) else None
+    if rel_filter_chapter_num is not None and st.session_state.get("relations_filter_chapter_prev") != rel_filter_chapter_label:
+        st.session_state["relations_page"] = 1
+    st.session_state["relations_filter_chapter_prev"] = rel_filter_chapter_label
+
+    # Phân trang ở DB (tối đa 10 mục/trang)
+    page = max(1, int(st.session_state.get("relations_page", 1)))
+    try:
+        count_q = supabase.table("entity_relations").select("id", count="exact").eq("story_id", project_id)
+        if rel_filter_chapter_num is not None:
+            count_q = count_q.eq("source_chapter", rel_filter_chapter_num)
+        count_res = count_q.limit(0).execute()
+        total_rels = getattr(count_res, "count", None) or 0
+    except Exception:
+        total_rels = 0
+    total_pages = max(1, (total_rels + KNOWLEDGE_PAGE_SIZE - 1) // KNOWLEDGE_PAGE_SIZE)
+    page = max(1, min(page, total_pages))
+    st.session_state["relations_page"] = page
+    offset = (page - 1) * KNOWLEDGE_PAGE_SIZE
+    try:
+        rel_q = (
+            supabase.table("entity_relations")
+            .select("*")
+            .eq("story_id", project_id)
+            .order("id")
+        )
+        if rel_filter_chapter_num is not None:
+            rel_q = rel_q.eq("source_chapter", rel_filter_chapter_num)
+        rel_res = rel_q.range(offset, offset + KNOWLEDGE_PAGE_SIZE - 1).execute()
         all_rels = rel_res.data if rel_res and rel_res.data else []
     except Exception as e:
         st.error(f"Lỗi khi tải quan hệ: {e}")
         all_rels = []
+        total_rels = 0
+        total_pages = 1
 
-    if not all_rels:
+    if not all_rels and total_rels == 0:
         st.info("Chưa có quan hệ nào. Chạy Extract Bible rồi Relation (Data Analyze) để tạo quan hệ.")
         return
 
-    st.metric("Tổng quan hệ", len(all_rels))
+    st.metric("Tổng quan hệ", total_rels)
+    if total_pages > 1:
+        pcol1, pcol2, pcol3 = st.columns([1, 2, 1])
+        with pcol1:
+            if st.button("⬅️ Trang trước", key="rel_prev_page", disabled=(page <= 1)):
+                st.session_state["relations_page"] = max(1, page - 1)
+                st.rerun()
+        with pcol2:
+            st.caption(f"**Trang {page} / {total_pages}** (tối đa {KNOWLEDGE_PAGE_SIZE} mục/trang)")
+        with pcol3:
+            if st.button("Trang sau ➡️", key="rel_next_page", disabled=(page >= total_pages)):
+                st.session_state["relations_page"] = min(total_pages, page + 1)
+                st.rerun()
 
     for r in all_rels:
         rel_id = r.get("id")

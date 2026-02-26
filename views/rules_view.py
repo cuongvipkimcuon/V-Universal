@@ -9,6 +9,8 @@ from utils.auth_manager import check_permission
 from utils.cache_helpers import get_rules_list_cached, invalidate_cache, full_refresh
 from core.background_jobs import run_rules_embedding_backfill, is_embedding_backfill_running
 
+KNOWLEDGE_PAGE_SIZE = 10
+
 
 def render_rules_tab(project_id, persona):
     st.header("📋 Rules")
@@ -24,14 +26,11 @@ def render_rules_tab(project_id, persona):
         st.warning("Không kết nối được dịch vụ.")
         return
     supabase = services["supabase"]
-    rules_data = get_rules_list_cached(project_id, st.session_state.get("update_trigger", 0))
     user = st.session_state.get("user")
     user_id = getattr(user, "id", None) if user else None
     user_email = getattr(user, "email", None) if user else None
     can_write = check_permission(str(user_id or ""), user_email or "", project_id, "write")
     can_delete = check_permission(str(user_id or ""), user_email or "", project_id, "delete")
-
-    st.metric("Tổng Rules", len(rules_data))
 
     # Thống kê embedding cho Rules cấp project (chỉ tính rule đã duyệt)
     try:
@@ -96,11 +95,6 @@ def render_rules_tab(project_id, persona):
         key="rules_status_filter",
         help="Lọc Rule theo trạng thái duyệt. Chỉ Rule đã duyệt mới được dùng trong context.",
     )
-    if status_filter == "Chỉ đã duyệt":
-        rules_data = [r for r in rules_data if r.get("source") != "project_rules" or bool(r.get("approve", True))]
-    elif status_filter == "Chỉ chưa duyệt":
-        rules_data = [r for r in rules_data if r.get("source") == "project_rules" and not bool(r.get("approve", True))]
-
     # Filter phạm vi: global / project / arc (+ chọn arc)
     scope_filter = st.selectbox(
         "Phạm vi Rule",
@@ -128,18 +122,79 @@ def render_rules_tab(project_id, persona):
         if arc_idx and arc_idx < len(arc_labels) and arcs:
             selected_arc_filter_id = arcs[arc_idx - 1].get("id")
 
-    if scope_filter == "Chỉ global":
-        rules_data = [r for r in rules_data if r.get("scope") == "global"]
-    elif scope_filter == "Chỉ project":
-        rules_data = [r for r in rules_data if r.get("scope") == "project"]
-    elif scope_filter == "Chỉ arc":
-        rules_data = [r for r in rules_data if r.get("scope") == "arc"]
-        if selected_arc_filter_id:
-            rules_data = [
-                r
-                for r in rules_data
-                if str(selected_arc_filter_id) in [str(aid) for aid in (r.get("arc_ids") or [])]
-            ]
+    # Filter + phân trang ở DB (tối đa 10 mục/trang)
+    filter_key = (status_filter, scope_filter, str(selected_arc_filter_id or ""))
+    if st.session_state.get("rules_filter_prev") != filter_key:
+        st.session_state["rules_page"] = 1
+    st.session_state["rules_filter_prev"] = filter_key
+    page = max(1, int(st.session_state.get("rules_page", 1)))
+
+    def _rules_query(sb, select_cols="*", with_range=None, count_exact=False):
+        if count_exact:
+            q = sb.table("project_rules").select("id", count="exact")
+        else:
+            q = sb.table("project_rules").select(select_cols)
+        if scope_filter == "Chỉ global":
+            q = q.eq("scope", "global")
+        elif scope_filter == "Chỉ project":
+            q = q.eq("scope", "project").eq("story_id", project_id)
+        elif scope_filter == "Chỉ arc":
+            q = q.eq("scope", "arc").eq("story_id", project_id)
+            if selected_arc_filter_id:
+                rule_ids_r = sb.table("project_rule_arcs").select("rule_id").eq("arc_id", selected_arc_filter_id).execute()
+                rule_ids = [r["rule_id"] for r in (rule_ids_r.data or []) if r.get("rule_id")]
+                if not rule_ids:
+                    q = q.eq("id", "00000000-0000-0000-0000-000000000000")
+                else:
+                    q = q.in_("id", rule_ids)
+        else:
+            q = q.or_(f"scope.eq.global,and(scope.eq.project,story_id.eq.{project_id}),and(scope.eq.arc,story_id.eq.{project_id})")
+        if status_filter == "Chỉ đã duyệt":
+            q = q.eq("approve", True)
+        elif status_filter == "Chỉ chưa duyệt":
+            q = q.eq("approve", False)
+        if not count_exact:
+            q = q.order("created_at", desc=True)
+        if count_exact:
+            q = q.limit(0)
+        elif with_range is not None:
+            start, end = with_range
+            q = q.range(start, end)
+        return q.execute()
+
+    try:
+        count_res = _rules_query(supabase, count_exact=True)
+        total_rules = getattr(count_res, "count", None) or 0
+    except Exception:
+        total_rules = 0
+    total_pages = max(1, (total_rules + KNOWLEDGE_PAGE_SIZE - 1) // KNOWLEDGE_PAGE_SIZE)
+    page = max(1, min(page, total_pages))
+    st.session_state["rules_page"] = page
+    offset = (page - 1) * KNOWLEDGE_PAGE_SIZE
+    try:
+        res = _rules_query(supabase, select_cols="*", with_range=(offset, offset + KNOWLEDGE_PAGE_SIZE - 1))
+        rows = res.data or []
+    except Exception:
+        rows = []
+        total_rules = 0
+        total_pages = 1
+
+    def _row_to_entry(row):
+        c = row.get("content", "") or ""
+        return {
+            "id": row.get("id"),
+            "scope": row.get("scope", "project"),
+            "content": c,
+            "description": c,
+            "entity_name": f"[RULE] ({row.get('scope','')}) {c[:50]}",
+            "created_at": row.get("created_at"),
+            "approve": bool(row.get("approve", True)),
+            "source": "project_rules",
+            "type": row.get("type", "Unknown"),
+        }
+
+    rules_data = [_row_to_entry(r) for r in rows]
+    st.metric("Tổng Rules", total_rules)
 
     if st.button("➕ Thêm Rule mới", key="rules_add") and can_write:
         st.session_state["rules_adding"] = True
@@ -209,7 +264,20 @@ def render_rules_tab(project_id, persona):
                 st.session_state["rules_adding"] = False
 
     st.markdown("---")
-    if not rules_data:
+    if total_pages > 1:
+        pcol1, pcol2, pcol3 = st.columns([1, 2, 1])
+        with pcol1:
+            if st.button("⬅️ Trang trước", key="rules_prev_page", disabled=(page <= 1)):
+                st.session_state["rules_page"] = max(1, page - 1)
+                st.rerun()
+        with pcol2:
+            st.caption(f"**Trang {page} / {total_pages}** (tối đa {KNOWLEDGE_PAGE_SIZE} mục/trang)")
+        with pcol3:
+            if st.button("Trang sau ➡️", key="rules_next_page", disabled=(page >= total_pages)):
+                st.session_state["rules_page"] = min(total_pages, page + 1)
+                st.rerun()
+
+    if not rules_data and total_rules == 0:
         st.info("Chưa có Rule nào.")
         return
 

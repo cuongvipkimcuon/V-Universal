@@ -10,8 +10,15 @@ from config import init_services
 from ai.service import AIService, _get_default_tool_model
 from ai.context_helpers import get_mandatory_rules
 from ai.utils import get_timeline_events
+from core.arc_service import ArcService
 
 LOGIC_DIMENSIONS = ("timeline", "bible", "relation", "chat_crystallize", "rule")
+
+# Chỉ lấy rule type Info và Unknown cho soát logic (không lấy Style, Method)
+RULE_TYPES_FOR_LOGIC = ("Info", "Unknown")
+
+# max_tokens tối đa cho tool soát lỗi chất lượng (output dài để báo chi tiết)
+LOGIC_CHECK_MAX_TOKENS = 128000
 
 
 def _get_bible_for_logic(project_id: str, include_archived: bool = False) -> List[Dict[str, Any]]:
@@ -29,6 +36,38 @@ def _get_bible_for_logic(project_id: str, include_archived: bool = False) -> Lis
     except Exception as e:
         print(f"_get_bible_for_logic error: {e}")
         return []
+
+
+def _get_chapter_scope_for_logic(project_id: str, arc_id: Optional[str]) -> Dict[str, Any]:
+    """
+    Phạm vi chương cho soát logic: từ chương mục tiêu và các chương thuộc arc + toàn bộ sequential của arc.
+    Nếu chương mục tiêu không có arc → toàn dự án.
+    Returns: {"chapter_ids": [...], "chapter_numbers": set(...), "arc_ids": [...]}
+    """
+    try:
+        services = init_services()
+        if not services:
+            return {"chapter_ids": [], "chapter_numbers": set(), "arc_ids": []}
+        supabase = services["supabase"]
+        arc_ids = ArcService.get_arc_ids_in_scope(project_id, arc_id)
+        if not arc_ids:
+            # Không có arc → toàn dự án: lấy tất cả chapter
+            ch_res = supabase.table("chapters").select("id, chapter_number").eq("story_id", project_id).execute()
+        else:
+            ch_res = (
+                supabase.table("chapters")
+                .select("id, chapter_number")
+                .eq("story_id", project_id)
+                .in_("arc_id", list(arc_ids))
+                .execute()
+            )
+        rows = ch_res.data or []
+        chapter_ids = [r["id"] for r in rows if r.get("id") is not None]
+        chapter_numbers = {int(r["chapter_number"]) for r in rows if r.get("chapter_number") is not None}
+        return {"chapter_ids": chapter_ids, "chapter_numbers": chapter_numbers, "arc_ids": arc_ids}
+    except Exception as e:
+        print(f"_get_chapter_scope_for_logic error: {e}")
+        return {"chapter_ids": [], "chapter_numbers": set(), "arc_ids": []}
 
 
 def build_logic_context_for_chapter(
@@ -54,17 +93,25 @@ def build_logic_context_for_chapter(
         if not services:
             return "(Không kết nối được dịch vụ.)"
         supabase = services["supabase"]
+        scope = _get_chapter_scope_for_logic(project_id, arc_id)
+        chapter_ids = scope.get("chapter_ids") or []
+        chapter_numbers = scope.get("chapter_numbers") or set()
+        arc_ids = scope.get("arc_ids") or []
 
-        # 1) Timeline
+        # 1) Timeline: chỉ chương mục tiêu + các chương thuộc arc và sequential; không arc thì toàn dự án
         if "timeline" in want:
-            events = get_timeline_events(
-                project_id,
-                limit=100,
-                chapter_range=(chapter_number, chapter_number),
-                arc_id=arc_id,
-            )
-            if not events:
-                events = get_timeline_events(project_id, limit=80, arc_id=arc_id)
+            if chapter_ids:
+                q = (
+                    supabase.table("timeline_events")
+                    .select("id, event_order, title, description, chapter_id")
+                    .eq("story_id", project_id)
+                    .in_("chapter_id", chapter_ids[:500])
+                    .order("event_order")
+                )
+                r = q.limit(100).execute()
+                events = list(r.data or [])
+            else:
+                events = get_timeline_events(project_id, limit=100)
             if events:
                 lines = ["[TIMELINE - Sự kiện đã thiết lập]"]
                 for e in events[:80]:
@@ -79,12 +126,13 @@ def build_logic_context_for_chapter(
             else:
                 parts.append("[TIMELINE] Chưa có dữ liệu sự kiện.")
 
-        # 2) Bible + 3) Rule + 4) Chat crystallize (V8.9: project_rules + chat_crystallize_entries + legacy story_bible)
+        # 2) Bible + 3) Rule + 4) Chat crystallize: Bible/rule lọc theo scope chương + arc; rule chỉ type Info & Unknown
         if "bible" in want or "rule" in want or "chat_crystallize" in want:
             bible_entries = _get_bible_for_logic(project_id, include_archived=include_archived)
             bible_lines = []
             rule_lines = []
             chat_lines = []
+            # Bible: chỉ entries có source_chapter thuộc scope (chương mục tiêu + sequential arc); không arc thì toàn bộ
             for e in bible_entries[:400]:
                 name = (e.get("entity_name") or "").strip()
                 desc = (e.get("description") or "").strip()
@@ -100,16 +148,30 @@ def build_logic_context_for_chapter(
                         chat_lines.append(f"  • {name}: {desc}")
                 else:
                     if "bible" in want:
+                        sc = e.get("source_chapter")
+                        if sc is not None:
+                            try:
+                                sc = int(sc)
+                            except (TypeError, ValueError):
+                                sc = None
+                        if arc_ids:
+                            # Scope theo arc: chỉ entry có source_chapter thuộc các chương trong scope
+                            if sc is None or sc not in chapter_numbers:
+                                continue
+                        else:
+                            # Toàn dự án: lấy hết (kể cả source_chapter null)
+                            pass
                         bible_lines.append(f"  • {name}: {desc}")
             if "rule" in want:
                 try:
-                    # global (chỉ rule đã approve)
+                    # global: chỉ rule đã approve, type Info hoặc Unknown
                     r = (
                         supabase.table("project_rules")
                         .select("content, scope")
                         .eq("scope", "global")
                         .is_("story_id", "null")
                         .eq("approve", True)
+                        .in_("type", list(RULE_TYPES_FOR_LOGIC))
                         .order("created_at", desc=True)
                         .limit(100)
                         .execute()
@@ -120,7 +182,7 @@ def build_logic_context_for_chapter(
                             c = c[:797] + "..."
                         if c:
                             rule_lines.append(f"  • [RULE] (global): {c}")
-                    # project (chỉ rule đã approve)
+                    # project: chỉ rule đã approve, type Info hoặc Unknown
                     if project_id:
                         r = (
                             supabase.table("project_rules")
@@ -128,6 +190,7 @@ def build_logic_context_for_chapter(
                             .eq("scope", "project")
                             .eq("story_id", project_id)
                             .eq("approve", True)
+                            .in_("type", list(RULE_TYPES_FOR_LOGIC))
                             .order("created_at", desc=True)
                             .limit(100)
                             .execute()
@@ -138,15 +201,16 @@ def build_logic_context_for_chapter(
                                 c = c[:797] + "..."
                             if c:
                                 rule_lines.append(f"  • [RULE] (project): {c}")
-                    # arc (chỉ rule đã approve)
-                    if project_id and arc_id:
+                    # arc: rule thuộc arc hiện tại + các arc sequential, chỉ type Info & Unknown
+                    if project_id and arc_ids:
                         r = (
                             supabase.table("project_rules")
                             .select("content, scope")
                             .eq("scope", "arc")
                             .eq("story_id", project_id)
-                            .eq("arc_id", arc_id)
+                            .in_("arc_id", list(arc_ids))
                             .eq("approve", True)
+                            .in_("type", list(RULE_TYPES_FOR_LOGIC))
                             .order("created_at", desc=True)
                             .limit(100)
                             .execute()
@@ -157,19 +221,61 @@ def build_logic_context_for_chapter(
                                 c = c[:797] + "..."
                             if c:
                                 rule_lines.append(f"  • [RULE] (arc): {c}")
+                        # Rule gán nhiều arc qua project_rule_arcs
+                        try:
+                            pra = supabase.table("project_rule_arcs").select("rule_id").in_("arc_id", list(arc_ids)).execute()
+                            rule_ids = list({row["rule_id"] for row in (pra.data or []) if row.get("rule_id")})
+                            if rule_ids:
+                                r2 = (
+                                    supabase.table("project_rules")
+                                    .select("content, scope")
+                                    .eq("story_id", project_id)
+                                    .in_("id", rule_ids[:100])
+                                    .eq("approve", True)
+                                    .in_("type", list(RULE_TYPES_FOR_LOGIC))
+                                    .order("created_at", desc=True)
+                                    .limit(100)
+                                    .execute()
+                                )
+                                for row in (r2.data or []):
+                                    c = (row.get("content") or "").strip()
+                                    if len(c) > 800:
+                                        c = c[:797] + "..."
+                                    if c:
+                                        rule_lines.append(f"  • [RULE] (arc): {c}")
+                        except Exception:
+                            pass
                 except Exception:
                     pass
             if "chat_crystallize" in want:
                 try:
-                    q = supabase.table("chat_crystallize_entries").select("title, description").eq("scope", "project").eq("story_id", project_id)
-                    r = q.order("created_at", desc=True).limit(50).execute()
-                    for row in (r.data or []):
-                        title = (row.get("title") or "").strip()
-                        desc = (row.get("description") or "").strip()
-                        if len(desc) > 800:
-                            desc = desc[:797] + "..."
-                        if title or desc:
-                            chat_lines.append(f"  • {title}: {desc}")
+                    # scope=project (toàn dự án) + scope=arc với arc_id trong arc_ids của scope hiện tại
+                    seen_ids = set()
+                    q_project = supabase.table("chat_crystallize_entries").select("id, title, description").eq("scope", "project").eq("story_id", project_id)
+                    r_project = q_project.order("created_at", desc=True).limit(50).execute()
+                    for row in (r_project.data or []):
+                        rid = row.get("id")
+                        if rid and rid not in seen_ids:
+                            seen_ids.add(rid)
+                            title = (row.get("title") or "").strip()
+                            desc = (row.get("description") or "").strip()
+                            if len(desc) > 800:
+                                desc = desc[:797] + "..."
+                            if title or desc:
+                                chat_lines.append(f"  • {title}: {desc}")
+                    if arc_ids:
+                        q_arc = supabase.table("chat_crystallize_entries").select("id, title, description").eq("scope", "arc").eq("story_id", project_id).in_("arc_id", list(arc_ids)[:50])
+                        r_arc = q_arc.order("created_at", desc=True).limit(50).execute()
+                        for row in (r_arc.data or []):
+                            rid = row.get("id")
+                            if rid and rid not in seen_ids:
+                                seen_ids.add(rid)
+                                title = (row.get("title") or "").strip()
+                                desc = (row.get("description") or "").strip()
+                                if len(desc) > 800:
+                                    desc = desc[:797] + "..."
+                                if title or desc:
+                                    chat_lines.append(f"  • {title}: {desc}")
                 except Exception:
                     pass
 
@@ -180,12 +286,16 @@ def build_logic_context_for_chapter(
             if chat_lines:
                 parts.append("[CHAT CRYSTALLIZE - Điểm nhớ từ hội thoại]\n" + "\n".join(chat_lines))
 
-        # 5) Relations
+        # 5) Relations: chỉ quan hệ có source_chapter thuộc scope (chương mục tiêu + sequential arc)
         if "relation" in want:
             bible_entries = _get_bible_for_logic(project_id, include_archived=include_archived)
             id_to_name = {str(e.get("id")): (e.get("entity_name") or "").strip() for e in bible_entries if e.get("id")}
             try:
-                rel_res = supabase.table("entity_relations").select("*").eq("story_id", project_id).execute()
+                q = supabase.table("entity_relations").select("*").eq("story_id", project_id)
+                if arc_ids and chapter_numbers:
+                    # Scope theo arc: chỉ relation có source_chapter thuộc các chương trong scope
+                    q = q.in_("source_chapter", list(chapter_numbers))
+                rel_res = q.execute()
                 if rel_res.data:
                     rel_lines = ["[QUAN HỆ THỰC THỂ]"]
                     for r in rel_res.data[:400]:
@@ -322,7 +432,7 @@ Chỉ trả về JSON, không giải thích thêm."""
                 messages=[{"role": "user", "content": prompt}],
                 model=_get_default_tool_model(),
                 temperature=0.2,
-                max_tokens=4000,
+                max_tokens=LOGIC_CHECK_MAX_TOKENS,
             )
             raw_text = (response.choices[0].message.content or "").strip() if response and response.choices else ""
         except Exception as e:
@@ -389,8 +499,9 @@ def get_chapter_logic_issues(
     chapter_id: Optional[int] = None,
     status_filter: Optional[str] = None,
     limit: int = 200,
+    offset: int = 0,
 ) -> List[Dict[str, Any]]:
-    """Lấy danh sách chapter_logic_issues. chapter_id=None: tất cả chương. status_filter: active | resolved | None (cả hai)."""
+    """Lấy danh sách chapter_logic_issues. chapter_id=None: tất cả chương. status_filter: active | resolved | None (cả hai). offset/limit để phân trang ở DB."""
     try:
         services = init_services()
         if not services:
@@ -401,7 +512,12 @@ def get_chapter_logic_issues(
             q = q.eq("chapter_id", chapter_id)
         if status_filter:
             q = q.eq("status", status_filter)
-        r = q.order("created_at", desc=True).limit(limit).execute()
+        q = q.order("created_at", desc=True)
+        if offset > 0 or limit != 200:
+            q = q.range(offset, offset + max(0, limit - 1))
+        else:
+            q = q.limit(limit)
+        r = q.execute()
         return list(r.data or [])
     except Exception as e:
         print(f"get_chapter_logic_issues error: {e}")

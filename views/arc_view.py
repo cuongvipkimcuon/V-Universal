@@ -12,6 +12,8 @@ try:
 except ImportError:
     ArcService = None
 
+KNOWLEDGE_PAGE_SIZE = 10
+
 
 def render_arc_tab(project_id):
     st.subheader("📐 Arc Management")
@@ -37,9 +39,40 @@ def render_arc_tab(project_id):
     can_write = check_permission(str(user_id or ""), user_email or "", project_id, "write")
     can_delete = check_permission(str(user_id or ""), user_email or "", project_id, "delete")
 
-    arcs = ArcService.list_arcs(project_id, status=None)
-    arcs_active = [a for a in arcs if a.get("status") == "active"]
-    arcs_archived = [a for a in arcs if a.get("status") == "archived"]
+    # Filter + phân trang ở DB (tối đa 10 mục/trang)
+    arc_status_filter = st.selectbox(
+        "Trạng thái Arc",
+        ["Tất cả", "Chỉ active", "Chỉ archived"],
+        index=0,
+        key="arc_status_filter",
+    )
+    page = max(1, int(st.session_state.get("arc_page", 1)))
+    q_count = supabase.table("arcs").select("id", count="exact").eq("story_id", project_id)
+    if arc_status_filter == "Chỉ active":
+        q_count = q_count.eq("status", "active")
+    elif arc_status_filter == "Chỉ archived":
+        q_count = q_count.eq("status", "archived")
+    try:
+        total_arcs = getattr(q_count.limit(0).execute(), "count", None) or 0
+    except Exception:
+        total_arcs = 0
+    total_pages = max(1, (total_arcs + KNOWLEDGE_PAGE_SIZE - 1) // KNOWLEDGE_PAGE_SIZE)
+    page = max(1, min(page, total_pages))
+    st.session_state["arc_page"] = page
+    offset = (page - 1) * KNOWLEDGE_PAGE_SIZE
+    q_data = supabase.table("arcs").select("*").eq("story_id", project_id).order("sort_order").order("created_at")
+    if arc_status_filter == "Chỉ active":
+        q_data = q_data.eq("status", "active")
+    elif arc_status_filter == "Chỉ archived":
+        q_data = q_data.eq("status", "archived")
+    try:
+        arcs_page = q_data.range(offset, offset + KNOWLEDGE_PAGE_SIZE - 1).execute().data or []
+    except Exception:
+        arcs_page = []
+        total_arcs = 0
+        total_pages = 1
+    arcs_active = [a for a in arcs_page if a.get("status") == "active"]
+    arcs_archived = [a for a in arcs_page if a.get("status") == "archived"]
 
     current_arc_id = st.session_state.get("current_arc_id")
     if current_arc_id:
@@ -47,7 +80,21 @@ def render_arc_tab(project_id):
         st.info(f"📌 Scope: {scope_desc}")
 
     st.markdown("#### Danh sách Arc")
-    if not arcs:
+    st.metric("Tổng Arc", total_arcs)
+    if total_pages > 1:
+        pcol1, pcol2, pcol3 = st.columns([1, 2, 1])
+        with pcol1:
+            if st.button("⬅️ Trang trước", key="arc_prev", disabled=(page <= 1)):
+                st.session_state["arc_page"] = max(1, page - 1)
+                st.rerun()
+        with pcol2:
+            st.caption(f"**Trang {page} / {total_pages}** (tối đa {KNOWLEDGE_PAGE_SIZE} mục/trang)")
+        with pcol3:
+            if st.button("Trang sau ➡️", key="arc_next", disabled=(page >= total_pages)):
+                st.session_state["arc_page"] = min(total_pages, page + 1)
+                st.rerun()
+
+    if not arcs_page and total_arcs == 0:
         st.info("Chưa có Arc. Tạo mới bên dưới.")
     else:
         for a in arcs_active:

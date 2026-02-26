@@ -2,7 +2,7 @@
 import streamlit as st
 
 from config import init_services
-from core.background_jobs import list_jobs, retry_job_with_stored_data
+from core.background_jobs import list_jobs, retry_job_with_stored_data, ensure_background_job_runner
 from core.job_llm_store import has_stored_result_for_retry
 
 
@@ -23,8 +23,14 @@ def render_background_tasks_tab(project_id):
         st.warning("Could not connect to services.")
         return
 
-    if st.button("🔄 Refresh", key="bg_tasks_refresh_btn"):
-        st.rerun()
+    col_ctrl1, col_ctrl2 = st.columns(2)
+    with col_ctrl1:
+        if st.button("🔄 Refresh", key="bg_tasks_refresh_btn"):
+            st.rerun()
+    with col_ctrl2:
+        if st.button("▶️ Chạy hàng đợi", key="bg_tasks_run_queue_btn"):
+            ensure_background_job_runner()
+            st.success("Đã kích hoạt xử lý hàng đợi. Các job pending (chưa quá hạn) sẽ được chạy lần lượt trong nền.")
 
     status_filter = st.selectbox(
         "Status",
