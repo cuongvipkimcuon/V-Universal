@@ -929,7 +929,11 @@ LƯU Ý:
     @staticmethod
     def _single_intent_to_plan(single_router_result: Dict, user_prompt: str) -> Dict:
         """Chuyển kết quả router single-intent thành plan 1 bước (tương thích V7)."""
-        intent = single_router_result.get("intent", "chat_casual")
+        intent = (single_router_result.get("intent") or "chat_casual").strip()
+        # Trong Planner V7, intent "suggest_v7" (gợi ý dùng V7) không phải là bước thực thi.
+        # Nếu fallback từ router trả về intent này thì coi như một yêu cầu phân tích nhiều chương.
+        if intent.lower() == "suggest_v7":
+            intent = "multi_chapter_analysis"
         return {
             "analysis": single_router_result.get("reason", ""),
             "plan": [{
