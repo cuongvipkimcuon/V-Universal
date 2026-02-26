@@ -680,6 +680,10 @@ Chỉ trả về JSON."""
             intent = (s.get("intent") or "chat_casual").strip().lower()
             if intent == "update_data":
                 intent = "unified"
+            # Planner không nên trả về intent "suggest_v7" (đây là intent của router V6 dùng để GỢI Ý xài V7).
+            # Nếu vẫn gặp intent này thì coi như một yêu cầu phân tích nhiều chương.
+            if intent == "suggest_v7":
+                intent = "multi_chapter_analysis"
             # Nếu Planner trả về intent "suggest_v7" thì coi như một yêu cầu phân tích nhiều chương.
             if intent == "suggest_v7":
                 intent = "multi_chapter_analysis"
