@@ -1780,8 +1780,20 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
                                     )
                                     full_response_text = (resp.choices[0].message.content or "").strip()
 
-                                    # Thẩm định đủ ý; nếu chưa đủ thì fallback đọc full content chương (ưu tiên chương trong câu hỏi + chương được chunk/bible/timeline/relation nhắc nhiều)
-                                    if full_response_text and not is_answer_sufficient(
+                                    # Thẩm định đủ ý; nếu chưa đủ thì fallback đọc full content chương (ưu tiên chương trong câu hỏi + chương được chunk/bible/timeline/relation nhắc nhiều).
+                                    # Nếu context đã có full chương (chapter_full) thì bỏ qua bước check + fallback để tiết kiệm chi phí LLM.
+                                    has_chapter_full = False
+                                    meta = context_parts_meta
+                                    if isinstance(meta, list) and meta:
+                                        for p in meta:
+                                            src = (p.get("source") or "").strip().lower()
+                                            if src == "chapter_full":
+                                                text_meta = (p.get("text") or "").strip()
+                                                if text_meta:
+                                                    has_chapter_full = True
+                                                    break
+
+                                    if full_response_text and (not has_chapter_full) and not is_answer_sufficient(
                                         prompt,
                                         full_response_text,
                                         (context_text or "")[:1000],
@@ -1799,7 +1811,6 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
                                             if related_nums:
                                                 start, end = min(related_nums), max(related_nums)
                                         # Thêm chương xuất hiện nhiều trong context (chunk, bible, timeline, relation)
-                                        meta = context_parts_meta
                                         if isinstance(meta, list) and meta:
                                             from collections import Counter
                                             cnt = Counter()

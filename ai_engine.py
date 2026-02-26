@@ -514,6 +514,57 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
                 context_parts.append("[TIMELINE] Chưa có dữ liệu timeline_events. Trả lời dựa trên Bible/chương nếu có.")
                 sources.append("📅 Timeline (empty)")
 
+    # Fallback: nếu intent=search_context, có chapter_range đã resolve mà không có chunk/bible/timeline/relation nào đáng kể
+    # thì load full chương theo khoảng đó và đưa vào context. Áp dụng chung cho router V6/V8 và cả V7 multi_chapter_analysis.
+    if intent == "search_context" and range_bounds_bible and not _over_budget():
+        has_semantic_context = False
+        for meta in context_parts_meta or []:
+            src = (meta.get("source") or "").strip().lower()
+            if src in ("chunk", "bible", "timeline", "relation"):
+                text_meta = (meta.get("text") or "").strip()
+                if text_meta:
+                    has_semantic_context = True
+                    break
+        if not has_semantic_context:
+            try:
+                start_rb, end_rb = int(range_bounds_bible[0]), int(range_bounds_bible[1])
+            except (TypeError, ValueError, IndexError):
+                start_rb = end_rb = None
+            if start_rb is not None and end_rb is not None and start_rb <= end_rb:
+                # Tôn trọng giới hạn context tổng: chỉ dùng phần budget còn lại (nếu có), nhưng không vượt quá DEFAULT_CHAPTER_TOKEN_LIMIT.
+                token_limit_for_fallback = ContextManager.DEFAULT_CHAPTER_TOKEN_LIMIT
+                if max_context_tokens is not None:
+                    remaining_budget = max_context_tokens - total_tokens
+                    if remaining_budget <= 0:
+                        token_limit_for_fallback = 0
+                    else:
+                        token_limit_for_fallback = min(
+                            ContextManager.DEFAULT_CHAPTER_TOKEN_LIMIT,
+                            max(1000, remaining_budget),
+                        )
+                if token_limit_for_fallback > 0:
+                    fallback_text, fallback_sources = ContextManager.load_chapters_by_range(
+                        project_id,
+                        start_rb,
+                        end_rb,
+                        token_limit=token_limit_for_fallback,
+                    )
+                    if fallback_text:
+                        context_parts.append(
+                            "\n--- NỘI DUNG CHƯƠNG (FALLBACK - đọc toàn văn khi không tìm được dữ liệu Bible/chunk/timeline/relation) ---\n"
+                            + fallback_text
+                        )
+                        total_tokens += AIService.estimate_tokens(fallback_text)
+                        if fallback_sources:
+                            sources.extend(fallback_sources)
+                        context_parts_meta.append(
+                            {
+                                "source": "chapter_full",
+                                "chapter_numbers": list(range(start_rb, end_rb + 1)),
+                                "text": fallback_text,
+                            }
+                        )
+
     ctx["total_tokens"] = total_tokens
 
 
