@@ -23,6 +23,10 @@ def _cosine_sim(a: List[float], b: List[float]) -> float:
 # Ngưỡng mặc định để lọc trùng khi build context (pgvector): >= threshold thì coi là cùng nội dung, chỉ giữ một
 CONTEXT_DEDUPE_SIMILARITY_THRESHOLD = 0.90
 
+# Ngưỡng tối thiểu để coi relation/timeline là đủ liên quan khi đưa vào context (cosine sim)
+RELATION_MIN_SIM_FOR_CONTEXT = 0.75
+TIMELINE_MIN_SIM_FOR_CONTEXT = 0.75
+
 
 def filter_context_items_by_embedding(
     items: List[Dict[str, Any]],
@@ -623,9 +627,14 @@ def get_top_relations_by_query(
             if isinstance(emb, list) and len(emb) == len(qvec):
                 sim = _cosine_sim(emb, qvec)
                 scored.append((sim, row))
+        if not scored:
+            return ""
         scored.sort(key=lambda x: -x[0])
-        rows_ordered = [row for _, row in scored]
-        rows_deduped = filter_context_items_by_embedding(rows_ordered, similarity_threshold=CONTEXT_DEDUPE_SIMILARITY_THRESHOLD)
+        # Lọc theo ngưỡng similarity tối thiểu trước khi dedupe
+        rows_high = [row for sim, row in scored if sim >= RELATION_MIN_SIM_FOR_CONTEXT]
+        if not rows_high:
+            return ""
+        rows_deduped = filter_context_items_by_embedding(rows_high, similarity_threshold=CONTEXT_DEDUPE_SIMILARITY_THRESHOLD)
         lines = []
         for row in rows_deduped[:top_k]:
             src = id_to_name.get(row.get("source_entity_id"), "")
@@ -684,9 +693,14 @@ def get_top_timeline_by_query(
             if isinstance(emb, list) and len(emb) == len(qvec):
                 sim = _cosine_sim(emb, qvec)
                 scored.append((sim, row))
+        if not scored:
+            return ""
         scored.sort(key=lambda x: -x[0])
-        rows_ordered = [row for _, row in scored]
-        rows_deduped = filter_context_items_by_embedding(rows_ordered, similarity_threshold=CONTEXT_DEDUPE_SIMILARITY_THRESHOLD)
+        # Lọc theo ngưỡng similarity tối thiểu trước khi dedupe
+        rows_high = [row for sim, row in scored if sim >= TIMELINE_MIN_SIM_FOR_CONTEXT]
+        if not rows_high:
+            return ""
+        rows_deduped = filter_context_items_by_embedding(rows_high, similarity_threshold=CONTEXT_DEDUPE_SIMILARITY_THRESHOLD)
         lines = []
         for row in rows_deduped[:top_k]:
             title = (row.get("title") or "").strip()

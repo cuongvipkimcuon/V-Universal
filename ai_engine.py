@@ -17,6 +17,7 @@ from ai.context_helpers import (
     get_top_relations_by_query,
     get_top_timeline_by_query,
     filter_context_items_by_embedding,
+    get_related_chapter_nums,
 )
 from ai.hybrid_search import HybridSearch, check_semantic_intent, search_chunks_vector
 from ai.query_sql import VALID_QUERY_TARGETS, build_query_sql_context, infer_query_target
@@ -250,6 +251,10 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
     TIMELINE_VECTOR_TOP_K = 10
 
     query_for_vec = (router_result.get("rewritten_query") or "").strip()
+    # Planner targets chi tiết cho từng nguồn (nếu có)
+    target_chunk_keywords = router_result.get("target_chunk_keywords") or []
+    target_relation_entities = router_result.get("target_relation_entities") or []
+    target_timeline_keywords = router_result.get("target_timeline_keywords") or []
     query_emb = ctx.get("query_embedding")
     raw_inferred = router_result.get("inferred_prefixes") or []
     valid_keys = Config.get_valid_prefix_keys()
@@ -261,7 +266,12 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
     # Thứ tự ưu tiên: chunk → bible → relation → timeline (không load full chapter ở đây; full chapter chỉ khi fallback)
     # 1) Chunk (vector, scope)
     if "chunk" in context_needs and not _over_budget():
-        query_for_chunk = query_for_vec or "nội dung"
+        # Ưu tiên từ khóa chunk do planner suy ra; fallback về rewritten_query
+        if target_chunk_keywords:
+            # Ghép các keyword thành một câu truy vấn súc tích
+            query_for_chunk = " ; ".join(str(k) for k in target_chunk_keywords if k)[:300]
+        else:
+            query_for_chunk = query_for_vec or "nội dung"
         chunk_rows = search_chunks_vector(
             query_for_chunk, project_id,
             arc_id=current_arc_id if not arc_ids else None,
@@ -362,35 +372,63 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
             sources.append("📚 Bible Search")
             context_parts_meta.append({"source": "bible", "chapter_numbers": list(bible_chapter_nums), "text": bible_context})
 
+        # Reverse lookup từ Bible entity -> chương liên quan -> full content (budget thấp hơn, ưu tiên theo scope)
         try:
-            services = init_services()
-            supabase = services["supabase"]
-            related_chapter_nums = set()
-            if target_bible_entities:
-                for entity in target_bible_entities:
-                    res = supabase.table("story_bible").select("source_chapter").eq("story_id", project_id).ilike("entity_name", f"%{entity}%").execute()
-                    if res.data:
-                        for row in res.data:
-                            if row.get("source_chapter") and row["source_chapter"] > 0:
-                                related_chapter_nums.add(row["source_chapter"])
-            if related_chapter_nums:
-                chap_res = supabase.table("chapters").select("title").eq("story_id", project_id).in_("chapter_number", list(related_chapter_nums)).execute()
-                if chap_res.data:
-                    auto_files = [c["title"] for c in chap_res.data if c.get("title")]
-                    if auto_files:
-                        extra_text, extra_sources = ContextManager.load_full_content(auto_files, project_id)
-                        if extra_text:
-                            context_parts.append(f"\n--- 🕵️ AUTO-DETECTED CONTEXT (REVERSE LOOKUP) ---\n{extra_text}")
-                            sources.extend([f"{s} (Auto)" for s in extra_sources])
-                            total_tokens += AIService.estimate_tokens(extra_text)
-                            context_parts_meta.append({"source": "chunk", "chapter_numbers": list(related_chapter_nums), "text": extra_text})
+            # Nếu đã gần hết budget context thì bỏ qua bước auto reverse lookup nặng
+            if not _over_budget() and max_context_tokens and total_tokens < max_context_tokens * 0.85:
+                related_chapter_nums_list = get_related_chapter_nums(project_id, target_bible_entities or [])
+                if related_chapter_nums_list:
+                    # Ưu tiên chương nằm trong scope hiện tại (chapter_numbers) hoặc range_bounds_bible nếu có
+                    prioritized: List[int] = []
+                    in_scope = set(chapter_numbers or [])
+                    if range_bounds_bible:
+                        start_rb, end_rb = int(range_bounds_bible[0]), int(range_bounds_bible[1])
+                        in_range = {n for n in related_chapter_nums_list if start_rb <= n <= end_rb}
+                    else:
+                        in_range = set()
+                    for n in related_chapter_nums_list:
+                        if n in in_scope or n in in_range:
+                            prioritized.append(n)
+                    # Bổ sung phần còn lại (ngoài scope) nếu vẫn còn slot
+                    for n in related_chapter_nums_list:
+                        if n not in prioritized:
+                            prioritized.append(n)
+                    # Giới hạn số chương auto-load để tránh bùng token
+                    MAX_AUTO_REVERSE_CHAPTERS = 4
+                    chosen = prioritized[:MAX_AUTO_REVERSE_CHAPTERS]
+                    if chosen:
+                        services = init_services()
+                        supabase = services["supabase"] if services else None
+                        if supabase:
+                            chap_res = supabase.table("chapters").select("title, chapter_number").eq(
+                                "story_id", project_id
+                            ).in_("chapter_number", chosen).order("chapter_number").execute()
+                            auto_files = [c["title"] for c in (chap_res.data or []) if c.get("title")]
+                            if auto_files:
+                                # Dùng token_limit riêng cho auto reverse lookup để tránh chiếm hết context
+                                auto_token_limit = max_context_tokens // 3 if max_context_tokens else 12000
+                                extra_text, extra_sources = ContextManager.load_full_content(
+                                    auto_files, project_id, token_limit=auto_token_limit
+                                )
+                                if extra_text:
+                                    context_parts.append(f"\n--- 🕵️ AUTO-DETECTED CONTEXT (REVERSE LOOKUP) ---\n{extra_text}")
+                                    sources.extend([f"{s} (Auto)" for s in extra_sources])
+                                    total_tokens += AIService.estimate_tokens(extra_text)
+                                    context_parts_meta.append(
+                                        {"source": "chunk", "chapter_numbers": chosen, "text": extra_text}
+                                    )
         except Exception as e:
             print(f"Reverse lookup error: {e}")
 
     # 3) Relation (vector, scope)
     if "relation" in context_needs and not _over_budget():
+        # Ưu tiên entity chính do planner suy ra; fallback về rewritten_query
+        if target_relation_entities:
+            rel_query = " ; ".join(str(e) for e in target_relation_entities if e)[:300]
+        else:
+            rel_query = query_for_vec or "quan hệ"
         rel_vec = get_top_relations_by_query(
-            project_id, query_for_vec or "quan hệ",
+            project_id, rel_query,
             top_k=RELATION_TOP_K,
             query_embedding=query_emb,
             chapter_numbers=chapter_numbers if arc_ids else None,
@@ -428,8 +466,13 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
             sources.append("📅 Timeline Events")
             context_parts_meta.append({"source": "timeline", "chapter_numbers": chapter_numbers[:20], "text": block})
         else:
+            # Ưu tiên từ khóa timeline do planner suy ra; fallback về rewritten_query
+            if target_timeline_keywords:
+                tl_query = " ; ".join(str(k) for k in target_timeline_keywords if k)[:300]
+            else:
+                tl_query = query_for_vec or "sự kiện"
             tl_vec = get_top_timeline_by_query(
-                project_id, query_for_vec or "sự kiện",
+                project_id, tl_query,
                 top_k=TIMELINE_VECTOR_TOP_K,
                 query_embedding=query_emb,
                 chapter_ids=chapter_ids[:500] if chapter_ids else None,

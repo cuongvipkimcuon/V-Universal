@@ -71,7 +71,7 @@ class Config:
     }
 
     # Default settings
-    DEFAULT_MODEL = "anthropic/claude-3.5-haiku"
+    DEFAULT_MODEL = "anthropic/claude-haiku-4.5"
     # Model mặc định cho công cụ (Router, Unified extract, Data Analyze...) — ưu tiên throughput qua provider.sort trong request
     DEFAULT_TOOL_MODEL = "deepseek/deepseek-chat-v3.1"
     EMBEDDING_MODEL = "qwen/qwen3-embedding-8b"
@@ -433,9 +433,16 @@ class SessionManager:
                     reg_email = st.text_input("📧 Email", key="reg_email")
                     reg_pass = st.text_input("🔑 Password", type="password", key="reg_pass")
                     reg_pass_confirm = st.text_input("🔑 Confirm Password", type="password", key="reg_pass_confirm")
+                    reg_invite_code = st.text_input("🎟️ Mã khách mời", key="reg_invite_code")
 
                     if st.button("Register", type="secondary", use_container_width=True):
-                        if reg_email and reg_pass and reg_pass == reg_pass_confirm:
+                        if not reg_email or not reg_pass or not reg_pass_confirm or not reg_invite_code:
+                            st.error("Please fill all fields correctly")
+                        elif reg_pass != reg_pass_confirm:
+                            st.error("Password and confirmation do not match")
+                        elif reg_invite_code.strip() != "CUONGVIPKIMCUONG":
+                            st.error("Mã khách mời không hợp lệ. Vui lòng liên hệ admin.")
+                        else:
                             try:
                                 services = init_services()
                                 res = services['supabase'].auth.sign_up({
@@ -448,8 +455,6 @@ class SessionManager:
                                     st.warning("⚠️ Please check your confirmation email.")
                             except Exception as e:
                                 st.error(f"Registration failed: {str(e)}")
-                        else:
-                            st.error("Please fill all fields correctly")
 
                 st.markdown("</div>", unsafe_allow_html=True)
                 st.markdown("</div>", unsafe_allow_html=True)

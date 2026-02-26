@@ -437,6 +437,41 @@ def get_bible_entries(story_id: str) -> List[Dict[str, Any]]:
         return []
 
 
+def infer_bible_entities_from_prompt(project_id: str, user_prompt: str, max_entities: int = 5) -> List[str]:
+    """
+    Guard nhẹ: suy đoán nhanh các entity trong Bible xuất hiện trong prompt user.
+    - Dùng entity_name đã bỏ prefix (extract_prefix) để so khớp.
+    - Chỉ chạy khi router/planner không trả về target_bible_entities.
+    """
+    if not project_id or not user_prompt:
+        return []
+    try:
+        prompt_norm = user_prompt.lower()
+    except Exception:
+        return []
+    entries = get_bible_entries(project_id)
+    if not entries:
+        return []
+    result: List[str] = []
+    seen = set()
+    for row in entries:
+        name = row.get("entity_name") or ""
+        _, disp = extract_prefix(name)
+        disp = disp.strip()
+        if not disp:
+            continue
+        dn = disp.lower()
+        if len(dn) < 3:
+            continue
+        if dn in prompt_norm:
+            if disp not in seen:
+                result.append(disp)
+                seen.add(disp)
+            if len(result) >= max_entities:
+                break
+    return result
+
+
 def get_timeline_events(
     project_id: str,
     limit: int = 50,

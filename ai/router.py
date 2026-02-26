@@ -271,7 +271,17 @@ Trả về JSON với đủ key:
         chat_capped = cap_chat_history_to_tokens(chat_history_text or "")
         relevant_rules_block = (relevant_rules or "").strip() or "(Bước 1 không chọn quy tắc liên quan)"
 
-        planner_prompt = f"""Bạn là Context Planner. Intent đã xác định: **{intent}**. Nhiệm vụ: dựa vào BỨC TRANH TỔNG QUAN dữ liệu dự án dưới đây, quyết định (1) cần LẤY DỮ LIỆU NÀO từ DB (bible, chapter, timeline, relation, chunk), (2) cần đưa LUẬT NÀO vào context (từ các quy tắc liên quan bước 1 đã lọc). Trả về JSON.
+        planner_prompt = f"""Bạn là Context Planner. Intent đã xác định: **{intent}**. Nhiệm vụ: dựa vào BỨC TRANH TỔNG QUAN dữ liệu dự án dưới đây, quyết định (1) cần LẤY DỮ LIỆU NÀO từ DB (bible, chapter, timeline, relation, chunk), (2) cần đưa LUẬT NÀO vào context (từ các quy tắc liên quan bước 1 đã lọc), (3) chọn rõ các TARGET theo từng nguồn (tên entity trong Bible, từ khóa chunk, entity để xem quan hệ, từ khóa timeline). Trả về JSON.
+
+QUY TẮC CỰC KỲ QUAN TRỌNG VỀ CHAPTER RANGE (KHÔNG ĐƯỢC VI PHẠM):
+- TUYỆT ĐỐI KHÔNG tự ý bịa hoặc suy đoán chương khi USER KHÔNG nói rõ chương / khoảng chương / số chương.
+- CHỈ đặt chapter_range khi:
+  (a) User nói RÕ ràng “chương X”, “Chap Y”, “chương X đến Y”, “3 chương đầu”, “chương mới nhất”; HOẶC
+  (b) User nói tới MỘT ARC cụ thể (vd: “arc Tuổi thơ”) và ARC ĐÓ đã có danh sách chương trong phần ARC VÀ CHƯƠNG THUỘC ARC.
+- Trong MỌI trường hợp khác (hỏi nhân vật, quan hệ, phân tích chung, không nhắc tới chương hay arc cụ thể) thì BẮT BUỘC phải để:
+  chapter_range = null
+  chapter_range_mode = null
+- Ví dụ: câu hỏi “Võ Quốc Thanh là ai?” chỉ là tra cứu nhân vật → KHÔNG được đặt chapter_range (để null), dù bạn có biết nhân vật xuất hiện ở chương nào.
 
 --- BỨC TRANH TỔNG QUAN DỮ LIỆU DỰ ÁN ---
 - TÊN DỰ ÁN: {project_name}
@@ -295,13 +305,16 @@ Bạn cần trả về:
 - context_priority: thứ tự ưu tiên (phần tử đầu quan trọng nhất).
 - chapter_range: null hoặc [start, end]. "Chương 1" -> [1,1]; "chương 1 đến 5" -> [1,5]. Khi user hỏi về một ARC (vd. "arc Tuổi thơ"), dựa vào ARC VÀ CHƯƠNG THUỘC ARC để đặt chapter_range = [min, max] các chương thuộc arc đó.
 - chapter_range_mode: "range" | "first" | "latest" | null.
-- target_bible_entities: tên nhân vật/entity user hỏi (mảng string).
+- target_bible_entities: danh sách TÊN ENTITY trong Bible (mảng string). KHÔNG kèm prefix như [NV], [CHAR] — chỉ dùng phần tên sau khi bỏ prefix.
+- target_chunk_keywords: mảng string, từ khóa/cụm từ để tìm chunk (nếu cần chunk).
+- target_relation_entities: mảng string, entity chính để xem quan hệ (nếu cần relation).
+- target_timeline_keywords: mảng string, từ khóa sự kiện/timeline (nếu cần timeline).
 - query_target: chỉ khi intent=query_Sql: "chapters"|"rules"|"bible_entity"|"chunks"|"timeline"|"relation"|"summary"|"art".
 - data_operation_type, data_operation_target: chỉ khi intent=unified.
 - included_rules_text: chuỗi các quy tắc (từ block QUY TẮC LIÊN QUAN trên) thực sự cần đưa vào context để trả lời. Giữ nguyên định dạng "- ...". Có thể là toàn bộ hoặc subset. Nếu không cần quy tắc nào thì "".
 
 Trả về JSON (đủ key):
-{{ "context_needs": [], "context_priority": [], "chapter_range": null, "chapter_range_mode": null, "chapter_range_count": 5, "target_bible_entities": [], "inferred_prefixes": [], "rewritten_query": "", "query_target": "", "clarification_question": "", "data_operation_type": "", "data_operation_target": "", "update_summary": "", "included_rules_text": "" }}
+        {{ "context_needs": [], "context_priority": [], "chapter_range": null, "chapter_range_mode": null, "chapter_range_count": 5, "target_bible_entities": [], "target_chunk_keywords": [], "target_relation_entities": [], "target_timeline_keywords": [], "inferred_prefixes": [], "rewritten_query": "", "query_target": "", "clarification_question": "", "data_operation_type": "", "data_operation_target": "", "update_summary": "", "included_rules_text": "" }}
 Chỉ trả về JSON."""
 
         try:
@@ -338,6 +351,9 @@ Chỉ trả về JSON."""
             "chapter_range_count": int(data.get("chapter_range_count", 5)),
             "target_files": [],
             "target_bible_entities": data.get("target_bible_entities") if isinstance(data.get("target_bible_entities"), list) else [],
+            "target_chunk_keywords": data.get("target_chunk_keywords") if isinstance(data.get("target_chunk_keywords"), list) else [],
+            "target_relation_entities": data.get("target_relation_entities") if isinstance(data.get("target_relation_entities"), list) else [],
+            "target_timeline_keywords": data.get("target_timeline_keywords") if isinstance(data.get("target_timeline_keywords"), list) else [],
             "inferred_prefixes": data.get("inferred_prefixes") if isinstance(data.get("inferred_prefixes"), list) else [],
             "rewritten_query": (data.get("rewritten_query") or user_prompt).strip(),
             "reason": "Context planner",
@@ -435,11 +451,13 @@ Bạn là AI Điều Phối Viên (Router) cho hệ thống V7-Universal. Nhiệ
 11. **Quy tắc "check_chapter_logic vs search_context":** User hỏi **cụ thể về lỗi logic / mâu thuẫn / điểm vô lý / plot hole** của chương -> **check_chapter_logic**, điền chapter_range. User chỉ hỏi nội dung chương, tóm tắt, nhân vật làm gì, quan hệ... (tra cứu thông thường) -> **search_context**, không dùng check_chapter_logic.
 
 ### 4. LOGIC TRÍCH XUẤT CHAPTER RANGE
+- TUYỆT ĐỐI KHÔNG tự ý bịa hoặc suy đoán chapter_range khi user KHÔNG nói rõ chương / khoảng chương / số chương / arc cụ thể.
 - "Chương 1", "Chap 5" -> chapter_range_mode: "range", chapter_range: [1, 1] hoặc [5, 5]
 - "Chương 1 đến 5" -> chapter_range_mode: "range", chapter_range: [1, 5]
 - "3 chương đầu" -> chapter_range_mode: "first", chapter_range_count: 3
 - "Chương mới nhất" -> chapter_range_mode: "latest", chapter_range_count: 1
-- Không liên quan chương -> chapter_range: null, chapter_range_mode: null
+- Khi user hỏi về MỘT ARC cụ thể (vd. "arc Tuổi thơ"), chỉ khi arc đó có danh sách chương rõ ràng trong phần dữ liệu, mới được đặt chapter_range = [min, max] theo các chương thuộc arc đó.
+- TẤT CẢ câu hỏi KHÔNG LIÊN QUAN CHƯƠNG (chỉ hỏi nhân vật, quan hệ, phân tích chung, không nhắc số chương / khoảng chương / arc cụ thể) -> chapter_range: null, chapter_range_mode: null (KHÔNG được đặt [1,1] hay khoảng bất kỳ).
 
 ### 5. VÍ DỤ MINH HỌA (FEW-SHOT)
 **Input:** "Tóm tắt nội dung chương 1 cho anh."
@@ -479,6 +497,9 @@ Bạn là AI Điều Phối Viên (Router) cho hệ thống V7-Universal. Nhiệ
     "context_priority": [] hoặc mảng cùng phần tử với context_needs theo thứ tự ưu tiên (phần tử đầu = quan trọng nhất; dùng để tối ưu token; BẮT BUỘC khi intent = search_context),
     "target_files": [],
     "target_bible_entities": [],
+    "target_chunk_keywords": [],
+    "target_relation_entities": [],
+    "target_timeline_keywords": [],
     "inferred_prefixes": [],
     "reason": "Lý do ngắn gọn bằng tiếng Việt",
     "rewritten_query": "Viết lại câu hỏi cho search",
@@ -510,6 +531,9 @@ Bạn là AI Điều Phối Viên (Router) cho hệ thống V7-Universal. Nhiệ
             result = json.loads(content)
             result.setdefault("target_files", [])
             result.setdefault("target_bible_entities", [])
+            result.setdefault("target_chunk_keywords", [])
+            result.setdefault("target_relation_entities", [])
+            result.setdefault("target_timeline_keywords", [])
             result.setdefault("inferred_prefixes", [])
             result.setdefault("rewritten_query", user_prompt)
             result.setdefault("chapter_range", None)

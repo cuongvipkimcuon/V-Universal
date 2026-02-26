@@ -30,26 +30,64 @@ class HybridSearch:
         try:
             services = init_services()
             supabase = services["supabase"]
-            query_vec = query_embedding if query_embedding is not None else AIService.get_embedding(query_text)
             candidate_limit = max(top_k * 3, 30)
 
-            if query_vec:
+            raw_list: List[Dict] = []
+
+            # Bước 1: ưu tiên so khớp tên entity (text match) trước, chỉ dùng embedding khi KHÔNG tìm thấy.
+            exact_rows: List[Dict] = []
+            qt = (query_text or "").strip()
+            if qt:
                 try:
-                    response = supabase.rpc("hybrid_search", {
-                        "query_text": query_text,
-                        "query_embedding": query_vec,
-                        "match_threshold": 0.3,
-                        "match_count": candidate_limit,
-                        "story_id_input": project_id,
-                    }).execute()
-                    raw_list = response.data if response.data else []
+                    # Chỉ so khớp trên entity_name để bắt dính nhân vật/địa điểm rõ ràng.
+                    response = supabase.table("story_bible").select("*").eq(
+                        "story_id", project_id
+                    ).ilike("entity_name", f"%{qt}%").limit(candidate_limit).execute()
+                    exact_rows = list(response.data or [])
                 except Exception:
-                    raw_list = []
-                if not raw_list:
+                    exact_rows = []
+
+            if exact_rows:
+                # Gán similarity cao để các hàm rerank giữ ưu tiên nhóm này.
+                for item in exact_rows:
+                    try:
+                        base_sim = float(item.get("similarity", 0.0) or 0.0)
+                    except Exception:
+                        base_sim = 0.0
+                    item["similarity"] = max(base_sim, 0.99)
+                raw_list = exact_rows
+            else:
+                # Bước 2: fallback sang hybrid_search (embedding + keyword) như trước.
+                query_vec = query_embedding if query_embedding is not None else AIService.get_embedding(query_text)
+                if query_vec:
+                    try:
+                        response = supabase.rpc("hybrid_search", {
+                            "query_text": query_text,
+                            "query_embedding": query_vec,
+                            "match_threshold": 0.3,
+                            "match_count": candidate_limit,
+                            "story_id_input": project_id,
+                        }).execute()
+                        raw_list = response.data if response.data else []
+                    except Exception:
+                        raw_list = []
+                    if not raw_list and qt:
+                        try:
+                            response = supabase.table("story_bible").select("*").eq(
+                                "story_id", project_id
+                            ).or_(f"entity_name.ilike.%{qt}%,description.ilike.%{qt}%").limit(
+                                candidate_limit
+                            ).execute()
+                            raw_list = response.data if response.data else []
+                            for item in raw_list:
+                                item["similarity"] = 0.5
+                        except Exception:
+                            raw_list = []
+                else:
                     try:
                         response = supabase.table("story_bible").select("*").eq(
                             "story_id", project_id
-                        ).or_(f"entity_name.ilike.%{query_text}%,description.ilike.%{query_text}%").limit(
+                        ).or_(f"entity_name.ilike.%{qt}%,description.ilike.%{qt}%").limit(
                             candidate_limit
                         ).execute()
                         raw_list = response.data if response.data else []
@@ -57,18 +95,6 @@ class HybridSearch:
                             item["similarity"] = 0.5
                     except Exception:
                         raw_list = []
-            else:
-                try:
-                    response = supabase.table("story_bible").select("*").eq(
-                        "story_id", project_id
-                    ).or_(f"entity_name.ilike.%{query_text}%,description.ilike.%{query_text}%").limit(
-                        candidate_limit
-                    ).execute()
-                    raw_list = response.data if response.data else []
-                    for item in raw_list:
-                        item["similarity"] = 0.5
-                except Exception:
-                    raw_list = []
 
             if not raw_list:
                 return []
@@ -111,25 +137,61 @@ class HybridSearch:
         try:
             services = init_services()
             supabase = services["supabase"]
-            query_vec = query_embedding if query_embedding is not None else AIService.get_embedding(query_text)
             candidate_limit = max(top_k * 3, 30)
-            if query_vec:
+            raw_list: List[Dict] = []
+
+            # Bước 1: ưu tiên so khớp entity_name (text) trước.
+            exact_rows: List[Dict] = []
+            qt = (query_text or "").strip()
+            if qt:
                 try:
-                    response = supabase.rpc("hybrid_search", {
-                        "query_text": query_text,
-                        "query_embedding": query_vec,
-                        "match_threshold": 0.3,
-                        "match_count": candidate_limit,
-                        "story_id_input": project_id,
-                    }).execute()
-                    raw_list = response.data if response.data else []
+                    response = supabase.table("story_bible").select("*").eq(
+                        "story_id", project_id
+                    ).ilike("entity_name", f"%{qt}%").limit(candidate_limit).execute()
+                    exact_rows = list(response.data or [])
                 except Exception:
-                    raw_list = []
-                if not raw_list:
+                    exact_rows = []
+
+            if exact_rows:
+                for item in exact_rows:
+                    try:
+                        base_sim = float(item.get("similarity", 0.0) or 0.0)
+                    except Exception:
+                        base_sim = 0.0
+                    item["similarity"] = max(base_sim, 0.99)
+                raw_list = exact_rows
+            else:
+                # Bước 2: fallback sang hybrid_search (embedding) + keyword như trước.
+                query_vec = query_embedding if query_embedding is not None else AIService.get_embedding(query_text)
+                if query_vec:
+                    try:
+                        response = supabase.rpc("hybrid_search", {
+                            "query_text": query_text,
+                            "query_embedding": query_vec,
+                            "match_threshold": 0.3,
+                            "match_count": candidate_limit,
+                            "story_id_input": project_id,
+                        }).execute()
+                        raw_list = response.data if response.data else []
+                    except Exception:
+                        raw_list = []
+                    if not raw_list and qt:
+                        try:
+                            response = supabase.table("story_bible").select("*").eq(
+                                "story_id", project_id
+                            ).or_(f"entity_name.ilike.%{qt}%,description.ilike.%{qt}%").limit(
+                                candidate_limit
+                            ).execute()
+                            raw_list = response.data if response.data else []
+                            for item in raw_list:
+                                item["similarity"] = 0.5
+                        except Exception:
+                            raw_list = []
+                else:
                     try:
                         response = supabase.table("story_bible").select("*").eq(
                             "story_id", project_id
-                        ).or_(f"entity_name.ilike.%{query_text}%,description.ilike.%{query_text}%").limit(
+                        ).or_(f"entity_name.ilike.%{qt}%,description.ilike.%{qt}%").limit(
                             candidate_limit
                         ).execute()
                         raw_list = response.data if response.data else []
@@ -137,18 +199,6 @@ class HybridSearch:
                             item["similarity"] = 0.5
                     except Exception:
                         raw_list = []
-            else:
-                try:
-                    response = supabase.table("story_bible").select("*").eq(
-                        "story_id", project_id
-                    ).or_(f"entity_name.ilike.%{query_text}%,description.ilike.%{query_text}%").limit(
-                        candidate_limit
-                    ).execute()
-                    raw_list = response.data if response.data else []
-                    for item in raw_list:
-                        item["similarity"] = 0.5
-                except Exception:
-                    raw_list = []
             if not raw_list:
                 return []
             return _rerank_by_score_with_breakdown(raw_list, top_k)

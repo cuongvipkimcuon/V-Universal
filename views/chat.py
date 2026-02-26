@@ -23,6 +23,7 @@ from ai.router import is_multi_intent_request
 from persona import PersonaSystem
 from utils.auth_manager import check_permission, submit_pending_change
 from utils.python_executor import PythonExecutor
+from ai.utils import infer_bible_entities_from_prompt
 
 
 def _get_logic_reminder(project_id):
@@ -1265,6 +1266,17 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                     intent = router_out.get('intent', 'chat_casual')
                     targets = router_out.get('target_files', [])
                     rewritten_query = router_out.get('rewritten_query', prompt)
+                    # Guard nhẹ: nếu planner/router chưa trả target_bible_entities mà intent cần data thì suy đoán từ prompt
+                    if (
+                        router_out is not None
+                        and project_id
+                        and intent in ("search_context", "query_Sql")
+                    ):
+                        tb = router_out.get("target_bible_entities") or []
+                        if not tb:
+                            inferred = infer_bible_entities_from_prompt(project_id, prompt)
+                            if inferred:
+                                router_out["target_bible_entities"] = list(dict.fromkeys(inferred))
 
                     # ask_user_clarification: dừng lại, hiện popup hỏi user thay vì gọi LLM
                     if intent == "ask_user_clarification":
@@ -1483,8 +1495,18 @@ def render_chat_tab(project_id, persona, chat_mode=None):
                         max_context_tokens = Config.CONTEXT_SIZE_TOKENS.get(st.session_state.get("context_size", "medium"))
                         exec_result = None
                         context_parts_meta = []
-                        # Embed câu hỏi tối đa 1 lần: dùng cache nếu đã embed cho semantic, không thì embed canonical (rewritten hoặc gốc)
-                        canonical_query = (router_out.get("rewritten_query") or prompt or "").strip()
+                        # Embed câu hỏi tối đa 1 lần: dùng cache nếu đã embed cho semantic, không thì embed canonical (ưu tiên prompt gốc, chỉ dùng rewritten_query khi gần giống)
+                        rq = (router_out.get("rewritten_query") or "").strip() if router_out else ""
+                        base_prompt = (prompt or "").strip()
+                        canonical_query = base_prompt
+                        if rq and base_prompt:
+                            rq_low = rq.lower()
+                            p_low = base_prompt.lower()
+                            overlap = len(set(rq_low.split()) & set(p_low.split()))
+                            if overlap >= 2:
+                                canonical_query = rq
+                        if not canonical_query:
+                            canonical_query = rq or base_prompt
                         if query_embedding_cache and query_embedding_cache[0] == canonical_query:
                             query_embedding_for_context = query_embedding_cache[1]
                         else:
