@@ -757,42 +757,42 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
                 from ai.context_helpers import get_chunks_for_timeline_events
 
                 tl_ids = [e.get("id") for e in events if e.get("id")]
-                        if tl_ids and not _over_budget():
+                if tl_ids and not _over_budget():
+                    remaining_budget = None
+                    if max_context_tokens is not None:
+                        try:
+                            remaining_budget = max_context_tokens - total_tokens
+                        except Exception:
                             remaining_budget = None
-                            if max_context_tokens is not None:
-                                try:
-                                    remaining_budget = max_context_tokens - total_tokens
-                                except Exception:
-                                    remaining_budget = None
-                            if remaining_budget is None or remaining_budget > 500:
-                                chunk_ids_tl = get_chunks_for_timeline_events(
+                    if remaining_budget is None or remaining_budget > 500:
+                        chunk_ids_tl = get_chunks_for_timeline_events(
+                            project_id,
+                            tl_ids,
+                            max_chunks=40,
+                        )
+                        if chunk_ids_tl:
+                            # Loại bỏ các chunk_id đã được dùng ở luồng chunk chính để tránh trùng context/sources.
+                            unique_chunk_ids_tl = _dedupe_new_chunk_ids(
+                                used_chunk_ids_main,
+                                [str(cid) for cid in chunk_ids_tl if cid],
+                            )
+                            if unique_chunk_ids_tl:
+                                token_limit_tl = CHUNK_MAX_TOKENS // 2
+                                if remaining_budget is not None:
+                                    token_limit_tl = max(1000, min(token_limit_tl, remaining_budget))
+                                chunk_ctx_tl, chunk_sources_tl, chunk_tokens_tl = ContextManager.build_context_with_chunk_reverse_lookup(
                                     project_id,
-                                    tl_ids,
-                                    max_chunks=40,
+                                    unique_chunk_ids_tl,
+                                    current_arc_id,
+                                    token_limit=token_limit_tl,
                                 )
-                                if chunk_ids_tl:
-                                    # Loại bỏ các chunk_id đã được dùng ở luồng chunk chính để tránh trùng context/sources.
-                                    unique_chunk_ids_tl = _dedupe_new_chunk_ids(
-                                        used_chunk_ids_main,
-                                        [str(cid) for cid in chunk_ids_tl if cid],
+                                if chunk_ctx_tl:
+                                    context_parts.append("\n--- SCENES FOR TIMELINE EVENTS ---\n" + chunk_ctx_tl)
+                                    total_tokens += chunk_tokens_tl
+                                    sources.extend(chunk_sources_tl)
+                                    context_parts_meta.append(
+                                        {"source": "chunk", "chapter_numbers": chapter_numbers[:20], "text": chunk_ctx_tl}
                                     )
-                                    if unique_chunk_ids_tl:
-                                        token_limit_tl = CHUNK_MAX_TOKENS // 2
-                                        if remaining_budget is not None:
-                                            token_limit_tl = max(1000, min(token_limit_tl, remaining_budget))
-                                        chunk_ctx_tl, chunk_sources_tl, chunk_tokens_tl = ContextManager.build_context_with_chunk_reverse_lookup(
-                                            project_id,
-                                            unique_chunk_ids_tl,
-                                            current_arc_id,
-                                            token_limit=token_limit_tl,
-                                        )
-                                        if chunk_ctx_tl:
-                                            context_parts.append("\n--- SCENES FOR TIMELINE EVENTS ---\n" + chunk_ctx_tl)
-                                            total_tokens += chunk_tokens_tl
-                                            sources.extend(chunk_sources_tl)
-                                            context_parts_meta.append(
-                                                {"source": "chunk", "chapter_numbers": chapter_numbers[:20], "text": chunk_ctx_tl}
-                                            )
             except Exception as _e:
                 print(f"timeline->chunk reverse lookup error: {_e}")
         else:
