@@ -71,9 +71,11 @@ def render_timeline_tab(project_id):
         ch_list = supabase.table("chapters").select("id, chapter_number, title").eq("story_id", project_id).order("chapter_number").execute().data or []
         tl_chapter_options = ["Tất cả"] + [f"Chương {r.get('chapter_number', '')}: {r.get('title') or ''}" for r in ch_list]
         tl_chapter_ids = [None] + [r.get("id") for r in ch_list]
+        chapter_number_by_id = {r.get("id"): r.get("chapter_number") for r in ch_list if r.get("id") is not None}
     except Exception:
         tl_chapter_options = ["Tất cả"]
         tl_chapter_ids = [None]
+        chapter_number_by_id = {}
     tl_filter_chapter_idx = st.session_state.get("timeline_filter_chapter", 0)
     tl_filter_chapter_idx = max(0, min(tl_filter_chapter_idx, len(tl_chapter_options) - 1))
     tl_filter_chapter_label = st.selectbox(
@@ -160,6 +162,57 @@ def render_timeline_tab(project_id):
                     with col_b:
                         if st.button("🗑️ Xóa", key=f"tl_del_{eid}"):
                             st.session_state["tl_confirm_delete_id"] = eid
+
+                # Related chunks (read-only) + jump to chunk editor
+                st.markdown("---")
+                st.subheader("📎 Đoạn văn liên quan (Chunks)")
+                try:
+                    ctl = (
+                        supabase.table("chunk_timeline_links")
+                        .select("chunk_id")
+                        .eq("story_id", project_id)
+                        .eq("timeline_event_id", eid)
+                        .limit(100)
+                        .execute()
+                    )
+                    chunk_ids = sorted({row["chunk_id"] for row in (ctl.data or []) if row.get("chunk_id")})
+                except Exception:
+                    chunk_ids = []
+
+                if chunk_ids:
+                    try:
+                        ck_res = (
+                            supabase.table("chunks")
+                            .select("id, content, raw_content, chapter_id, sort_order")
+                            .in_("id", chunk_ids)
+                            .order("sort_order")
+                            .execute()
+                        )
+                        related_chunks = ck_res.data or []
+                    except Exception:
+                        related_chunks = []
+                else:
+                    related_chunks = []
+
+                if related_chunks:
+                    for ck in related_chunks:
+                        ck_id = ck.get("id")
+                        txt = (ck.get("content") or ck.get("raw_content") or "").strip()
+                        first_line = txt.split("\n")[0][:180] if txt else ""
+                        ch_id = ck.get("chapter_id")
+                        ch_num = chapter_number_by_id.get(ch_id) if ch_id and isinstance(chapter_number_by_id, dict) else None
+                        prefix = f"Chương {ch_num}" if ch_num is not None else "Chương ?"
+                        col_info, col_btn = st.columns([5, 2])
+                        with col_info:
+                            st.caption(f"{prefix} – {first_line}")
+                        with col_btn:
+                            if st.button("📝 Edit links for this chunk", key=f"tl_edit_chunk_links_{eid}_{ck_id}"):
+                                st.session_state["main_tab_idx"] = 1  # "📚 Knowledge"
+                                st.session_state["sub_tab_idx_knowledge"] = 2  # "✂️ Chunking"
+                                st.session_state["chunking_focus_chunk_id"] = str(ck_id)
+                                st.rerun()
+                else:
+                    st.caption("Chưa có chunk nào được link với sự kiện này.")
 
     if st.session_state.get("tl_confirm_delete_id"):
         del_id = st.session_state["tl_confirm_delete_id"]

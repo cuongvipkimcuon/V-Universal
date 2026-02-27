@@ -171,6 +171,9 @@ def render_chunking_tab(project_id):
             if st.button("Trang sau ➡️", key="chunk_next_page", disabled=(page >= total_pages)):
                 st.session_state["chunking_page"] = min(total_pages, page + 1)
                 st.rerun()
+    focus_chunk_id = str(st.session_state.get("chunking_focus_chunk_id") or "") if st.session_state.get("chunking_focus_chunk_id") else ""
+    focus_consumed = False
+
     for c in chunks_list:
             cid = c.get("id")
             content = (c.get("content") or c.get("raw_content") or "").strip()
@@ -195,7 +198,12 @@ def render_chunking_tab(project_id):
 
             sync_badge = " 🔄 Chưa đồng bộ" if cid in ids_no_embedding else ""
 
-            with st.expander(f"Chunk: {label} — {content}{sync_badge}", expanded=False):
+            expanded = bool(focus_chunk_id and str(cid) == focus_chunk_id)
+            with st.expander(f"Chunk: {label} — {content}{sync_badge}", expanded=expanded):
+                if expanded and not focus_consumed:
+                    # Chỉ focus lần đầu, sau đó xóa để tránh giữ state không cần thiết
+                    focus_consumed = True
+                    st.session_state.pop("chunking_focus_chunk_id", None)
                 if cid in ids_no_embedding:
                     st.caption("🔄 Chưa đồng bộ vector — bấm **Đồng bộ vector (Chunks)** trên để cập nhật.")
                 st.text(content)
@@ -345,6 +353,273 @@ def render_chunking_tab(project_id):
                                     st.success("Đã cập nhật nội dung. Embedding đang để NULL (có thể đồng bộ sau).")
                             except Exception as e:
                                 st.error(str(e))
+
+                # --- Linked Bible / Timeline (manual editor trên dữ liệu đã có) ---
+                st.markdown("---")
+                st.subheader("🔗 Linked Bible")
+                try:
+                    cbl_res = (
+                        supabase.table("chunk_bible_links")
+                        .select("id, bible_entry_id, mention_role, sort_order")
+                        .eq("story_id", project_id)
+                        .eq("chunk_id", cid)
+                        .order("sort_order")
+                        .execute()
+                    )
+                    bible_links = cbl_res.data or []
+                    bible_ids = [row["bible_entry_id"] for row in bible_links if row.get("bible_entry_id")]
+                    bible_map = {}
+                    if bible_ids:
+                        b_res = (
+                            supabase.table("story_bible")
+                            .select("id, entity_name, source_chapter")
+                            .in_("id", bible_ids)
+                            .execute()
+                        )
+                        bible_map = {row["id"]: row for row in (b_res.data or []) if row.get("id")}
+                except Exception:
+                    bible_links = []
+                    bible_map = {}
+
+                if bible_links and bible_map:
+                    for bl in bible_links:
+                        bid = bl.get("bible_entry_id")
+                        b_row = bible_map.get(bid)
+                        if not b_row:
+                            continue
+                        b_name = b_row.get("entity_name") or ""
+                        b_ch = b_row.get("source_chapter")
+                        chip_label = f"[Ch.{b_ch}] {b_name}" if b_ch is not None else b_name
+                        col_lbl, col_rm = st.columns([5, 1])
+                        with col_lbl:
+                            st.caption(chip_label)
+                        with col_rm:
+                            if can_write and st.button("❌", key=f"cbl_del_{cid}_{bl.get('id')}"):
+                                try:
+                                    supabase.table("chunk_bible_links").delete().eq("id", bl.get("id")).execute()
+                                    st.toast("Đã gỡ link Bible.")
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(str(e))
+                else:
+                    st.caption("Chưa có Bible nào được link với chunk này.")
+
+                if can_write:
+                    st.markdown("**Thêm link Bible**")
+                    search_kw = st.text_input(
+                        "Search Bible theo tên",
+                        key=f"cbl_search_kw_{cid}",
+                        placeholder="Nhập từ khóa entity_name...",
+                    )
+                    same_chapter_only = st.checkbox(
+                        "Chỉ Bible cùng chương",
+                        value=True,
+                        key=f"cbl_same_ch_{cid}",
+                        help="Giữ danh sách ngắn, dễ chọn.",
+                    )
+                    bible_search_results = []
+                    if search_kw and search_kw.strip():
+                        try:
+                            q = (
+                                supabase.table("story_bible")
+                                .select("id, entity_name, source_chapter")
+                                .eq("story_id", project_id)
+                                .not_.ilike("entity_name", "[RULE]%")
+                                .not_.ilike("entity_name", "[CHAT]%")
+                                .ilike("entity_name", f"%{search_kw.strip()}%")
+                                .limit(50)
+                            )
+                            ch_id = c.get("chapter_id")
+                            ch_num = None
+                            if ch_id and isinstance(chapter_number_by_id, dict):
+                                ch_num = chapter_number_by_id.get(ch_id)
+                            if same_chapter_only and ch_num is not None:
+                                q = q.eq("source_chapter", ch_num)
+                            bible_search_results = q.execute().data or []
+                        except Exception:
+                            bible_search_results = []
+
+                    if bible_search_results:
+                        options = {}
+                        for row in bible_search_results:
+                            name = row.get("entity_name") or ""
+                            sc = row.get("source_chapter")
+                            opt_label = f"[Ch.{sc}] {name}" if sc is not None else name
+                            options[opt_label] = row.get("id")
+                        selected_labels = st.multiselect(
+                            "Chọn Bible để link",
+                            list(options.keys()),
+                            key=f"cbl_select_{cid}",
+                        )
+                        if st.button("➕ Thêm link Bible", key=f"cbl_add_{cid}"):
+                            selected_ids = [options[lbl] for lbl in selected_labels if lbl in options]
+                            existing_ids = {row.get("bible_entry_id") for row in bible_links}
+                            rows_to_insert = []
+                            sort_start = len(bible_links)
+                            for bid in selected_ids:
+                                if not bid or bid in existing_ids:
+                                    continue
+                                rows_to_insert.append(
+                                    {
+                                        "story_id": project_id,
+                                        "chunk_id": cid,
+                                        "bible_entry_id": bid,
+                                        "mention_role": "manual",
+                                        "sort_order": sort_start,
+                                    }
+                                )
+                                sort_start += 1
+                            if rows_to_insert:
+                                try:
+                                    supabase.table("chunk_bible_links").insert(rows_to_insert).execute()
+                                    st.success("Đã thêm link Bible.")
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(str(e))
+                            else:
+                                st.info("Không có link mới để thêm (có thể đã tồn tại).")
+
+                st.markdown("---")
+                st.subheader("⏱️ Linked Timeline")
+                try:
+                    ctl_res = (
+                        supabase.table("chunk_timeline_links")
+                        .select("id, timeline_event_id, mention_role, sort_order")
+                        .eq("story_id", project_id)
+                        .eq("chunk_id", cid)
+                        .order("sort_order")
+                        .execute()
+                    )
+                    timeline_links = ctl_res.data or []
+                    timeline_ids = [row["timeline_event_id"] for row in timeline_links if row.get("timeline_event_id")]
+                    timeline_map = {}
+                    if timeline_ids:
+                        t_res = (
+                            supabase.table("timeline_events")
+                            .select("id, title, description, chapter_id, event_order")
+                            .in_("id", timeline_ids)
+                            .execute()
+                        )
+                        timeline_map = {row["id"]: row for row in (t_res.data or []) if row.get("id")}
+                except Exception:
+                    timeline_links = []
+                    timeline_map = {}
+
+                if timeline_links and timeline_map:
+                    for tl in timeline_links:
+                        tid = tl.get("timeline_event_id")
+                        t_row = timeline_map.get(tid)
+                        if not t_row:
+                            continue
+                        title = t_row.get("title") or ""
+                        ev_order = t_row.get("event_order")
+                        ch_id = t_row.get("chapter_id")
+                        ch_num = None
+                        if ch_id and isinstance(chapter_number_by_id, dict):
+                            ch_num = chapter_number_by_id.get(ch_id)
+                        prefix = ""
+                        if ch_num is not None:
+                            prefix = f"[Ch.{ch_num}] "
+                        if ev_order is not None:
+                            prefix += f"#{ev_order} "
+                        chip_label = f"{prefix}{title}"
+                        col_lbl, col_rm = st.columns([5, 1])
+                        with col_lbl:
+                            st.caption(chip_label)
+                        with col_rm:
+                            if can_write and st.button("❌", key=f"ctl_del_{cid}_{tl.get('id')}"):
+                                try:
+                                    supabase.table("chunk_timeline_links").delete().eq("id", tl.get("id")).execute()
+                                    st.toast("Đã gỡ link Timeline.")
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(str(e))
+                else:
+                    st.caption("Chưa có sự kiện Timeline nào được link với chunk này.")
+
+                if can_write:
+                    st.markdown("**Thêm link Timeline**")
+                    tl_search_kw = st.text_input(
+                        "Search Timeline theo tiêu đề/mô tả",
+                        key=f"ctl_search_kw_{cid}",
+                        placeholder="Nhập từ khóa...",
+                    )
+                    same_chapter_tl_only = st.checkbox(
+                        "Chỉ sự kiện cùng chương",
+                        value=True,
+                        key=f"ctl_same_ch_{cid}",
+                        help="Giữ danh sách ngắn, dễ chọn.",
+                    )
+                    timeline_search_results = []
+                    if tl_search_kw and tl_search_kw.strip():
+                        try:
+                            q = (
+                                supabase.table("timeline_events")
+                                .select("id, title, description, chapter_id, event_order")
+                                .eq("story_id", project_id)
+                                .order("event_order")
+                            )
+                            ch_id = c.get("chapter_id")
+                            if same_chapter_tl_only and ch_id:
+                                q = q.eq("chapter_id", ch_id)
+                            # Tìm theo title hoặc description
+                            kw = tl_search_kw.strip()
+                            q = q.or_(f"title.ilike.%{kw}%,description.ilike.%{kw}%")
+                            timeline_search_results = q.limit(50).execute().data or []
+                        except Exception:
+                            timeline_search_results = []
+
+                    if timeline_search_results:
+                        tl_options = {}
+                        for row in timeline_search_results:
+                            ch_id = row.get("chapter_id")
+                            ch_num = None
+                            if ch_id and isinstance(chapter_number_by_id, dict):
+                                ch_num = chapter_number_by_id.get(ch_id)
+                            ev_order = row.get("event_order")
+                            title = row.get("title") or ""
+                            preview = (row.get("description") or "").strip().split("\n")[0][:80]
+                            label_prefix = ""
+                            if ch_num is not None:
+                                label_prefix += f"[Ch.{ch_num}] "
+                            if ev_order is not None:
+                                label_prefix += f"#{ev_order} "
+                            opt_label = f"{label_prefix}{title}"
+                            if preview:
+                                opt_label += f" — {preview}"
+                            tl_options[opt_label] = row.get("id")
+                        selected_tl_labels = st.multiselect(
+                            "Chọn sự kiện Timeline để link",
+                            list(tl_options.keys()),
+                            key=f"ctl_select_{cid}",
+                        )
+                        if st.button("➕ Thêm link Timeline", key=f"ctl_add_{cid}"):
+                            selected_ids = [tl_options[lbl] for lbl in selected_tl_labels if lbl in tl_options]
+                            existing_tids = {row.get("timeline_event_id") for row in timeline_links}
+                            rows_to_insert = []
+                            sort_start = len(timeline_links)
+                            for tid in selected_ids:
+                                if not tid or tid in existing_tids:
+                                    continue
+                                rows_to_insert.append(
+                                    {
+                                        "story_id": project_id,
+                                        "chunk_id": cid,
+                                        "timeline_event_id": tid,
+                                        "mention_role": "manual",
+                                        "sort_order": sort_start,
+                                    }
+                                )
+                                sort_start += 1
+                            if rows_to_insert:
+                                try:
+                                    supabase.table("chunk_timeline_links").insert(rows_to_insert).execute()
+                                    st.success("Đã thêm link Timeline.")
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(str(e))
+                            else:
+                                st.info("Không có link mới để thêm (có thể đã tồn tại).")
 
                 if can_delete and st.button("🗑️ Xóa", key=f"chunk_del_{cid}"):
                     supabase.table("chunks").delete().eq("id", cid).execute()

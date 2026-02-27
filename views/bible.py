@@ -251,12 +251,14 @@ def render_bible_tab(project_id, persona):
 
     # Filter theo chương (source_chapter)
     try:
-        ch_list = supabase.table("chapters").select("chapter_number, title").eq("story_id", project_id).order("chapter_number").execute().data or []
+        ch_list = supabase.table("chapters").select("id, chapter_number, title").eq("story_id", project_id).order("chapter_number").execute().data or []
         chapter_options = ["Tất cả"] + [f"Chương {r.get('chapter_number', '')}: {r.get('title') or ''}" for r in ch_list]
         chapter_nums = [None] + [r.get("chapter_number") for r in ch_list]
+        chapter_number_by_id = {r.get("id"): r.get("chapter_number") for r in ch_list if r.get("id") is not None}
     except Exception:
         chapter_options = ["Tất cả"]
         chapter_nums = [None]
+        chapter_number_by_id = {}
     bible_filter_chapter_idx = st.session_state.get("bible_filter_chapter", 0)
     bible_filter_chapter_idx = max(0, min(bible_filter_chapter_idx, len(chapter_options) - 1))
     filter_chapter_label = st.selectbox(
@@ -679,6 +681,58 @@ def render_bible_tab(project_id, persona):
                                     st.error(f"Lỗi: {ex}")
                         else:
                             st.warning("Chọn entity và nhập loại quan hệ.")
+
+                # Related chunks (read-only) + jump to chunk editor
+                st.markdown("---")
+                st.subheader("📎 Đoạn văn liên quan (Chunks)")
+                try:
+                    cbl = (
+                        supabase.table("chunk_bible_links")
+                        .select("chunk_id")
+                        .eq("story_id", project_id)
+                        .eq("bible_entry_id", entry["id"])
+                        .limit(100)
+                        .execute()
+                    )
+                    chunk_ids = sorted({row["chunk_id"] for row in (cbl.data or []) if row.get("chunk_id")})
+                except Exception:
+                    chunk_ids = []
+
+                if chunk_ids:
+                    try:
+                        ck_res = (
+                            supabase.table("chunks")
+                            .select("id, content, raw_content, chapter_id, sort_order")
+                            .in_("id", chunk_ids)
+                            .order("sort_order")
+                            .execute()
+                        )
+                        related_chunks = ck_res.data or []
+                    except Exception:
+                        related_chunks = []
+                else:
+                    related_chunks = []
+
+                if related_chunks:
+                    for ck in related_chunks:
+                        ck_id = ck.get("id")
+                        txt = (ck.get("content") or ck.get("raw_content") or "").strip()
+                        first_line = txt.split("\n")[0][:180] if txt else ""
+                        ch_id = ck.get("chapter_id")
+                        ch_num = chapter_number_by_id.get(ch_id) if ch_id and isinstance(chapter_number_by_id, dict) else None
+                        prefix = f"Chương {ch_num}" if ch_num is not None else "Chương ?"
+                        col_info, col_btn = st.columns([5, 2])
+                        with col_info:
+                            st.caption(f"{prefix} – {first_line}")
+                        with col_btn:
+                            if st.button("📝 Edit links for this chunk", key=f"bible_edit_chunk_{entry['id']}_{ck_id}"):
+                                # Nhảy sang tab Knowledge → Chunking và focus vào chunk này
+                                st.session_state["main_tab_idx"] = 1  # "📚 Knowledge"
+                                st.session_state["sub_tab_idx_knowledge"] = 2  # "✂️ Chunking" trong TAB_STRUCTURE["knowledge"]
+                                st.session_state["chunking_focus_chunk_id"] = str(ck_id)
+                                st.rerun()
+                else:
+                    st.caption("Chưa có chunk nào được link với entry này.")
 
         if st.session_state.get('editing_bible_entry'):
             entry = st.session_state['editing_bible_entry']
