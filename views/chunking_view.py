@@ -176,13 +176,23 @@ def render_chunking_tab(project_id):
             content = (c.get("content") or c.get("raw_content") or "").strip()
             meta = c.get("meta_json") or {}
             sm = meta.get("source_metadata", meta) if isinstance(meta, dict) else meta
-            label = (
+            # Label gốc từ nguồn import/file
+            base_label = (
                 sm.get("sheet_name", "")
                 or sm.get("source_file", "")
                 or (meta.get("title") if isinstance(meta, dict) else "")
                 or c.get("source_type", "")
                 or str(cid or "")[:8]
             )
+            # Thêm thông tin chương + id để dễ debug
+            ch_id = c.get("chapter_id")
+            ch_num = None
+            if ch_id and isinstance(chapter_number_by_id, dict):
+                ch_num = chapter_number_by_id.get(ch_id)
+            ch_prefix = f"[Ch.{ch_num}]" if ch_num is not None else ""
+            id_suffix = f" #{str(cid)[:8]}" if cid else ""
+            label = f"{ch_prefix} {base_label}{id_suffix}".strip()
+
             short = (content[:60] + "…") if len(content) > 60 else content
             sync_badge = " 🔄 Chưa đồng bộ" if cid in ids_no_embedding else ""
 
@@ -190,6 +200,12 @@ def render_chunking_tab(project_id):
                 if cid in ids_no_embedding:
                     st.caption("🔄 Chưa đồng bộ vector — bấm **Đồng bộ vector (Chunks)** trên để cập nhật.")
                 st.text(content[:500] + ("…" if len(content) > 500 else ""))
+
+                # Hiển thị nhanh danh sách entity đã gắn cho chunk (nếu có) để dễ debug
+                if isinstance(meta, dict):
+                    ents = meta.get("chunk_entities") or []
+                    if isinstance(ents, list) and ents:
+                        st.caption("🔗 Entities: " + ", ".join(str(e) for e in ents[:20]))
 
                 if can_write:
                     edit_key = f"chunk_edit_{cid}"

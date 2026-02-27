@@ -12,8 +12,8 @@ ORDERED_TARGETS = ["bible", "timeline", "chunking", "relation"]
 # Lazy imports inside run_data_operation để tránh circular / streamlit khi import top-level.
 
 
-# Ngưỡng tối thiểu ước lượng ~500 token cho mỗi chunk trước khi dừng gộp.
-MIN_CHUNK_TOKENS = 500
+# Ngưỡng tối thiểu ước lượng ~800 token cho mỗi chunk trước khi dừng gộp.
+MIN_CHUNK_TOKENS = 800
 
 
 def _estimate_tokens_safe(text: str) -> int:
