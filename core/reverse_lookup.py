@@ -139,8 +139,19 @@ class ReverseLookupAssembler:
         """
         Build full context string from multiple chunks (triangle for each).
         Returns (assembled_text, list of source labels for UI).
+        Dedupe chunk_ids by first occurrence so mỗi chunk chỉ xuất hiện tối đa một lần trong context.
         """
         from ai_engine import AIService
+        # Dedupe giữ thứ tự: đảm bảo không bao giờ output trùng chunk dù caller truyền trùng.
+        seen = set()
+        deduped_ids: List[str] = []
+        for cid in chunk_ids:
+            cid_str = (cid if isinstance(cid, str) else str(cid)).strip() if cid else ""
+            if cid_str and cid_str not in seen:
+                seen.add(cid_str)
+                deduped_ids.append(cid_str)
+        chunk_ids = deduped_ids
+
         total_tokens = 0
         blocks = []
         sources = []

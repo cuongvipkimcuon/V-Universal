@@ -134,6 +134,21 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
     target_files = ctx.get("target_files") or []
     target_bible_entities = ctx.get("target_bible_entities") or []
 
+    # Track chunk_ids đã inject từ luồng chunk chính để tránh nạp lại ở luồng timeline.
+    used_chunk_ids_main = set()
+
+    def _dedupe_new_chunk_ids(existing_ids, new_ids):
+        """
+        Giữ lại thứ tự new_ids nhưng loại bỏ id đã xuất hiện trong existing_ids.
+        existing_ids sẽ được cập nhật tại chỗ.
+        """
+        out = []
+        for cid in new_ids:
+            if cid and cid not in existing_ids:
+                existing_ids.add(cid)
+                out.append(cid)
+        return out
+
     # query_Sql
     if intent == "query_Sql":
         arc_id = current_arc_id
@@ -429,27 +444,31 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
                     )
                 except Exception:
                     bible_chunk_ids = []
-            # Gộp và dedupe: chunk (LLM+vector) trước, rồi tới chunk theo chương, rồi chunk từ bible.
+            # Gộp và dedupe: chunk (LLM+vector) trước, rồi tới chunk theo chương, rồi chunk từ bible. Chuẩn hóa str để dedupe chéo nguồn chính xác.
             all_chunk_ids: List[str] = []
             seen_ids = set()
             for cid in (chunk_ids_primary or []) + (extra_chunk_ids or []) + (bible_chunk_ids or []):
-                if cid and cid not in seen_ids:
-                    seen_ids.add(cid)
-                    all_chunk_ids.append(cid)
+                cid_str = (str(cid).strip() if cid else "") or None
+                if cid_str and cid_str not in seen_ids:
+                    seen_ids.add(cid_str)
+                    all_chunk_ids.append(cid_str)
             if all_chunk_ids:
                 # Ưu tiên chunk đã link từ Bible (bible_chunk_ids) để tận dụng dữ liệu cấu trúc,
                 # sau đó mới đến chunk trúng vector/LLM và chunk theo chapter_range.
                 ordered_ids: List[str] = []
                 seen_ordered = set()
                 for cid in (bible_chunk_ids or []) + (chunk_ids_primary or []) + (extra_chunk_ids or []):
-                    if cid and cid not in seen_ordered and cid in all_chunk_ids:
-                        seen_ordered.add(cid)
-                        ordered_ids.append(cid)
+                    cid_str = (str(cid).strip() if cid else "") or None
+                    if cid_str and cid_str not in seen_ordered and cid_str in all_chunk_ids:
+                        seen_ordered.add(cid_str)
+                        ordered_ids.append(cid_str)
                 if not ordered_ids:
                     ordered_ids = all_chunk_ids
                 chunk_ctx, chunk_sources, chunk_tokens = ContextManager.build_context_with_chunk_reverse_lookup(
                     project_id, ordered_ids, current_arc_id, token_limit=CHUNK_MAX_TOKENS
                 )
+                # Luôn đánh dấu các chunk_id đã dùng (kể cả khi chunk_ctx rỗng) để timeline không nạp lại.
+                used_chunk_ids_main.update(ordered_ids)
                 if chunk_ctx:
                     for c in chunk_rows:
                         ch = c.get("chapter_id")
@@ -738,36 +757,42 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
                 from ai.context_helpers import get_chunks_for_timeline_events
 
                 tl_ids = [e.get("id") for e in events if e.get("id")]
-                if tl_ids and not _over_budget():
-                    remaining_budget = None
-                    if max_context_tokens is not None:
-                        try:
-                            remaining_budget = max_context_tokens - total_tokens
-                        except Exception:
+                        if tl_ids and not _over_budget():
                             remaining_budget = None
-                    if remaining_budget is None or remaining_budget > 500:
-                        chunk_ids_tl = get_chunks_for_timeline_events(
-                            project_id,
-                            tl_ids,
-                            max_chunks=40,
-                        )
-                        if chunk_ids_tl:
-                            token_limit_tl = CHUNK_MAX_TOKENS // 2
-                            if remaining_budget is not None:
-                                token_limit_tl = max(1000, min(token_limit_tl, remaining_budget))
-                            chunk_ctx_tl, chunk_sources_tl, chunk_tokens_tl = ContextManager.build_context_with_chunk_reverse_lookup(
-                                project_id,
-                                chunk_ids_tl,
-                                current_arc_id,
-                                token_limit=token_limit_tl,
-                            )
-                            if chunk_ctx_tl:
-                                context_parts.append("\n--- SCENES FOR TIMELINE EVENTS ---\n" + chunk_ctx_tl)
-                                total_tokens += chunk_tokens_tl
-                                sources.extend(chunk_sources_tl)
-                                context_parts_meta.append(
-                                    {"source": "chunk", "chapter_numbers": chapter_numbers[:20], "text": chunk_ctx_tl}
+                            if max_context_tokens is not None:
+                                try:
+                                    remaining_budget = max_context_tokens - total_tokens
+                                except Exception:
+                                    remaining_budget = None
+                            if remaining_budget is None or remaining_budget > 500:
+                                chunk_ids_tl = get_chunks_for_timeline_events(
+                                    project_id,
+                                    tl_ids,
+                                    max_chunks=40,
                                 )
+                                if chunk_ids_tl:
+                                    # Loại bỏ các chunk_id đã được dùng ở luồng chunk chính để tránh trùng context/sources.
+                                    unique_chunk_ids_tl = _dedupe_new_chunk_ids(
+                                        used_chunk_ids_main,
+                                        [str(cid) for cid in chunk_ids_tl if cid],
+                                    )
+                                    if unique_chunk_ids_tl:
+                                        token_limit_tl = CHUNK_MAX_TOKENS // 2
+                                        if remaining_budget is not None:
+                                            token_limit_tl = max(1000, min(token_limit_tl, remaining_budget))
+                                        chunk_ctx_tl, chunk_sources_tl, chunk_tokens_tl = ContextManager.build_context_with_chunk_reverse_lookup(
+                                            project_id,
+                                            unique_chunk_ids_tl,
+                                            current_arc_id,
+                                            token_limit=token_limit_tl,
+                                        )
+                                        if chunk_ctx_tl:
+                                            context_parts.append("\n--- SCENES FOR TIMELINE EVENTS ---\n" + chunk_ctx_tl)
+                                            total_tokens += chunk_tokens_tl
+                                            sources.extend(chunk_sources_tl)
+                                            context_parts_meta.append(
+                                                {"source": "chunk", "chapter_numbers": chapter_numbers[:20], "text": chunk_ctx_tl}
+                                            )
             except Exception as _e:
                 print(f"timeline->chunk reverse lookup error: {_e}")
         else:
@@ -1634,6 +1659,16 @@ TRẢ VỀ JSON:
         sources = ctx["sources"]
         total_tokens = ctx["total_tokens"]
         context_parts_meta = ctx.get("context_parts_meta") or []
+
+        # Dedupe nguồn để log/debug_notes gọn hơn (giữ thứ tự xuất hiện).
+        if sources:
+            _seen_src = set()
+            _dedup_sources = []
+            for s in sources:
+                if s not in _seen_src:
+                    _seen_src.add(s)
+                    _dedup_sources.append(s)
+            sources = _dedup_sources
 
         context_str = "\n".join(context_parts)
         if max_context_tokens is not None and total_tokens > max_context_tokens:
