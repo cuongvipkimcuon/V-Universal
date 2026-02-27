@@ -707,6 +707,7 @@ def _worker_data_analyze_chunk(
         sval = str(strategy.get("split_value", "2000")).strip()
         if stype == "by_length":
             from utils.chunk_tools import split_text_by_length_with_overlap
+
             chunk_size = int(sval) if sval.isdigit() else 2000
             chunk_size = max(500, min(chunk_size, 50000))
             overlap = min(200, chunk_size // 10)
@@ -715,7 +716,18 @@ def _worker_data_analyze_chunk(
             chunks_list = execute_split_logic(content, stype, sval)
         if not chunks_list:
             chunks_list = execute_split_logic(content, "by_length", "2000")
-        edited = [{"title": c.get("title", ""), "content": (c.get("content") or "").strip(), "order": c.get("order", i + 1)} for i, c in enumerate(chunks_list)]
+        # Gộp các chunk quá ngắn dựa trên logic min_tokens dùng chung trong data_operation_jobs
+        if chunks_list:
+            try:
+                from core.data_operation_jobs import _merge_small_chunks
+
+                chunks_list = _merge_small_chunks(chunks_list)
+            except Exception:
+                pass
+        edited = [
+            {"title": c.get("title", ""), "content": (c.get("content") or "").strip(), "order": c.get("order", i + 1)}
+            for i, c in enumerate(chunks_list)
+        ]
         if job_id:
             save_llm_result(job_id, "data_analyze_chunk", str(chap_num), {"strategy": strategy, "chunks": edited}, status="success")
     append_only = bool(payload.get("append_only", False))

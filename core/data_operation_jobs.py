@@ -2,7 +2,7 @@
 """Chạy trong thread sau khi user xác nhận. Ghi audit vào data_operation_log và tin nhắn hoàn thành vào chat_history."""
 import time
 from datetime import datetime, timezone
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Dict, Any
 
 # Tối đa 7 chương / lô (fallback khi không ước lượng được token).
 MAX_CHAPTERS_PER_BATCH = 7
@@ -10,6 +10,66 @@ MAX_CHAPTERS_PER_BATCH = 7
 ORDERED_TARGETS = ["bible", "timeline", "chunking", "relation"]
 
 # Lazy imports inside run_data_operation để tránh circular / streamlit khi import top-level.
+
+
+# Ngưỡng tối thiểu ước lượng ~500 token cho mỗi chunk trước khi dừng gộp.
+MIN_CHUNK_TOKENS = 500
+
+
+def _estimate_tokens_safe(text: str) -> int:
+    """Ước lượng nhanh số token cho một đoạn text (dùng để merge chunk nhỏ)."""
+    if not text:
+        return 0
+    try:
+        from ai_engine import AIService  # local import để tránh circular
+
+        return int(AIService.estimate_tokens(text))
+    except Exception:
+        # Fallback xấp xỉ: 1 token ~ 4 ký tự
+        return max(1, len(text) // 4)
+
+
+def _merge_small_chunks(
+    chunks_list: List[Dict[str, Any]],
+    min_tokens: int = MIN_CHUNK_TOKENS,
+) -> List[Dict[str, Any]]:
+    """
+    Sau khi cắt chunk (theo keyword/length), gộp các chunk quá ngắn lại với hàng xóm phía sau
+    cho tới khi đạt tối thiểu min_tokens (ước lượng). Giữ nguyên thứ tự logic trong chương.
+    """
+    if not chunks_list or min_tokens <= 0:
+        return chunks_list or []
+
+    merged: List[Dict[str, Any]] = []
+    buffer: Optional[Dict[str, Any]] = None
+
+    for c in chunks_list:
+        txt = (c.get("content") or "").strip()
+        if not txt:
+            continue
+        if buffer is None:
+            buffer = dict(c)
+            buffer["content"] = txt
+            continue
+
+        cur_tokens = _estimate_tokens_safe(buffer.get("content") or "")
+        if cur_tokens < min_tokens:
+            # Gộp chunk hiện tại vào buffer (giữ title/order của buffer)
+            sep = "\n\n" if buffer["content"] and not buffer["content"].endswith("\n") else "\n"
+            buffer["content"] = (buffer["content"].rstrip() + sep + txt).strip()
+        else:
+            merged.append(buffer)
+            buffer = dict(c)
+            buffer["content"] = txt
+
+    if buffer is not None:
+        merged.append(buffer)
+
+    # Chuẩn hóa lại order liên tiếp 1..N
+    for idx, item in enumerate(merged, 1):
+        item["order"] = idx
+
+    return merged
 
 
 def run_data_operation(
@@ -616,6 +676,7 @@ def _do_extract_chunking(supabase, project_id: str, chapter_id, arc_id, chap_num
     sval = str(strategy.get("split_value", "2000")).strip()
     if stype == "by_length":
         from utils.chunk_tools import split_text_by_length_with_overlap
+
         chunk_size = int(sval) if sval.isdigit() else 2000
         chunk_size = max(500, min(chunk_size, 50000))
         overlap = min(200, chunk_size // 10)
@@ -624,7 +685,13 @@ def _do_extract_chunking(supabase, project_id: str, chapter_id, arc_id, chap_num
         chunks_list = execute_split_logic(content, stype, sval)
     if not chunks_list:
         chunks_list = execute_split_logic(content, "by_length", "2000")
-    edited = [{"title": c.get("title", ""), "content": (c.get("content") or "").strip(), "order": c.get("order", i + 1)} for i, c in enumerate(chunks_list or [])]
+    # Gộp các chunk quá ngắn dựa trên min_tokens để tránh 1–2 câu / chunk
+    if chunks_list:
+        chunks_list = _merge_small_chunks(chunks_list)
+    edited = [
+        {"title": c.get("title", ""), "content": (c.get("content") or "").strip(), "order": c.get("order", i + 1)}
+        for i, c in enumerate(chunks_list or [])
+    ]
     for idx, chk in enumerate(edited):
         txt = chk.get("content", "").strip()
         if not txt:
@@ -682,11 +749,15 @@ def _do_extract_chunking_batch(supabase, project_id: str, sub: List[int], by_num
             supabase.table("chunks").delete().in_("id", ids).execute()
         if use_overlap:
             from utils.chunk_tools import split_text_by_length_with_overlap
+
             chunks_list = split_text_by_length_with_overlap(content, chunk_size=chunk_size, overlap=overlap_size)
         else:
             chunks_list = execute_split_logic(content, stype, sval)
         if not chunks_list:
             chunks_list = execute_split_logic(content, "by_length", "2000")
+        # Gộp các chunk quá ngắn để tránh bị chia thành quá nhiều mảnh nhỏ
+        if chunks_list:
+            chunks_list = _merge_small_chunks(chunks_list)
         for idx, chk in enumerate(chunks_list or []):
             txt = (chk.get("content") or "").strip()
             if not txt:
