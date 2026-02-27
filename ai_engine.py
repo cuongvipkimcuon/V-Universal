@@ -237,19 +237,49 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
         context_parts_meta = []
         ctx["context_parts_meta"] = context_parts_meta
 
-    def _over_budget() -> bool:
-        if max_context_tokens is None:
-            return False
-        return total_tokens >= max_context_tokens * 0.92
+    # Ngân sách context khả dụng cho toàn bộ nguồn (chỉ dùng tối đa 90% budget của user, 10% để phòng sai số / câu trả lời).
+    usable_tokens = None
+    if max_context_tokens is not None:
+        try:
+            usable_tokens = max(0, int(max_context_tokens * 0.9))
+        except Exception:
+            usable_tokens = None
 
-    # Giới hạn từng lô (token hoặc số mục) để không ảnh hưởng lô khác
-    # Tăng để LLM có đủ không gian cho cửa sổ chunk dày hơn (chunk vector + chunk theo chapter + reverse từ bible).
-    CHUNK_MAX_TOKENS = 20000
-    BIBLE_MAX_ITEMS = 15
-    RELATION_TOP_K = 15
-    RELATION_MAX_ITEMS = 80
-    TIMELINE_MAX_ITEMS = 30
-    TIMELINE_VECTOR_TOP_K = 10
+    def _over_budget() -> bool:
+        if usable_tokens is None:
+            return False
+        return total_tokens >= usable_tokens
+
+    # Phân bổ ngân sách giữa các nguồn context dựa trên usable_tokens.
+    # Nếu không có max_context_tokens (ví dụ call nội bộ), fallback về ngưỡng mặc định cứng.
+    if usable_tokens is not None and usable_tokens > 0:
+        # Chunks là nguồn chính: ~60% ngân sách khả dụng
+        chunk_token_budget = max(2000, int(usable_tokens * 0.6))
+        # Bible: ~15%, Relations: ~10%, Timeline: ~5% (phần còn lại dành cho các nguồn khác đã được add trước đó)
+        bible_token_budget = max(800, int(usable_tokens * 0.15))
+        relation_token_budget = max(500, int(usable_tokens * 0.10))
+        timeline_token_budget = max(400, int(usable_tokens * 0.05))
+
+        # Ước lượng thô số token trung bình cho mỗi item để chuyển ngân sách token thành số lượng item.
+        # Các giá trị này chỉ để scale tương đối theo budget, không cần chính xác tuyệt đối.
+        avg_bible_tokens = 120
+        avg_relation_tokens = 60
+        avg_timeline_tokens = 80
+
+        CHUNK_MAX_TOKENS = chunk_token_budget
+        BIBLE_MAX_ITEMS = max(5, min(80, bible_token_budget // avg_bible_tokens))
+        RELATION_MAX_ITEMS = max(20, min(200, relation_token_budget // avg_relation_tokens))
+        RELATION_TOP_K = min(40, RELATION_MAX_ITEMS)
+        TIMELINE_MAX_ITEMS = max(10, min(80, timeline_token_budget // avg_timeline_tokens))
+        TIMELINE_VECTOR_TOP_K = min(30, TIMELINE_MAX_ITEMS)
+    else:
+        # Fallback khi không có budget rõ ràng
+        CHUNK_MAX_TOKENS = 20000
+        BIBLE_MAX_ITEMS = 15
+        RELATION_TOP_K = 15
+        RELATION_MAX_ITEMS = 80
+        TIMELINE_MAX_ITEMS = 30
+        TIMELINE_VECTOR_TOP_K = 10
 
     query_for_vec = (router_result.get("rewritten_query") or "").strip()
     # Planner targets chi tiết cho từng nguồn (nếu có)

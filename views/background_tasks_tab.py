@@ -32,16 +32,49 @@ def render_background_tasks_tab(project_id):
             ensure_background_job_runner()
             st.success("Đã kích hoạt xử lý hàng đợi. Các job pending (chưa quá hạn) sẽ được chạy lần lượt trong nền.")
 
-    status_filter = st.selectbox(
+    status_filter_label = st.selectbox(
         "Status",
         ["All", "pending", "running", "completed", "failed"],
         key="bg_tasks_filter",
     )
-    status_key = None if status_filter == "All" else status_filter
-    jobs = list_jobs(project_id, status_filter=status_key, limit=80)
+    status_key = None if status_filter_label == "All" else status_filter_label
+
+    # Reset trang khi đổi filter
+    if st.session_state.get("bg_tasks_filter_prev") != status_filter_label:
+        st.session_state["bg_jobs_page"] = 1
+    st.session_state["bg_tasks_filter_prev"] = status_filter_label
+
+    page = max(1, int(st.session_state.get("bg_jobs_page", 1)))
+
+    jobs, total_jobs, total_pages = list_jobs(
+        project_id,
+        status_filter=status_key,
+        page=page,
+        page_size=10,
+    )
     if not jobs:
         st.info("No background jobs yet.")
         return
+
+    # Phân trang giống Bible tab: Prev / Next, hiển thị tổng
+    col_m1, col_m2 = st.columns(2)
+    with col_m1:
+        st.metric("Total Jobs", total_jobs)
+    with col_m2:
+        st.caption(f"Trang {page} / {total_pages} (tối đa 10 job/trang)")
+
+    if total_pages > 1:
+        pcol1, pcol2, pcol3 = st.columns([1, 2, 1])
+        with pcol1:
+            if st.button("⬅️ Trang trước", key="bg_jobs_prev", disabled=(page <= 1)):
+                st.session_state["bg_jobs_page"] = max(1, page - 1)
+                st.rerun()
+        with pcol2:
+            st.write("")
+        with pcol3:
+            if st.button("Trang sau ➡️", key="bg_jobs_next", disabled=(page >= total_pages)):
+                st.session_state["bg_jobs_page"] = min(total_pages, page + 1)
+                st.rerun()
 
     for j in jobs:
         status = j.get("status", "pending")

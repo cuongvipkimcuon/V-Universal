@@ -258,21 +258,59 @@ def retry_job_with_stored_data(job_id: str) -> Dict[str, Any]:
 def list_jobs(
     story_id: str,
     status_filter: Optional[str] = None,
-    limit: int = 80,
+    page: int = 1,
+    page_size: int = 10,
 ) -> List[Dict[str, Any]]:
-    """Lấy danh sách job của dự án, mới nhất trước. status_filter: pending | running | completed | failed hoặc None (tất cả)."""
+    """
+    Lấy danh sách job của dự án, mới nhất trước, với phân trang ở DB.
+    status_filter: pending | running | completed | failed hoặc None (tất cả).
+    Trả về (jobs, total_jobs, total_pages).
+    """
     try:
         from config import init_services
         services = init_services()
         if not services:
-            return []
-        q = services["supabase"].table("background_jobs").select("*").eq("story_id", story_id).order("created_at", desc=True).limit(limit)
-        if status_filter:
-            q = q.eq("status", status_filter)
-        r = q.execute()
-        return list(r.data or [])
+            return [], 0, 1
+        supabase = services["supabase"]
+
+        page = max(1, int(page or 1))
+        page_size = max(1, int(page_size or 10))
+
+        # Đếm tổng số job theo filter (ở DB)
+        try:
+            cq = (
+                supabase.table("background_jobs")
+                .select("id", count="exact")
+                .eq("story_id", story_id)
+            )
+            if status_filter:
+                cq = cq.eq("status", status_filter)
+            count_res = cq.limit(0).execute()
+            total_jobs = getattr(count_res, "count", None) or 0
+        except Exception:
+            total_jobs = 0
+
+        total_pages = max(1, (total_jobs + page_size - 1) // page_size) if total_jobs > 0 else 1
+        page = max(1, min(page, total_pages))
+        offset = (page - 1) * page_size
+
+        try:
+            dq = (
+                supabase.table("background_jobs")
+                .select("*")
+                .eq("story_id", story_id)
+                .order("created_at", desc=True)
+            )
+            if status_filter:
+                dq = dq.eq("status", status_filter)
+            data_res = dq.range(offset, offset + page_size - 1).execute()
+            jobs = list(data_res.data or [])
+        except Exception:
+            jobs = []
+
+        return jobs, total_jobs, total_pages
     except Exception:
-        return []
+        return [], 0, 1
 
 
 def _post_completion_to_chat(project_id: str, user_id: Optional[str], label: str, success: bool, result_summary: Optional[str], error_message: Optional[str]) -> None:

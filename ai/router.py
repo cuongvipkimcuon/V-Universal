@@ -231,8 +231,15 @@ Trả về JSON với đủ key:
             data = json.loads(content)
             intent = (data.get("intent") or "chat_casual").strip().lower()
             if intent not in (
-                "ask_user_clarification", "web_search", "chat_casual", "suggest_v7",
-                "search_context", "query_Sql", "unified", "check_chapter_logic", "numerical_calculation",
+                "ask_user_clarification",
+                "web_search",
+                "chat_casual",
+                "suggest_v7",
+                "search_context",
+                "query_Sql",
+                "unified",
+                "check_chapter_logic",
+                "numerical_calculation",
             ):
                 intent = "chat_casual"
             # Legacy: LLM trả về update_data → coi là unified (chỉ thao tác theo chương).
@@ -246,6 +253,9 @@ Trả về JSON với đủ key:
                 user_low = (user_prompt or "").strip().lower()
                 if not any(p in user_low for p in ("unified", "chạy unified", "run unified")):
                     intent = "search_context"
+            # V9.x: tạm thời gom intent query_Sql về search_context để dùng chung flow search context.
+            if intent == "query_Sql":
+                intent = "search_context"
             needs_data = intent not in INTENTS_NO_DATA
             relevant_rules = (data.get("relevant_rules") or "").strip()
             raw_new_rules = data.get("new_rules") or []
@@ -604,7 +614,8 @@ Bạn là AI Điều Phối Viên (Router) cho hệ thống V7-Universal. Nhiệ
                 result["intent"] = "unified"
             # Chuẩn hóa intent cũ -> search_context
             legacy_search = ("read_full_content", "search_bible", "mixed_context", "manage_timeline", "search_chunks")
-            if result.get("intent") in legacy_search:
+            current_intent = result.get("intent")
+            if current_intent in legacy_search:
                 old = result["intent"]
                 result["intent"] = "search_context"
                 if not result.get("context_needs"):
@@ -618,6 +629,12 @@ Bạn là AI Điều Phối Viên (Router) cho hệ thống V7-Universal. Nhiệ
                         result["context_needs"] = ["bible", "relation"]
                     else:
                         result["context_needs"] = ["bible", "relation", "chapter", "timeline", "chunk"]
+            # V9.x: gom intent query_Sql về search_context để dùng chung flow search context,
+            # giữ nguyên router_result.query_target và module ai.query_sql để xem xét sau.
+            if result.get("intent") == "query_Sql":
+                result["intent"] = "search_context"
+                if not result.get("context_needs"):
+                    result["context_needs"] = ["bible", "relation", "chapter", "timeline", "chunk"]
             # Schema: chuẩn hóa context_needs và context_priority
             if result.get("intent") == "search_context":
                 needs = normalize_context_needs(result.get("context_needs"))
@@ -709,7 +726,16 @@ Chỉ trả về JSON."""
             return SmartAIRouter._single_intent_to_plan(single, user_prompt)
         analysis = data.get("analysis", "")
         verification_required = bool(data.get("verification_required", False))
-        valid_intents = {"numerical_calculation", "search_context", "web_search", "ask_user_clarification", "unified", "query_Sql", "check_chapter_logic", "chat_casual", "multi_chapter_analysis"}
+        valid_intents = {
+            "numerical_calculation",
+            "search_context",
+            "web_search",
+            "ask_user_clarification",
+            "unified",
+            "check_chapter_logic",
+            "chat_casual",
+            "multi_chapter_analysis",
+        }
         normalized_plan = []
         for i, s in enumerate(plan):
             if not isinstance(s, dict):
@@ -727,6 +753,12 @@ Chỉ trả về JSON."""
             args = s.get("args") or {}
             if not isinstance(args, dict):
                 args = {}
+            # V9.x: Planner nếu trả về query_Sql thì gom về search_context để dùng chung flow search context.
+            if intent == "query_Sql":
+                intent = "search_context"
+                args = dict(args)
+                if not args.get("context_needs"):
+                    args["context_needs"] = ["bible", "relation", "chapter", "timeline", "chunk"]
             if intent not in valid_intents:
                 if intent in ("extract_bible", "extract_relation", "extract_timeline", "extract_chunking"):
                     intent = "unified"
@@ -922,7 +954,16 @@ LƯU Ý:
         plan = plan[:3]
         analysis = data.get("analysis", "")
         verification_required = bool(data.get("verification_required", False))
-        valid_intents = {"numerical_calculation", "search_context", "web_search", "ask_user_clarification", "unified", "query_Sql", "check_chapter_logic", "chat_casual", "multi_chapter_analysis"}
+        valid_intents = {
+            "numerical_calculation",
+            "search_context",
+            "web_search",
+            "ask_user_clarification",
+            "unified",
+            "check_chapter_logic",
+            "chat_casual",
+            "multi_chapter_analysis",
+        }
         normalized_plan = []
         for i, s in enumerate(plan):
             if not isinstance(s, dict):
@@ -933,6 +974,12 @@ LƯU Ý:
             args = s.get("args") or {}
             if not isinstance(args, dict):
                 args = {}
+            # V9.x: Planner light nếu trả về query_Sql thì gom về search_context để dùng chung flow search context.
+            if intent == "query_Sql":
+                intent = "search_context"
+                args = dict(args)
+                if not args.get("context_needs"):
+                    args["context_needs"] = ["bible", "relation", "chapter", "timeline", "chunk"]
             if intent not in valid_intents:
                 intent = "search_context"
                 args = dict(args)
