@@ -127,6 +127,102 @@ def get_related_chapter_nums(project_id: str, target_bible_entities: List[str]) 
         return []
 
 
+def get_event_action_chunks_for_characters(
+    project_id: str,
+    character_names: List[str],
+    chapter_range: Optional[Tuple[int, int]] = None,
+    max_chunks: int = 80,
+) -> List[str]:
+    """
+    Lấy danh sách chunk_id từ các EVENT/ACTION trong Bible có nhắc tới các nhân vật (character_names)
+    trong khoảng chapter_range (source_chapter). Ưu tiên:
+    - source_chunk_id trên story_bible (nếu có).
+    - chunk_id từ chunk_bible_links (bible_entry_id là EVENT/ACTION).
+    """
+    if not project_id or not character_names:
+        return []
+    try:
+        services = init_services()
+        if not services:
+            return []
+        supabase = services["supabase"]
+    except Exception:
+        return []
+
+    # Chuẩn hóa tên nhân vật
+    norm_chars = [str(n).strip() for n in character_names if n and str(n).strip()]
+    norm_chars_lower = [n.lower() for n in norm_chars]
+    if not norm_chars_lower:
+        return []
+
+    try:
+        # Lấy toàn bộ EVENT/ACTION cho project; filter theo chapter_range và nhân vật ở Python.
+        r = (
+            supabase.table("story_bible")
+            .select("id, entity_name, description, source_chapter, source_chunk_id")
+            .eq("story_id", project_id)
+            .execute()
+        )
+        rows = list(r.data or [])
+    except Exception:
+        rows = []
+
+    bible_ids: List[Any] = []
+    chunk_ids: List[str] = []
+    start_cr: Optional[int] = None
+    end_cr: Optional[int] = None
+    if chapter_range:
+        try:
+            start_cr, end_cr = int(chapter_range[0]), int(chapter_range[1])
+        except Exception:
+            start_cr = end_cr = None
+
+    for row in rows:
+        ename = (row.get("entity_name") or "").strip()
+        desc = (row.get("description") or "").strip()
+        # Chỉ giữ [EVENT] / [ACTION]
+        if not (ename.startswith("[EVENT]") or ename.startswith("[ACTION]")):
+            continue
+        sc = row.get("source_chapter")
+        if start_cr is not None and end_cr is not None:
+            try:
+                if sc is None or not (start_cr <= int(sc) <= end_cr):
+                    continue
+            except Exception:
+                continue
+        text_low = f"{ename} {desc}".lower()
+        if not any(ch in text_low for ch in norm_chars_lower):
+            continue
+        bid = row.get("id")
+        if bid and bid not in bible_ids:
+            bible_ids.append(bid)
+        scid = row.get("source_chunk_id")
+        if scid and str(scid) not in chunk_ids:
+            chunk_ids.append(str(scid))
+
+    # Từ chunk_bible_links: chunk chứa các EVENT/ACTION đó.
+    if bible_ids and len(chunk_ids) < max_chunks:
+        try:
+            cb = (
+                supabase.table("chunk_bible_links")
+                .select("chunk_id, bible_entry_id")
+                .eq("story_id", project_id)
+                .in_("bible_entry_id", bible_ids)
+                .limit(max_chunks * 3)
+                .execute()
+            )
+            for row in (cb.data or []):
+                cid = row.get("chunk_id")
+                if cid and str(cid) not in chunk_ids:
+                    chunk_ids.append(str(cid))
+                    if len(chunk_ids) >= max_chunks:
+                        break
+        except Exception:
+            pass
+
+    return chunk_ids[:max_chunks]
+
+
 def _get_rules_by_type(
     project_id: str,
     arc_id: Optional[str] = None,

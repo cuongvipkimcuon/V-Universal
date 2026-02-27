@@ -3,10 +3,15 @@ import json
 import re
 from typing import Any, Dict, List, Optional
 
-from config import Config
+from config import Config, init_services
 
 from ai.service import AIService, _get_default_tool_model
 from ai.utils import get_bible_entries
+
+try:
+    from core.arc_service import ArcService  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    ArcService = None  # type: ignore
 
 
 def suggest_relations(content: str, story_id: str) -> List[Dict[str, Any]]:
@@ -215,6 +220,257 @@ Chỉ trả về JSON."""
     except Exception as e:
         print(f"generate_chapter_metadata error: {e}")
         return {"summary": "", "art_style": ""}
+
+
+def _get_supabase():
+    try:
+        services = init_services()
+        return services.get("supabase") if services else None
+    except Exception:
+        return None
+
+
+def _get_relevant_bible_for_chunk(
+    story_id: str,
+    chapter_number: Optional[int],
+    arc_id: Optional[str],
+) -> List[Dict[str, Any]]:
+    """
+    Lấy entity Bible liên quan tới một chunk:
+    - Base: entity có source_chapter == chapter_number.
+    - Expand: entity có quan hệ với các entity base trong scope arc (dựa trên entity_relations + ArcService.get_chapter_scope).
+    Fallback: nếu không có chapter_number hoặc lỗi DB → trả về toàn bộ Bible entries (giống hành vi cũ).
+    """
+    supabase = _get_supabase()
+    if not supabase or not story_id:
+        return []
+
+    # Nếu không xác định được chương, fallback về hành vi cũ: toàn bộ Bible
+    if chapter_number is None:
+        try:
+            return get_bible_entries(story_id)
+        except Exception:
+            return []
+
+    # 1) Base Bible: entity được tạo từ chương hiện tại
+    try:
+        base_res = (
+            supabase.table("story_bible")
+            .select("id, entity_name, source_chapter")
+            .eq("story_id", story_id)
+            .eq("source_chapter", chapter_number)
+            .execute()
+        )
+        base_bible: List[Dict[str, Any]] = list(base_res.data or [])
+    except Exception:
+        base_bible = []
+
+    base_ids = {row.get("id") for row in base_bible if row.get("id") is not None}
+    if not base_ids:
+        # Không có entity base → fallback: không expand, chỉ dùng base (có thể rỗng)
+        return base_bible
+
+    # 2) Scope theo arc: tập chapter_numbers thuộc arc hiện tại (+ các arc trước nếu sequential)
+    chapter_numbers_in_scope = set()
+    try:
+        chapter_numbers_in_scope.add(int(chapter_number))
+    except Exception:
+        pass
+
+    if ArcService and arc_id:
+        try:
+            scope = ArcService.get_chapter_scope(story_id, arc_id)  # type: ignore[attr-defined]
+            for n in scope.get("chapter_numbers") or []:
+                try:
+                    chapter_numbers_in_scope.add(int(n))
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+    # 3) Lấy các entity_relations trong scope nói trên và mở rộng entity liên quan
+    expanded_ids = set()
+    if chapter_numbers_in_scope:
+        try:
+            rel_res = (
+                supabase.table("entity_relations")
+                .select("source_entity_id, target_entity_id, source_chapter")
+                .eq("story_id", story_id)
+                .in_("source_chapter", list(chapter_numbers_in_scope))
+                .execute()
+            )
+            rels = list(rel_res.data or [])
+        except Exception:
+            rels = []
+
+        for rel in rels:
+            src_id = rel.get("source_entity_id")
+            tgt_id = rel.get("target_entity_id")
+            if src_id in base_ids and tgt_id is not None:
+                expanded_ids.add(tgt_id)
+            if tgt_id in base_ids and src_id is not None:
+                expanded_ids.add(src_id)
+
+    # 4) Query thêm Bible cho các entity mở rộng
+    expanded_bible: List[Dict[str, Any]] = []
+    if expanded_ids:
+        try:
+            exp_res = (
+                supabase.table("story_bible")
+                .select("id, entity_name, source_chapter")
+                .eq("story_id", story_id)
+                .in_("id", list(expanded_ids))
+                .execute()
+            )
+            expanded_bible = list(exp_res.data or [])
+        except Exception:
+            expanded_bible = []
+
+    # 5) Hợp base + expanded, tránh trùng id
+    merged: Dict[Any, Dict[str, Any]] = {}
+    for row in base_bible + expanded_bible:
+        rid = row.get("id")
+        if rid is not None:
+            merged[rid] = row
+    return list(merged.values())
+
+
+def generate_chunk_summary(
+    content: str,
+    story_id: str,
+    chapter_id: Optional[str] = None,
+    chapter_number: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Tóm tắt một chunk + gắn entity Bible:
+    - summary: 2-4 câu, ưu tiên nêu rõ hành động/trận chiến nếu có.
+    - entities: danh sách tên entity trong Bible (giữ nguyên prefix) thực sự xuất hiện/quan trọng trong chunk.
+    - embedding: vector embedding cho text tóm tắt (summary + entities).
+    """
+    text = (content or "").strip()
+    if not text or not story_id:
+        return {"summary": "", "entities": [], "embedding": None}
+
+    # Chuẩn hóa chapter_number + arc_id (từ chapter_id nếu cần)
+    effective_chapter_number: Optional[int] = chapter_number
+    arc_id: Optional[str] = None
+    if (chapter_id or chapter_number) and story_id:
+        supabase = _get_supabase()
+        if supabase:
+            try:
+                if chapter_id:
+                    r = (
+                        supabase.table("chapters")
+                        .select("chapter_number, arc_id")
+                        .eq("id", chapter_id)
+                        .limit(1)
+                        .execute()
+                    )
+                else:
+                    r = (
+                        supabase.table("chapters")
+                        .select("chapter_number, arc_id")
+                        .eq("story_id", story_id)
+                        .eq("chapter_number", chapter_number)
+                        .limit(1)
+                        .execute()
+                    )
+                row = (r.data or [None])[0] if r and r.data else None
+                if row:
+                    if effective_chapter_number is None and row.get("chapter_number") is not None:
+                        effective_chapter_number = int(row.get("chapter_number"))
+                    if row.get("arc_id") is not None:
+                        arc_id = row.get("arc_id")
+            except Exception:
+                pass
+
+    # Lấy danh sách entity Bible liên quan tới chương + arc scope
+    try:
+        entries = _get_relevant_bible_for_chunk(
+            story_id=story_id,
+            chapter_number=effective_chapter_number,
+            arc_id=arc_id,
+        )
+    except Exception:
+        entries = []
+
+    entity_names: List[str] = []
+    if entries:
+        for e in entries:
+            name = (e.get("entity_name") or "").strip()
+            if name:
+                entity_names.append(name)
+    index_text = "\n".join(f"- {n}" for n in entity_names[:150]) if entity_names else "(Trống)"
+
+    try:
+        model = _get_default_tool_model()
+        prompt = f"""Bạn là trợ lý tóm tắt CHUNK của một chương truyện.
+
+DANH SÁCH THỰC THỂ (Bible) CỦA TRUYỆN (giữ nguyên prefix loại, ví dụ [CHARACTER], [LOCATION], [EVENT]):
+{index_text}
+
+NỘI DUNG CHUNK:
+---
+{text[:12000]}
+---
+
+NHIỆM VỤ (rất quan trọng):
+1) Tóm tắt ngắn gọn nội dung chunk bằng tiếng Việt (2-4 câu) — ưu tiên làm rõ:
+   - Nếu có TRẬN CHIẾN / HÀNH ĐỘNG: nêu rõ ai đánh với ai, ở đâu, kết quả sơ bộ ra sao.
+   - Nếu là đoạn thiết lập bối cảnh, nội tâm, đối thoại: nêu rõ nhân vật chính, mục tiêu đoạn này.
+2) Từ DANH SÁCH THỰC THỂ ở trên, chọn ra CÁC ENTITY thực sự xuất hiện hoặc đóng vai trò quan trọng trong chunk.
+   - Giữ NGUYÊN tên (kể cả prefix) như trong danh sách, ví dụ: "[CHARACTER] Cường", "[EVENT] Trận chiến ở X".
+   - Chỉ chọn những entity có thể suy luận hợp lý là đang xuất hiện trong đoạn văn (qua tên, biệt danh, mô tả).
+
+Trả về ĐÚNG MỘT JSON với 2 key:
+- "summary": chuỗi tóm tắt ngắn gọn.
+- "entities": mảng tên entity (giữ nguyên như trong danh sách Bible), có thể rỗng nếu không có.
+
+Chỉ trả về JSON, không giải thích thêm."""
+
+        response = AIService.call_openrouter(
+            messages=[{"role": "user", "content": prompt}],
+            model=model,
+            temperature=0.2,
+            max_tokens=800,
+            response_format={"type": "json_object"},
+        )
+        raw = response.choices[0].message.content
+        raw = AIService.clean_json_text(raw)
+        data = json.loads(raw)
+        summary = str(data.get("summary", "")).strip()
+        entities = data.get("entities") or []
+        if not isinstance(entities, list):
+            entities = []
+        entities_out: List[str] = []
+        for e in entities:
+            s = (e if isinstance(e, str) else str(e)).strip()
+            if s:
+                entities_out.append(s)
+
+        # Hợp text để embed: entity list + summary
+        embed_text_parts: List[str] = []
+        if entities_out:
+            embed_text_parts.append("Entities: " + ", ".join(entities_out[:20]))
+        if summary:
+            embed_text_parts.append("Summary: " + summary)
+        embed_text = "\n".join(embed_text_parts) if embed_text_parts else text[:4000]
+
+        embedding = None
+        try:
+            if embed_text:
+                embedding = AIService.get_embedding(embed_text)
+        except Exception:
+            embedding = None
+
+        return {
+            "summary": summary[:2000],
+            "entities": entities_out[:50],
+            "embedding": embedding,
+        }
+    except Exception as e:
+        print(f"generate_chunk_summary error: {e}")
+        return {"summary": "", "entities": [], "embedding": None}
 
 
 def extract_timeline_events_from_content(content: str, chapter_label: str = "") -> List[Dict[str, Any]]:

@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional
 from config import init_services
 
 from ai.service import AIService
-from ai.context_helpers import get_archived_bible_ids
+from ai.context_helpers import get_archived_bible_ids, _parse_embedding_vector, _cosine_sim
 from ai.utils import (
     _safe_float,
     _rerank_by_score,
@@ -332,7 +332,7 @@ def search_chunks_vector(
                     "query_text": query_text,
                     "query_embedding": query_vec,
                     "story_id_input": project_id,
-                    "match_threshold": 0.3,
+                    "match_threshold": 0.6,
                     "match_count": top_k,
                 }).execute()
                 rows = list(r.data) if r.data else []
@@ -351,4 +351,65 @@ def search_chunks_vector(
         return []
     except Exception as e:
         print(f"search_chunks_vector error: {e}")
+        return []
+
+
+def search_chunks_vector_in_candidates(
+    query_text: str,
+    project_id: str,
+    chunk_ids: List[Any],
+    top_k: int = 10,
+    query_embedding: Optional[List[float]] = None,
+    min_similarity: float = 0.6,
+) -> List[Dict]:
+    """
+    Vector search cho chunks nhưng CHỈ trong phạm vi danh sách chunk_ids đã cho trước.
+    Dùng để rerank các chunk candidate (ví dụ từ Bible EVENT/ACTION) theo độ khớp semantic với query.
+    """
+    if not query_text or not project_id or not chunk_ids:
+        return []
+    try:
+        services = init_services()
+        if not services:
+            return []
+        supabase = services["supabase"]
+        qvec = query_embedding if query_embedding is not None else AIService.get_embedding(query_text)
+        qvec_parsed = _parse_embedding_vector(qvec)
+        if not qvec_parsed:
+            return []
+        # Lấy embedding cho các chunk candidate
+        try:
+            r = (
+                supabase.table("chunks")
+                .select("id, chapter_id, arc_id, content, raw_content, meta_json, embedding")
+                .eq("story_id", project_id)
+                .in_("id", [str(cid) for cid in chunk_ids])
+                .execute()
+            )
+            rows = list(r.data or [])
+        except Exception:
+            rows = []
+        if not rows:
+            return []
+        scored: List[Tuple[float, Dict]] = []
+        for row in rows:
+            emb = _parse_embedding_vector(row.get("embedding"))
+            if not emb or len(emb) != len(qvec_parsed):
+                continue
+            sim = _cosine_sim(qvec_parsed, emb)
+            scored.append((sim, row))
+        if not scored:
+            return []
+        scored.sort(key=lambda x: -x[0])
+        # Lọc theo ngưỡng min_similarity để tránh lấy chunk nhiễu
+        out: List[Dict] = []
+        for sim, row in scored:
+            if sim < min_similarity:
+                continue
+            out.append(row)
+            if len(out) >= top_k:
+                break
+        return out
+    except Exception as e:
+        print(f"search_chunks_vector_in_candidates error: {e}")
         return []

@@ -1,9 +1,13 @@
 # views/chunking_view.py - Danh sách chunks đã lưu: xem, sửa nội dung, vector lại, xóa
 """Chunking: chỉ quản lý chunks đã lưu. Logic tách chunk (Workstation) nằm trong utils.chunk_tools."""
+import json
+
 import streamlit as st
 
 from config import init_services
 from utils.auth_manager import check_permission
+from ai_engine import AIService
+from ai.content import generate_chunk_summary
 
 KNOWLEDGE_PAGE_SIZE = 10
 
@@ -82,12 +86,26 @@ def render_chunking_tab(project_id):
 
     # Filter theo chương (chapter_id)
     try:
-        ch_list = supabase.table("chapters").select("id, chapter_number, title").eq("story_id", project_id).order("chapter_number").execute().data or []
-        ck_chapter_options = ["Tất cả"] + [f"Chương {r.get('chapter_number', '')}: {r.get('title') or ''}" for r in ch_list]
+        ch_list = (
+            supabase.table("chapters")
+            .select("id, chapter_number, title")
+            .eq("story_id", project_id)
+            .order("chapter_number")
+            .execute()
+            .data
+            or []
+        )
+        ck_chapter_options = [
+            "Tất cả"
+        ] + [f"Chương {r.get('chapter_number', '')}: {r.get('title') or ''}" for r in ch_list]
         ck_chapter_ids = [None] + [r.get("id") for r in ch_list]
+        chapter_number_by_id = {
+            r.get("id"): r.get("chapter_number") for r in ch_list if r.get("id") is not None
+        }
     except Exception:
         ck_chapter_options = ["Tất cả"]
         ck_chapter_ids = [None]
+        chapter_number_by_id = {}
     ck_filter_chapter_idx = st.session_state.get("chunking_filter_chapter", 0)
     ck_filter_chapter_idx = max(0, min(ck_filter_chapter_idx, len(ck_chapter_options) - 1))
     ck_filter_chapter_label = st.selectbox(
@@ -177,7 +195,7 @@ def render_chunking_tab(project_id):
                     edit_key = f"chunk_edit_{cid}"
                     update_key = f"chunk_update_vec_{cid}"
                     new_content = st.text_area(
-                        "Sửa nội dung (sau đó bấm Cập nhật & Vector lại)",
+                        "Sửa nội dung (Lưu sẽ tự tóm tắt + cập nhật embedding)",
                         value=content,
                         height=120,
                         key=edit_key,
@@ -186,13 +204,76 @@ def render_chunking_tab(project_id):
                         if not (new_content and new_content.strip()):
                             st.warning("Nội dung không được để trống.")
                         else:
+                            txt = new_content.strip()
+                            chapter_id = c.get("chapter_id")
+                            ch_number = None
+                            if chapter_id and chapter_number_by_id:
+                                ch_number = chapter_number_by_id.get(chapter_id)
+
                             try:
-                                supabase.table("chunks").update({
-                                    "content": new_content.strip(),
-                                    "raw_content": new_content.strip(),
-                                    "embedding": None,
-                                }).eq("id", cid).execute()
-                                st.success("Đã cập nhật. Bấm **Đồng bộ vector (Chunks)** trên để cập nhật embedding.")
+                                # Tóm tắt chunk + lấy entity liên quan từ Bible (theo chương + quan hệ trong arc), đồng thời chuẩn bị embedding
+                                summary_data = generate_chunk_summary(
+                                    txt,
+                                    project_id,
+                                    chapter_id=str(chapter_id) if chapter_id is not None else None,
+                                    chapter_number=int(ch_number) if isinstance(ch_number, (int, float)) else None,
+                                )
+                            except Exception as e:
+                                summary_data = {"summary": "", "entities": [], "embedding": None}
+                                st.warning(f"Lỗi khi tóm tắt chunk (sẽ chỉ cập nhật nội dung): {e}")
+
+                            # Hợp meta_json: giữ thông tin cũ, bổ sung chunk_summary + chunk_entities nếu có
+                            meta = c.get("meta_json") or {}
+                            if isinstance(meta, str):
+                                try:
+                                    meta = json.loads(meta) if meta else {}
+                                except Exception:
+                                    meta = {}
+                            if not isinstance(meta, dict):
+                                meta = {}
+                            meta = dict(meta)
+                            summ = (summary_data.get("summary") or "").strip()
+                            ents = summary_data.get("entities") or []
+                            if summ:
+                                meta["chunk_summary"] = summ
+                            if isinstance(ents, list) and ents:
+                                meta["chunk_entities"] = [str(x) for x in ents if x]
+
+                            # Tính embedding: ưu tiên embedding từ summary_data; nếu không có thì embed từ text
+                            embedding = summary_data.get("embedding")
+                            if embedding is None:
+                                try:
+                                    embed_text_parts = []
+                                    if summ:
+                                        embed_text_parts.append(summ)
+                                    if ents:
+                                        embed_text_parts.append(", ".join([str(x) for x in ents][:20]))
+                                    embed_text = "\n".join(embed_text_parts) if embed_text_parts else txt[:4000]
+                                    if embed_text:
+                                        embedding = AIService.get_embedding(embed_text)
+                                except Exception as e:
+                                    embedding = None
+                                    st.warning(f"Lỗi khi tính embedding cho chunk (sẽ đặt embedding=NULL): {e}")
+
+                            update_payload = {
+                                "content": txt,
+                                "raw_content": txt,
+                                "meta_json": meta,
+                            }
+                            # Nếu lấy được embedding thì ghi luôn, ngược lại để NULL để batch backfill sau
+                            if embedding is not None:
+                                update_payload["embedding"] = embedding
+                            else:
+                                update_payload["embedding"] = None
+
+                            try:
+                                supabase.table("chunks").update(update_payload).eq("id", cid).execute()
+                                if summ:
+                                    st.success("Đã cập nhật nội dung + tóm tắt + embedding cho chunk.")
+                                elif embedding is not None:
+                                    st.success("Đã cập nhật nội dung + embedding cho chunk.")
+                                else:
+                                    st.success("Đã cập nhật nội dung. Embedding đang để NULL (có thể đồng bộ sau).")
                             except Exception as e:
                                 st.error(str(e))
 

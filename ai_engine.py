@@ -273,15 +273,46 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
             query_for_chunk = " ; ".join(str(k) for k in target_chunk_keywords if k)[:300]
         else:
             query_for_chunk = query_for_vec or "nội dung"
-        chunk_rows = search_chunks_vector(
-            query_for_chunk, project_id,
-            arc_id=current_arc_id if not arc_ids else None,
-            arc_ids=arc_ids if arc_ids else None,
-            top_k=40,
-            query_embedding=query_emb,
-        )
-        if not chunk_rows and (current_arc_id or arc_ids):
-            chunk_rows = search_chunks_vector(query_for_chunk, project_id, arc_id=None, arc_ids=None, top_k=40, query_embedding=query_emb)
+        # Flow ưu tiên: nếu có chapter_range + target_bible_entities (ví dụ "trận chiến của Cường từ chương 1-30"):
+        # - Lấy EVENT/ACTION trong Bible liên quan nhân vật trong khoảng chapter_range.
+        # - Reverse lookup ra chunk_ids candidate.
+        # - Vector search chỉ trong phạm vi candidate để tăng độ chính xác cho "trận chiến" thay vì toàn bộ chunks.
+        chunk_rows: List[Dict[str, Any]] = []
+        candidate_chunk_ids: List[str] = []
+        if range_bounds_bible and target_bible_entities:
+            try:
+                from ai.context_helpers import get_event_action_chunks_for_characters
+
+                candidate_chunk_ids = get_event_action_chunks_for_characters(
+                    project_id,
+                    target_bible_entities,
+                    chapter_range=range_bounds_bible,
+                    max_chunks=120,
+                )
+            except Exception:
+                candidate_chunk_ids = []
+        if candidate_chunk_ids:
+            from ai.hybrid_search import search_chunks_vector_in_candidates
+
+            chunk_rows = search_chunks_vector_in_candidates(
+                query_for_chunk,
+                project_id,
+                candidate_chunk_ids,
+                top_k=40,
+                query_embedding=query_emb,
+                min_similarity=0.6,
+            )
+        if not chunk_rows:
+            # Fallback: vector search trên toàn bộ chunks (theo arc/scope)
+            chunk_rows = search_chunks_vector(
+                query_for_chunk, project_id,
+                arc_id=current_arc_id if not arc_ids else None,
+                arc_ids=arc_ids if arc_ids else None,
+                top_k=40,
+                query_embedding=query_emb,
+            )
+            if not chunk_rows and (current_arc_id or arc_ids):
+                chunk_rows = search_chunks_vector(query_for_chunk, project_id, arc_id=None, arc_ids=None, top_k=40, query_embedding=query_emb)
         chunk_rows = filter_context_items_by_embedding(chunk_rows)
         chunk_chapter_nums = set()
         if chunk_rows and ReverseLookupAssembler:
