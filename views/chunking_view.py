@@ -193,13 +193,12 @@ def render_chunking_tab(project_id):
             id_suffix = f" #{str(cid)[:8]}" if cid else ""
             label = f"{ch_prefix} {base_label}{id_suffix}".strip()
 
-            short = (content[:60] + "…") if len(content) > 60 else content
             sync_badge = " 🔄 Chưa đồng bộ" if cid in ids_no_embedding else ""
 
-            with st.expander(f"Chunk: {label} — {short}{sync_badge}", expanded=False):
+            with st.expander(f"Chunk: {label} — {content}{sync_badge}", expanded=False):
                 if cid in ids_no_embedding:
                     st.caption("🔄 Chưa đồng bộ vector — bấm **Đồng bộ vector (Chunks)** trên để cập nhật.")
-                st.text(content[:500] + ("…" if len(content) > 500 else ""))
+                st.text(content)
 
                 # Hiển thị nhanh danh sách entity đã gắn cho chunk (nếu có) để dễ debug
                 if isinstance(meta, dict):
