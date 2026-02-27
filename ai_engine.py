@@ -702,11 +702,12 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
                 sources.append("📅 Timeline (empty)")
 
     # Kiến trúc giống router: primary = retrieval (chunk, bible, timeline, relation);
-    # fallback = load full chương CHỈ KHI không tìm được bất kỳ chunk/bible/relation/timeline nào
-    # thuộc các chương mà user đã đề cập (chapter_range).
+    # fallback = load full chương CHỈ KHI chưa có semantic (chunk/bible/relation/timeline)
+    # bao phủ đầy đủ tất cả các chương mà user đã đề cập (chapter_range).
     if intent == "search_context" and range_bounds_bible and not _over_budget():
         has_semantic_for_target_chapters = False
         target_ch_set = set()
+        covered_chapters = set()
         try:
             start_rb, end_rb = int(range_bounds_bible[0]), int(range_bounds_bible[1])
             if start_rb <= end_rb:
@@ -715,20 +716,28 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
             target_ch_set = set()
 
         if target_ch_set:
+            # Tính tập các chương trong chapter_range đã có semantic "mạnh" (ít nhất có chunk
+            # hoặc đã từng được load full chapter).
             for meta in context_parts_meta or []:
                 src = (meta.get("source") or "").strip().lower()
-                if src in ("chunk", "bible", "timeline", "relation"):
-                    text_meta = (meta.get("text") or "").strip()
-                    ch_nums = meta.get("chapter_numbers") or []
-                    if not text_meta or not ch_nums:
-                        continue
-                    try:
-                        ch_in_meta = {int(x) for x in ch_nums if x is not None}
-                    except Exception:
-                        continue
-                    if ch_in_meta & target_ch_set:
-                        has_semantic_for_target_chapters = True
-                        break
+                # Chỉ coi là semantic đủ nếu có chunk hoặc đã load full chapter trước đó.
+                if src not in ("chunk", "chapter_full"):
+                    continue
+
+                text_meta = (meta.get("text") or "").strip()
+                ch_nums = meta.get("chapter_numbers") or []
+                if not text_meta or not ch_nums:
+                    continue
+                try:
+                    ch_in_meta = {int(x) for x in ch_nums if x is not None}
+                except Exception:
+                    continue
+                covered_chapters |= (ch_in_meta & target_ch_set)
+
+            # Chỉ khi TẤT CẢ các chương trong chapter_range đã có semantic thì mới coi là đủ,
+            # và khi đó sẽ không fallback đọc full chương nữa.
+            if covered_chapters and covered_chapters >= target_ch_set:
+                has_semantic_for_target_chapters = True
         else:
             # Nếu không resolve được chapter_range rõ ràng, fallback về kiểm tra có semantic tổng quát hay không.
             for meta in context_parts_meta or []:
@@ -739,15 +748,16 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
                         has_semantic_for_target_chapters = True
                         break
 
-        # Chỉ khi KHÔNG có bất kỳ semantic nào (chunk/bible/relation/timeline) thuộc chapter_range thì mới load full chương.
+        # Chỉ khi KHÔNG có đủ semantic (chunk/bible/relation/timeline) bao phủ chapter_range
+        # thì mới load full chương cho những chương còn thiếu.
         if not has_semantic_for_target_chapters:
-            try:
-                start_rb, end_rb = int(range_bounds_bible[0]), int(range_bounds_bible[1])
-            except (TypeError, ValueError, IndexError):
-                start_rb = end_rb = None
-            if start_rb is not None and end_rb is not None and start_rb <= end_rb:
-                # Dùng budget còn lại để load full chương, không vượt DEFAULT_CHAPTER_TOKEN_LIMIT; giữ nguyên bible/chunk đã có.
+            # Nếu có chapter_range rõ ràng thì chỉ load thêm những chương còn thiếu semantic.
+            missing_chapters = sorted(target_ch_set - covered_chapters) if target_ch_set else []
+            if missing_chapters:
+                # Dùng budget còn lại để load full các chương thiếu, không vượt DEFAULT_CHAPTER_TOKEN_LIMIT;
+                # giữ nguyên bible/chunk đã có.
                 token_limit_for_fallback = ContextManager.DEFAULT_CHAPTER_TOKEN_LIMIT
+                remaining_budget = None
                 if max_context_tokens is not None:
                     remaining_budget = max_context_tokens - total_tokens
                     if remaining_budget <= 0:
@@ -758,27 +768,58 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
                             max(1000, remaining_budget),
                         )
                 if token_limit_for_fallback > 0:
-                    fallback_text, fallback_sources = ContextManager.load_chapters_by_range(
-                        project_id,
-                        start_rb,
-                        end_rb,
-                        token_limit=token_limit_for_fallback,
-                    )
-                    if fallback_text:
-                        context_parts.append(
-                            "\n--- NỘI DUNG CHƯƠNG (FALLBACK - không tìm thấy chunk/bible/relation/timeline thuộc chapter_range; vẫn giữ Bible/chunk nếu còn token) ---\n"
-                            + fallback_text
+                    # Gom các chương thiếu thành những đoạn liên tiếp để tối ưu số lần query DB.
+                    segments = []
+                    start_seg = None
+                    prev = None
+                    for ch in missing_chapters:
+                        if start_seg is None:
+                            start_seg = prev = ch
+                        elif ch == prev + 1:
+                            prev = ch
+                        else:
+                            segments.append((start_seg, prev))
+                            start_seg = prev = ch
+                    if start_seg is not None:
+                        segments.append((start_seg, prev))
+
+                    for start_rb, end_rb in segments:
+                        if start_rb is None or end_rb is None or start_rb > end_rb:
+                            continue
+                        # Tính limit cho từng segment dựa trên budget còn lại.
+                        per_segment_limit = token_limit_for_fallback
+                        if remaining_budget is not None:
+                            if remaining_budget <= 0:
+                                break
+                            per_segment_limit = min(per_segment_limit, remaining_budget)
+                        if per_segment_limit <= 0:
+                            break
+
+                        fallback_text, fallback_sources = ContextManager.load_chapters_by_range(
+                            project_id,
+                            start_rb,
+                            end_rb,
+                            token_limit=per_segment_limit,
                         )
-                        total_tokens += AIService.estimate_tokens(fallback_text)
-                        if fallback_sources:
-                            sources.extend(fallback_sources)
-                        context_parts_meta.append(
-                            {
-                                "source": "chapter_full",
-                                "chapter_numbers": list(range(start_rb, end_rb + 1)),
-                                "text": fallback_text,
-                            }
-                        )
+                        if fallback_text:
+                            block = (
+                                "\n--- NỘI DUNG CHƯƠNG (FALLBACK - bổ sung các chương thiếu semantic trong chapter_range; vẫn giữ Bible/chunk nếu còn token) ---\n"
+                                + fallback_text
+                            )
+                            context_parts.append(block)
+                            added_tokens = AIService.estimate_tokens(fallback_text)
+                            total_tokens += added_tokens
+                            if remaining_budget is not None:
+                                remaining_budget -= added_tokens
+                            if fallback_sources:
+                                sources.extend(fallback_sources)
+                            context_parts_meta.append(
+                                {
+                                    "source": "chapter_full",
+                                    "chapter_numbers": list(range(start_rb, end_rb + 1)),
+                                    "text": fallback_text,
+                                }
+                            )
 
     ctx["total_tokens"] = total_tokens
 
