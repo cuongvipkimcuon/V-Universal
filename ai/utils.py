@@ -490,7 +490,7 @@ def get_timeline_events(
         supabase = services["supabase"]
         q = (
             supabase.table("timeline_events")
-            .select("id, event_order, title, description, raw_date, event_type, chapter_id, arc_id, embedding")
+            .select("id, event_order, title, description, raw_date, event_type, chapter_id, arc_id, source_chunk_id, embedding")
             .eq("story_id", project_id)
             .order("event_order")
         )

@@ -204,9 +204,9 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
         ctx["total_tokens"] = total_tokens
         return
 
-    # search_context / numerical_calculation: full context gathering
+    # search_context / numerical_calculation / analyze_pacing: full context gathering
     intent = router_result.get("intent", "chat_casual")
-    if intent not in ("search_context", "numerical_calculation"):
+    if intent not in ("search_context", "numerical_calculation", "analyze_pacing"):
         ctx["total_tokens"] = total_tokens
         return
 
@@ -380,8 +380,18 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
                     seen_ids.add(cid)
                     all_chunk_ids.append(cid)
             if all_chunk_ids:
+                # Ưu tiên chunk đã link từ Bible (bible_chunk_ids) để tận dụng dữ liệu cấu trúc,
+                # sau đó mới đến chunk trúng vector và chunk theo chapter_range.
+                ordered_ids: List[str] = []
+                seen_ordered = set()
+                for cid in (bible_chunk_ids or []) + (chunk_ids_primary or []) + (extra_chunk_ids or []):
+                    if cid and cid not in seen_ordered and cid in all_chunk_ids:
+                        seen_ordered.add(cid)
+                        ordered_ids.append(cid)
+                if not ordered_ids:
+                    ordered_ids = all_chunk_ids
                 chunk_ctx, chunk_sources, chunk_tokens = ContextManager.build_context_with_chunk_reverse_lookup(
-                    project_id, all_chunk_ids, current_arc_id, token_limit=CHUNK_MAX_TOKENS
+                    project_id, ordered_ids, current_arc_id, token_limit=CHUNK_MAX_TOKENS
                 )
                 if chunk_ctx:
                     for c in chunk_rows:
@@ -581,19 +591,93 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
         )
         events = filter_context_items_by_embedding(events)
         if events:
-            lines = ["[TIMELINE EVENTS - Thứ tự sự kiện / mốc thời gian]"]
+            # Khi intent là analyze_pacing: tính thống kê pacing đơn giản dựa trên timeline.
+            pacing_block = ""
+            if intent == "analyze_pacing":
+                total_ev = len(events)
+                type_counts: Dict[str, int] = {}
+                for e in events:
+                    et = (e.get("event_type") or "event").strip() or "event"
+                    type_counts[et] = type_counts.get(et, 0) + 1
+                thirds = {"start": 0, "middle": 0, "end": 0}
+                for idx, _e in enumerate(events):
+                    pos = (idx + 1) / total_ev
+                    if pos <= 1 / 3:
+                        thirds["start"] += 1
+                    elif pos <= 2 / 3:
+                        thirds["middle"] += 1
+                    else:
+                        thirds["end"] += 1
+                type_parts = [f"{k}={v}" for k, v in type_counts.items()]
+                pacing_lines = [
+                    "[PACING TIMELINE SUMMARY]",
+                    f"- Tổng số sự kiện: {total_ev}",
+                    f"- Phân bố theo loại: " + (", ".join(type_parts) if type_parts else "không phân loại"),
+                    f"- Phân bố theo đoạn chương (ước lượng theo thứ tự sự kiện):",
+                    f"  • Đầu chương: {thirds['start']} sự kiện",
+                    f"  • Giữa chương: {thirds['middle']} sự kiện",
+                    f"  • Cuối chương: {thirds['end']} sự kiện",
+                ]
+                pacing_block = "\n".join(pacing_lines)
+
+            lines = []
+            if pacing_block:
+                lines.append(pacing_block)
+                lines.append("")  # dòng trống ngăn cách
+            lines.append("[TIMELINE EVENTS - Thứ tự sự kiện / mốc thời gian]")
             for e in events:
                 order = e.get("event_order", 0)
                 title = e.get("title", "")
                 desc = (e.get("description") or "")[:400]
                 raw_date = e.get("raw_date", "")
                 etype = e.get("event_type", "event")
-                lines.append(f"- #{order} [{etype}] {title}" + (f" (Thời điểm: {raw_date})" if raw_date else "") + f"\n  {desc}")
+                lines.append(
+                    f"- #{order} [{etype}] {title}"
+                    + (f" (Thời điểm: {raw_date})" if raw_date else "")
+                    + f"\n  {desc}"
+                )
             block = "\n".join(lines)
             context_parts.append(block)
             total_tokens += AIService.estimate_tokens(block)
             sources.append("📅 Timeline Events")
             context_parts_meta.append({"source": "timeline", "chapter_numbers": chapter_numbers[:20], "text": block})
+            # Từ các sự kiện timeline đã chọn, lấy thêm các chunk cảnh liên quan qua link (source_chunk_id + chunk_timeline_links).
+            try:
+                from ai.context_helpers import get_chunks_for_timeline_events
+
+                tl_ids = [e.get("id") for e in events if e.get("id")]
+                if tl_ids and not _over_budget():
+                    remaining_budget = None
+                    if max_context_tokens is not None:
+                        try:
+                            remaining_budget = max_context_tokens - total_tokens
+                        except Exception:
+                            remaining_budget = None
+                    if remaining_budget is None or remaining_budget > 500:
+                        chunk_ids_tl = get_chunks_for_timeline_events(
+                            project_id,
+                            tl_ids,
+                            max_chunks=40,
+                        )
+                        if chunk_ids_tl:
+                            token_limit_tl = CHUNK_MAX_TOKENS // 2
+                            if remaining_budget is not None:
+                                token_limit_tl = max(1000, min(token_limit_tl, remaining_budget))
+                            chunk_ctx_tl, chunk_sources_tl, chunk_tokens_tl = ContextManager.build_context_with_chunk_reverse_lookup(
+                                project_id,
+                                chunk_ids_tl,
+                                current_arc_id,
+                                token_limit=token_limit_tl,
+                            )
+                            if chunk_ctx_tl:
+                                context_parts.append("\n--- SCENES FOR TIMELINE EVENTS ---\n" + chunk_ctx_tl)
+                                total_tokens += chunk_tokens_tl
+                                sources.extend(chunk_sources_tl)
+                                context_parts_meta.append(
+                                    {"source": "chunk", "chapter_numbers": chapter_numbers[:20], "text": chunk_ctx_tl}
+                                )
+            except Exception as _e:
+                print(f"timeline->chunk reverse lookup error: {_e}")
         else:
             # Ưu tiên từ khóa timeline do planner suy ra; fallback về rewritten_query
             if target_timeline_keywords:

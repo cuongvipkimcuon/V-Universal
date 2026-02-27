@@ -122,6 +122,8 @@ INTENT_HANDLER_MAP = {
     # V7: intent đặc biệt cho phân tích nhiều chương (executor xử lý nhiều sub-range bên trong),
     # vẫn dùng handler llm_with_context cho từng sub-range.
     "multi_chapter_analysis": "llm_with_context",
+    # V8.x: intent chuyên phân tích pacing chương/đoạn, dùng chung handler llm_with_context (timeline + chapter).
+    "analyze_pacing": "llm_with_context",
     "unified": "data_operation",
 }
 
@@ -240,6 +242,7 @@ Trả về JSON với đủ key:
                 "unified",
                 "check_chapter_logic",
                 "numerical_calculation",
+                "analyze_pacing",
             ):
                 intent = "chat_casual"
             # Legacy: LLM trả về update_data → coi là unified (chỉ thao tác theo chương).
@@ -414,6 +417,12 @@ Chỉ trả về JSON."""
             "query_target": (data.get("query_target") or "").strip(),
             "included_rules_text": included_rules if included_rules else None,
         }
+        # Ưu tiên dùng chunk khi đã có bible/relation/timeline để tận dụng link (chunk_bible_links, chunk_timeline_links).
+        needs = result["context_needs"] or []
+        if isinstance(needs, list):
+            if any(x in needs for x in ("bible", "relation", "timeline")) and "chunk" not in needs:
+                needs = list(needs) + ["chunk"]
+                result["context_needs"] = needs
         if intent == "search_context" and not result["context_needs"]:
             result["context_needs"] = infer_default_context_needs(result)
         result["context_priority"] = normalize_context_priority(result["context_priority"], result["context_needs"]) or list(result["context_needs"])
@@ -735,6 +744,7 @@ Chỉ trả về JSON."""
             "check_chapter_logic",
             "chat_casual",
             "multi_chapter_analysis",
+            "analyze_pacing",
         }
         normalized_plan = []
         for i, s in enumerate(plan):
@@ -963,6 +973,7 @@ LƯU Ý:
             "check_chapter_logic",
             "chat_casual",
             "multi_chapter_analysis",
+            "analyze_pacing",
         }
         normalized_plan = []
         for i, s in enumerate(plan):

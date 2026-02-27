@@ -223,6 +223,72 @@ def get_event_action_chunks_for_characters(
     return chunk_ids[:max_chunks]
 
 
+def get_chunks_for_timeline_events(
+    project_id: str,
+    timeline_ids: List[Any],
+    max_chunks: int = 80,
+) -> List[str]:
+    """
+    Lấy danh sách chunk_id gắn với các timeline_events:
+    - Ưu tiên source_chunk_id trên timeline_events (nếu đã được unified điền).
+    - Bổ sung chunk_id từ chunk_timeline_links.
+    """
+    if not project_id or not timeline_ids:
+        return []
+    try:
+        services = init_services()
+        if not services:
+            return []
+        supabase = services["supabase"]
+    except Exception:
+        return []
+
+    chunk_ids: List[str] = []
+    tids = [t for t in timeline_ids if t]
+    if not tids:
+        return []
+
+    # 1) source_chunk_id trực tiếp trên timeline_events
+    try:
+        tr = (
+            supabase.table("timeline_events")
+            .select("id, source_chunk_id")
+            .eq("story_id", project_id)
+            .in_("id", tids)
+            .limit(len(tids) * 2)
+            .execute()
+        )
+        for row in (tr.data or []):
+            cid = row.get("source_chunk_id")
+            if cid and str(cid) not in chunk_ids:
+                chunk_ids.append(str(cid))
+                if len(chunk_ids) >= max_chunks:
+                    return chunk_ids[:max_chunks]
+    except Exception:
+        pass
+
+    # 2) chunk_timeline_links: mọi chunk đã link với timeline_event_id
+    try:
+        lr = (
+            supabase.table("chunk_timeline_links")
+            .select("chunk_id, timeline_event_id")
+            .eq("story_id", project_id)
+            .in_("timeline_event_id", tids)
+            .limit(max_chunks * 3)
+            .execute()
+        )
+        for row in (lr.data or []):
+            cid = row.get("chunk_id")
+            if cid and str(cid) not in chunk_ids:
+                chunk_ids.append(str(cid))
+                if len(chunk_ids) >= max_chunks:
+                    break
+    except Exception:
+        pass
+
+    return chunk_ids[:max_chunks]
+
+
 def _get_rules_by_type(
     project_id: str,
     arc_id: Optional[str] = None,
