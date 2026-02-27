@@ -207,6 +207,60 @@ def render_chunking_tab(project_id):
                         st.caption("🔗 Entities: " + ", ".join(str(e) for e in ents[:20]))
 
                 if can_write:
+                    # Metadata (tóm tắt) dùng để embed – cho phép sửa tay và cập nhật embedding không qua LLM
+                    meta_summary_default = ""
+                    if isinstance(meta, dict):
+                        meta_summary_default = (meta.get("chunk_summary") or "").strip()
+                    meta_edit_key = f"chunk_meta_summary_{cid}"
+                    meta_summary = st.text_area(
+                        "Metadata (tóm tắt dùng để embed, có thể sửa tay)",
+                        value=meta_summary_default,
+                        height=80,
+                        key=meta_edit_key,
+                    )
+
+                    embed_only_key = f"chunk_update_embed_only_{cid}"
+                    if st.button("🔄 Cập nhật embedding từ metadata (không gọi LLM)", key=embed_only_key):
+                        meta2 = c.get("meta_json") or {}
+                        if isinstance(meta2, str):
+                            try:
+                                meta2 = json.loads(meta2) if meta2 else {}
+                            except Exception:
+                                meta2 = {}
+                        if not isinstance(meta2, dict):
+                            meta2 = {}
+                        meta2 = dict(meta2)
+                        meta_summary_txt = (meta_summary or "").strip()
+                        meta2["chunk_summary"] = meta_summary_txt
+
+                        ents2 = meta2.get("chunk_entities") or []
+                        embed_parts = []
+                        if isinstance(ents2, list) and ents2:
+                            embed_parts.append("Entities: " + ", ".join(str(x) for x in ents2[:20]))
+                        if meta_summary_txt:
+                            embed_parts.append("Summary: " + meta_summary_txt)
+                        embed_text = "\n".join(embed_parts) if embed_parts else meta_summary_txt
+
+                        embedding = None
+                        if embed_text:
+                            try:
+                                embedding = AIService.get_embedding(embed_text)
+                            except Exception as e:
+                                embedding = None
+                                st.warning(f"Lỗi khi tính embedding từ metadata cho chunk (sẽ đặt embedding=NULL): {e}")
+
+                        update_payload_meta = {"meta_json": meta2}
+                        update_payload_meta["embedding"] = embedding
+
+                        try:
+                            supabase.table("chunks").update(update_payload_meta).eq("id", cid).execute()
+                            if embedding is not None:
+                                st.success("Đã cập nhật metadata + embedding cho chunk (không gọi LLM).")
+                            else:
+                                st.success("Đã cập nhật metadata, embedding đang để NULL (có thể đồng bộ sau).")
+                        except Exception as e:
+                            st.error(str(e))
+
                     edit_key = f"chunk_edit_{cid}"
                     update_key = f"chunk_update_vec_{cid}"
                     new_content = st.text_area(

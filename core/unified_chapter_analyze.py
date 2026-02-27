@@ -1,5 +1,5 @@
-# core/unified_chapter_analyze.py - Pipeline phân tích 1 chương: Bible, Timeline, Chunks, Relations trong 1 lần LLM, có cờ bước, retry, rollback.
-"""Chạy unified extract cho một chương: 1 LLM call → bible (+ embedding), timeline, chunks (+ embedding), relations + link tables. Ghi unified_extract_runs và source_chunk_id (Bible, Timeline)."""
+# core/unified_chapter_analyze.py - Pipeline phân tích 1 chương: Bible, Timeline, Chunks (+ metadata), Relations trong 1 lần LLM, có cờ bước, retry, rollback.
+"""Chạy unified extract cho một chương: 1 LLM call → bible, timeline, chunks (kèm metadata: summary + entities), relations + link tables. Ghi unified_extract_runs và source_chunk_id (Bible, Timeline). Embedding được xử lý riêng bằng backfill."""
 import json
 import re
 from typing import Any, Dict, List, Optional, Tuple
@@ -88,7 +88,12 @@ def _llm_unified_extract(content: str, chapter_label: str, persona: dict) -> Tup
     prompt = f"""Bạn là trợ lý phân tích văn bản. Từ NỘI DUNG CHƯƠNG dưới, trích xuất ĐỒNG THỜI (ưu tiên ĐẦY ĐỦ, không bỏ sót):
 1) Bible: MỌI thực thể (nhân vật dù chính hay phụ, địa điểm dù lớn hay nhỏ, sự kiện, đồ vật, khái niệm) - type là MỘT trong: {prefix_list}. Khi nghi ngờ vẫn liệt kê.
 2) Timeline: MỌI sự kiện theo thứ tự thời gian (kể cả thoáng qua, flashback, mốc) - event_type: event|flashback|milestone|timeskip|other.
-3) Chunks: chia nội dung thành các đoạn có ý nghĩa (theo scene/hành động/dialog), mỗi đoạn có title ngắn và content. Tách đủ nhỏ để dễ tra cứu.
+3) Chunks: chia nội dung thành các đoạn có ý nghĩa (theo scene/hành động/dialog), mỗi đoạn có:
+   - "title": tiêu đề ngắn gọn cho chunk.
+   - "content": nguyên văn nội dung chunk.
+   - "order": số thứ tự (1,2,...).
+   - "summary": tóm tắt ngắn gọn nội dung chunk (2–4 câu, tiếng Việt).
+   - "entities": DANH SÁCH tên thực thể trong Bible liên quan trực tiếp tới chunk (dùng đúng tên trong bible, bao gồm cả prefix nếu có, ví dụ "[CHARACTER] Cường").
 4) Relations: MỌI cặp thực thể có quan hệ (trực tiếp hay gián tiếp; dùng đúng entity_name đã liệt kê trong bible).
 5) chunk_bible: với mỗi chunk, thực thể bible nào xuất hiện (chunk_index 0-based, bible_index 0-based). Liệt kê hết có nhắc.
 6) chunk_timeline: với mỗi chunk, sự kiện timeline nào được nhắc (chunk_index, timeline_index 0-based).
@@ -104,7 +109,7 @@ NỘI DUNG:
 Trả về ĐÚNG MỘT JSON với các key:
 - "bible": [ {{ "entity_name": "...", "type": "...", "description": "..." }} ]
 - "timeline": [ {{ "event_order": 1, "title": "...", "description": "...", "raw_date": "", "event_type": "event" }} ]
-- "chunks": [ {{ "title": "...", "content": "...", "order": 1 }} ]
+- "chunks": [ {{ "title": "...", "content": "...", "order": 1, "summary": "...", "entities": ["[CHARACTER] ...", "[LOCATION] ..."] }} ]
 - "relations": [ {{ "source": "tên thực thể", "target": "tên thực thể", "relation_type": "...", "reason": "..." }} ]
 - "chunk_bible": [ {{ "chunk_index": 0, "bible_index": 0, "mention_role": "primary" }} ]
 - "chunk_timeline": [ {{ "chunk_index": 0, "timeline_index": 0, "mention_role": "primary" }} ]
@@ -400,7 +405,7 @@ def run_unified_chapter_analyze(
             update_job_fn(job_id, "failed", result_summary="Unified: bước Timeline thất bại.", error_message=result["error"])
         return result
 
-    # Step 4: Chunks (batch insert)
+    # Step 4: Chunks (batch insert) — lưu cả metadata (summary + entities) nếu LLM trả về
     def save_chunks():
         payloads_order: List[Tuple[int, Dict[str, Any]]] = []
         for i, ch in enumerate(chunks_data):
@@ -409,13 +414,33 @@ def run_unified_chapter_analyze(
                 continue
             title = (ch.get("title") or "").strip() or f"Phần {i+1}"
             order = int(ch.get("order", i + 1))
+            chunk_summary = (ch.get("summary") or "").strip()
+            raw_entities = ch.get("entities") or []
+            if not isinstance(raw_entities, list):
+                raw_entities = []
+            chunk_entities: List[str] = []
+            for e in raw_entities:
+                s = (e if isinstance(e, str) else str(e)).strip()
+                if s:
+                    chunk_entities.append(s)
+
+            meta_json: Dict[str, Any] = {
+                "source": "unified_chapter_analyze",
+                "chapter_number": chapter_number,
+                "title": title,
+            }
+            if chunk_summary:
+                meta_json["chunk_summary"] = chunk_summary
+            if chunk_entities:
+                meta_json["chunk_entities"] = chunk_entities
+
             row = {
                 "story_id": project_id,
                 "chapter_id": chapter_id,
                 "arc_id": arc_id,
                 "content": txt,
                 "raw_content": txt,
-                "meta_json": {"source": "unified_chapter_analyze", "chapter_number": chapter_number, "title": title},
+                "meta_json": meta_json,
                 "sort_order": order,
             }
             ok, _, payload_ready = validate_and_prepare_chunk(project_id, row, supabase)

@@ -1,5 +1,6 @@
 # core/background_jobs.py - Background jobs (Data Analyze + Chat). "Background Jobs" tab shows status.
 """Create/update/list jobs. Workers run in thread; completion is not posted to chat (see Background Jobs tab)."""
+import json
 import logging
 import threading
 from datetime import datetime, timezone, timedelta
@@ -924,15 +925,59 @@ def run_embedding_backfill(
         except Exception:
             pass
         try:
-            r = supabase.table("chunks").select("id, content").eq("story_id", project_id).is_("embedding", "NULL").limit(chunks_limit).execute()
+            r = (
+                supabase.table("chunks")
+                .select("id, content, meta_json")
+                .eq("story_id", project_id)
+                .is_("embedding", "NULL")
+                .limit(chunks_limit)
+                .execute()
+            )
             rows_chunks = list(r.data or [])
             if rows_chunks:
-                texts_chunks = [(row.get("content") or "").strip() or "" for row in rows_chunks]
-                vectors_chunks = AIService.get_embeddings_batch(texts_chunks) if hasattr(AIService, "get_embeddings_batch") else []
-                payloads = [{"id": str(row["id"]), "embedding": vectors_chunks[i]} for i, row in enumerate(rows_chunks) if i < len(vectors_chunks) and vectors_chunks[i]]
-                out["chunks_updated"] = _bulk_update_embeddings(supabase, "bulk_update_chunks_embeddings", payloads)
+                texts_chunks: List[str] = []
+                for row in rows_chunks:
+                    content = (row.get("content") or "").strip()
+                    meta = row.get("meta_json") or {}
+                    if isinstance(meta, str):
+                        try:
+                            meta = json.loads(meta) if meta else {}
+                        except Exception:
+                            meta = {}
+                    if not isinstance(meta, dict):
+                        meta = {}
+                    summ = (meta.get("chunk_summary") or "").strip()
+                    ents = meta.get("chunk_entities") or []
+                    embed_parts: List[str] = []
+                    if isinstance(ents, list) and ents:
+                        embed_parts.append(
+                            "Entities: " + ", ".join(str(e) for e in ents[:20])
+                        )
+                    if summ:
+                        embed_parts.append("Summary: " + summ)
+                    if embed_parts:
+                        text_for_embed = "\n".join(embed_parts)
+                    else:
+                        text_for_embed = content
+                    texts_chunks.append(text_for_embed or "")
+
+                vectors_chunks = (
+                    AIService.get_embeddings_batch(texts_chunks)
+                    if hasattr(AIService, "get_embeddings_batch")
+                    else []
+                )
+                payloads = [
+                    {"id": str(row["id"]), "embedding": vectors_chunks[i]}
+                    for i, row in enumerate(rows_chunks)
+                    if i < len(vectors_chunks) and vectors_chunks[i]
+                ]
+                out["chunks_updated"] = _bulk_update_embeddings(
+                    supabase, "bulk_update_chunks_embeddings", payloads
+                )
                 if out["chunks_updated"] == 0 and payloads:
-                    out["chunks_updated"] = _fallback_update_embeddings_one_by_one(supabase, "chunks", "id", rows_chunks, vectors_chunks)
+                    out["chunks_updated"] = _fallback_update_embeddings_one_by_one(
+                        supabase, "chunks", "id", rows_chunks, vectors_chunks
+                    )
         except Exception:
             pass
         if relations_limit > 0:
