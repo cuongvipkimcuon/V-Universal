@@ -1148,13 +1148,14 @@ class ContextManager:
 
         if strict_mode:
             strict_text = """
-            \n\n‼️ CHẾ ĐỘ NGHIÊM NGẶT (STRICT MODE) ĐANG BẬT:
-            1. CHỈ trả lời dựa trên thông tin có trong [CONTEXT].
-            2. TUYỆT ĐỐI KHÔNG bịa đặt hoặc dùng kiến thức bên ngoài để điền vào chỗ trống.
-            3. Nếu không tìm thấy thông tin trong Context, hãy trả lời: "Dữ liệu dự án chưa có thông tin này."
-            4. Nếu User hỏi về "lịch sử", "cốt truyện", hãy ưu tiên trích xuất từ [KNOWLEDGE BASE].
-            5. Không từ chối trả lời các dữ liệu thực tế (fact) chỉ vì tính cách Persona.
-            """
+\n\n‼️ CHẾ ĐỘ NGHIÊM NGẶT (STRICT MODE) ĐANG BẬT:
+1. CHỈ trả lời dựa trên thông tin có trong [CONTEXT] (bao gồm chunk, bible, timeline, relation). KHÔNG được giả định thêm ngoài những gì đã nêu.
+2. TUYỆT ĐỐI KHÔNG bịa đặt hoặc dùng kiến thức bên ngoài dự án để điền vào chỗ trống.
+3. Nếu không tìm thấy thông tin đủ rõ trong Context, hãy trả lời: "Dữ liệu dự án chưa có thông tin này." hoặc "Trong các đoạn/chunk hiện có, chưa thấy nói rõ về điểm này."
+4. Chấp nhận rằng Context có thể chỉ là MỘT PHẦN chương (một số chunk). Vẫn phải trả lời dựa trên các phần hiện có, KHÔNG yêu cầu phải có toàn bộ chương đầy đủ.
+5. Nếu User hỏi về "lịch sử", "cốt truyện", hãy ưu tiên trích xuất từ [KNOWLEDGE BASE] và các chunk liên quan trong Context.
+6. Không từ chối trả lời các dữ liệu thực tế (fact) chỉ vì tính cách Persona.
+"""
             context_parts.append(strict_text)
             total_tokens += AIService.estimate_tokens(strict_text)
 
