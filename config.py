@@ -89,6 +89,10 @@ class Config:
     # Giới hạn số lần gọi LLM "chính" mỗi turn (intent, planner, draft, numerical). Verification/check không tính. 0 = không giới hạn.
     DEFAULT_MAX_LLM_CALLS_PER_TURN = 5
 
+    # Feature flag: bật/tắt fallback đọc full chapter sau khi đã trả lời bằng search_context/check_chapter_logic/analyze_pacing.
+    # Mặc định bật cho các câu hỏi review chương / logic / pacing (vẫn có điều kiện thêm trong views.chat).
+    ENABLE_FALLBACK_FULL_CHAPTER = True
+
     @classmethod
     def get_max_llm_calls_per_turn(cls) -> int:
         """Số lần gọi LLM tối đa mỗi turn (chỉ tính intent, planner, draft, numerical; không tính verification/check). 0 = không giới hạn."""

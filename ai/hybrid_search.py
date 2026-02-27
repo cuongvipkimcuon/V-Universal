@@ -332,7 +332,8 @@ def search_chunks_vector(
                     "query_text": query_text,
                     "query_embedding": query_vec,
                     "story_id_input": project_id,
-                    "match_threshold": 0.6,
+                    # V10: hạ ngưỡng match để lấy được nhiều chunk hơn (chấp nhận cả những match ~0.5).
+                    "match_threshold": 0.5,
                     "match_count": top_k,
                 }).execute()
                 rows = list(r.data) if r.data else []

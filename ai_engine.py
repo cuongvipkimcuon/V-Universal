@@ -290,9 +290,18 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
     semantic_queries = router_result.get("semantic_queries") or {}
     if not isinstance(semantic_queries, dict):
         semantic_queries = {}
-    semantic_chunk_query = (semantic_queries.get("chunk") or "").strip()
-    semantic_bible_query = (semantic_queries.get("bible") or "").strip()
-    semantic_relation_query = (semantic_queries.get("relation") or "").strip()
+    # V10: semantic query chỉ dùng cho CHUNK.
+    # Cho phép planner/router trả về 1 câu (string) HOẶC một mảng câu (list of string) cho key "chunk".
+    raw_chunk_semantic = semantic_queries.get("chunk")
+    if isinstance(raw_chunk_semantic, list):
+        # Ghép các câu semantic lại thành một truy vấn chung, ưu tiên các câu không rỗng.
+        parts = [str(x).strip() for x in raw_chunk_semantic if str(x).strip()]
+        semantic_chunk_query = " ; ".join(parts)[:300] if parts else ""
+    else:
+        semantic_chunk_query = (raw_chunk_semantic or "").strip()
+    # Bible / relation không còn dùng semantic_queries riêng; để chuỗi rỗng để fallback về rewritten_query khi cần.
+    semantic_bible_query = ""
+    semantic_relation_query = ""
     query_emb = ctx.get("query_embedding")
     raw_inferred = router_result.get("inferred_prefixes") or []
     valid_keys = Config.get_valid_prefix_keys()
@@ -302,8 +311,9 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
     ] if valid_keys else raw_inferred
 
     # Thứ tự ưu tiên: chunk → bible → relation → timeline (không load full chapter ở đây; full chapter chỉ khi fallback)
-    # 1) Chunk (vector, scope)
+    # 1) Chunk (vector, scope) + LLM re-rank
     if "chunk" in context_needs and not _over_budget():
+        chunk_ctx_added = False
         # Ưu tiên câu query semantic cho chunk; sau đó tới từ khóa do planner suy ra; fallback về rewritten_query
         if semantic_chunk_query:
             query_for_chunk = semantic_chunk_query[:300]
@@ -312,6 +322,7 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
             query_for_chunk = " ; ".join(str(k) for k in target_chunk_keywords if k)[:300]
         else:
             query_for_chunk = query_for_vec or "nội dung"
+
         # Flow ưu tiên: nếu có chapter_range + target_bible_entities (ví dụ "trận chiến của Cường từ chương 1-30"):
         # - Lấy EVENT/ACTION trong Bible liên quan nhân vật trong khoảng chapter_range.
         # - Reverse lookup ra chunk_ids candidate.
@@ -339,24 +350,61 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
                 candidate_chunk_ids,
                 top_k=40,
                 query_embedding=query_emb,
-                min_similarity=0.6,
+                # V10: hạ ngưỡng similarity để nhận thêm chunk (ít bỏ sót hơn).
+                min_similarity=0.5,
             )
         if not chunk_rows:
             # Fallback: vector search trên toàn bộ chunks (theo arc/scope)
             chunk_rows = search_chunks_vector(
-                query_for_chunk, project_id,
+                query_for_chunk,
+                project_id,
                 arc_id=current_arc_id if not arc_ids else None,
                 arc_ids=arc_ids if arc_ids else None,
                 top_k=40,
                 query_embedding=query_emb,
             )
             if not chunk_rows and (current_arc_id or arc_ids):
-                chunk_rows = search_chunks_vector(query_for_chunk, project_id, arc_id=None, arc_ids=None, top_k=40, query_embedding=query_emb)
+                chunk_rows = search_chunks_vector(
+                    query_for_chunk,
+                    project_id,
+                    arc_id=None,
+                    arc_ids=None,
+                    top_k=40,
+                    query_embedding=query_emb,
+                )
+
+        # V10: dùng LLM để so sánh mức độ liên quan của từng chunk candidate với câu hỏi
+        # và trả về danh sách chunk được chọn + (tuỳ chọn) refined_query cho chunk.
+        # Bước này đóng vai trò "context planner cho chunk", thay thế cho việc đoán mò ở router.
+        llm_selected_chunk_ids: List[str] = []
+        if chunk_rows:
+            try:
+                llm_selected_chunk_ids, _refined_query = ContextManager.llm_select_chunks_for_query(
+                    project_id=project_id,
+                    user_query=router_result.get("rewritten_query") or query_for_vec or "",
+                    router_result=router_result,
+                    chunk_rows=chunk_rows,
+                    max_candidates=20,
+                )
+                llm_selected_chunk_ids = [str(cid) for cid in (llm_selected_chunk_ids or []) if cid]
+            except Exception:
+                llm_selected_chunk_ids = []
+
         chunk_rows = filter_context_items_by_embedding(chunk_rows)
         chunk_chapter_nums = set()
         if chunk_rows and ReverseLookupAssembler:
-            chunk_ids_primary = [str(c.get("id")) for c in chunk_rows if c.get("id")]
-            # Ưu tiên chunk trúng vector, nhưng có thể bổ sung thêm:
+            # Kết hợp: (1) danh sách chunk do LLM chọn, (2) danh sách chunk từ vector search,
+            # rồi loại trùng lặp để ra thứ tự ưu tiên cuối cùng.
+            vector_ids: List[str] = [str(c.get("id")) for c in chunk_rows if c.get("id")]
+            ordered_primary: List[str] = []
+            seen_primary = set()
+            for cid in (llm_selected_chunk_ids or []) + vector_ids:
+                if cid and cid not in seen_primary:
+                    seen_primary.add(cid)
+                    ordered_primary.append(cid)
+            chunk_ids_primary = ordered_primary
+
+            # Ưu tiên chunk trúng vector (và/hoặc LLM chọn), nhưng có thể bổ sung thêm:
             # - Chunk theo chapter_range (scope user hỏi).
             # - Chunk reverse từ Bible (entity trong planner).
             extra_chunk_ids: List[str] = []
@@ -381,7 +429,7 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
                     )
                 except Exception:
                     bible_chunk_ids = []
-            # Gộp và dedupe: chunk vector trước, rồi tới chunk theo chương, rồi chunk từ bible.
+            # Gộp và dedupe: chunk (LLM+vector) trước, rồi tới chunk theo chương, rồi chunk từ bible.
             all_chunk_ids: List[str] = []
             seen_ids = set()
             for cid in (chunk_ids_primary or []) + (extra_chunk_ids or []) + (bible_chunk_ids or []):
@@ -390,7 +438,7 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
                     all_chunk_ids.append(cid)
             if all_chunk_ids:
                 # Ưu tiên chunk đã link từ Bible (bible_chunk_ids) để tận dụng dữ liệu cấu trúc,
-                # sau đó mới đến chunk trúng vector và chunk theo chapter_range.
+                # sau đó mới đến chunk trúng vector/LLM và chunk theo chapter_range.
                 ordered_ids: List[str] = []
                 seen_ordered = set()
                 for cid in (bible_chunk_ids or []) + (chunk_ids_primary or []) + (extra_chunk_ids or []):
@@ -408,6 +456,7 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
                         if ch and c.get("meta_json"):
                             try:
                                 import json as _j
+
                                 m = _j.loads(c["meta_json"]) if isinstance(c["meta_json"], str) else c["meta_json"]
                                 ch_num = m.get("chapter_number") or m.get("chapter")
                                 if ch_num is not None:
@@ -426,7 +475,25 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
                     total_tokens += chunk_tokens
                     sources.extend(chunk_sources)
                     sources.append("📦 Chunks")
-                    context_parts_meta.append({"source": "chunk", "chapter_numbers": list(chunk_chapter_nums) or chapter_numbers[:10], "text": chunk_ctx})
+                    context_parts_meta.append(
+                        {
+                            "source": "chunk",
+                            "chapter_numbers": list(chunk_chapter_nums) or chapter_numbers[:10],
+                            "text": chunk_ctx,
+                        }
+                    )
+                    chunk_ctx_added = True
+
+        # Nếu không chọn được bất kỳ chunk nào đủ liên quan, đừng để trống — ghi rõ vào context để LLM hiểu trạng thái dữ liệu.
+        if not chunk_ctx_added:
+            no_chunk_note = (
+                "[CHUNK SEARCH]: Không tìm được chunk nào đủ liên quan trực tiếp tới câu hỏi trong bước gather. "
+                "Nếu vẫn còn Bible/Timeline/Relation hoặc thông tin khác, hãy ưu tiên dựa vào chúng. "
+                "Nếu sau đó vẫn không đủ căn cứ, hãy nói rõ rằng không tìm thấy thông tin phù hợp trong dữ liệu hiện có và **không được bịa thêm nội dung**."
+            )
+            context_parts.append(no_chunk_note)
+            total_tokens += AIService.estimate_tokens(no_chunk_note)
+            context_parts_meta.append({"source": "chunk", "chapter_numbers": [], "text": no_chunk_note})
 
     # 2) Bible (vector, scope)
     if ("bible" in context_needs or "relation" in context_needs) and not _over_budget():
@@ -1056,6 +1123,120 @@ class ContextManager:
                 total_tokens += AIService.estimate_tokens(assembled)
                 sources.extend(chunk_sources)
         return "\n\n".join(context_parts), sources, total_tokens
+
+    @staticmethod
+    def llm_select_chunks_for_query(
+        project_id: str,
+        user_query: str,
+        router_result: Dict[str, Any],
+        chunk_rows: List[Dict[str, Any]],
+        max_candidates: int = 20,
+    ) -> Tuple[List[str], str]:
+        """
+        Dùng LLM để so sánh mức độ liên quan của từng chunk candidate với câu hỏi.
+        Trả về (danh sách chunk_id được chọn, refined_query cho chunk hoặc "").
+        """
+        try:
+            if not chunk_rows or max_candidates <= 0:
+                return [], ""
+            # Chuẩn hóa danh sách candidate gửi cho LLM: chỉ giữ id + metadata tóm tắt.
+            candidates: List[Dict[str, Any]] = []
+            for row in chunk_rows[: max_candidates]:
+                cid = row.get("id")
+                if not cid:
+                    continue
+                meta = row.get("meta_json") or {}
+                if isinstance(meta, str):
+                    try:
+                        meta = json.loads(meta) if meta else {}
+                    except Exception:
+                        meta = {}
+                chapter_num = None
+                title = ""
+                chunk_summary = ""
+                chunk_entities: List[str] = []
+                if isinstance(meta, dict):
+                    chapter_num = meta.get("chapter_number") or meta.get("chapter")
+                    title = (meta.get("title") or "") if meta else ""
+                    chunk_summary = (meta.get("chunk_summary") or "") if meta else ""
+                    raw_entities = meta.get("chunk_entities") or []
+                    if isinstance(raw_entities, list):
+                        for e in raw_entities:
+                            s = (e if isinstance(e, str) else str(e)).strip()
+                            if s:
+                                chunk_entities.append(s)
+                content = (row.get("content") or row.get("raw_content") or "").strip()
+                preview = content[:220]
+                candidates.append(
+                    {
+                        "id": str(cid),
+                        "chapter_number": chapter_num,
+                        "title": title,
+                        "summary": chunk_summary,
+                        "entities": chunk_entities,
+                        "content_preview": preview,
+                    }
+                )
+            if not candidates:
+                return [], ""
+            target_bible_entities = router_result.get("target_bible_entities") or []
+            ch_range = router_result.get("chapter_range") or None
+            intent = (router_result.get("intent") or "").strip()
+            # Xây prompt cho LLM
+            prompt = f"""Bạn là bộ lọc CHUNK cho hệ thống truy vấn chương truyện.
+
+NHIỆM VỤ:
+- So sánh từng chunk candidate với CÂU HỎI và bối cảnh (intent, chapter_range, entity Bible).
+- Chỉ chọn những chunk THỰC SỰ có thông tin hữu ích để trả lời, tránh chọn chunk nhiễu hoặc chỉ nhắc tên mà không có nội dung liên quan.
+- Nếu cần, bạn có thể chỉnh lại câu query semantic cho chunk (refined_query) sao cho bám sát mục tiêu câu hỏi.
+
+THÔNG TIN NGỮ CẢNH:
+- Câu hỏi (rewritten_query): {router_result.get("rewritten_query") or user_query}
+- Intent: {intent}
+- Chapter_range: {ch_range}
+- Target Bible entities: {target_bible_entities}
+
+DANH SÁCH CANDIDATE CHUNKS (JSON):
+{json.dumps(candidates, ensure_ascii=False)}
+
+YÊU CẦU TRẢ VỀ:
+- selected_chunk_ids: danh sách id chunk bạn chọn (ưu tiên độ liên quan cao; có thể rỗng nếu tất cả đều không liên quan).
+- refined_query: câu query semantic cho chunk (có thể rỗng "" nếu thấy câu hỏi hiện tại đã đủ tốt).
+
+TRẢ VỀ JSON:
+{{
+  "selected_chunk_ids": ["..."],
+  "refined_query": ""
+}}"""
+
+            response = AIService.call_openrouter(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "Bạn là bộ lọc chunk. Chỉ trả về JSON với selected_chunk_ids (danh sách id chuỗi) và refined_query (chuỗi).",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                model=_get_default_tool_model(),
+                temperature=0.1,
+                max_tokens=400,
+                response_format={"type": "json_object"},
+            )
+            content = response.choices[0].message.content
+            content = AIService.clean_json_text(content)
+            data = json.loads(content)
+            raw_ids = data.get("selected_chunk_ids") or []
+            selected_ids: List[str] = []
+            if isinstance(raw_ids, list):
+                for cid in raw_ids:
+                    s = (cid if isinstance(cid, str) else str(cid)).strip()
+                    if s and s not in selected_ids:
+                        selected_ids.append(s)
+            refined_query = (data.get("refined_query") or "").strip()
+            return selected_ids, refined_query
+        except Exception as e:
+            print(f"llm_select_chunks_for_query error: {e}")
+            return [], ""
 
     @staticmethod
     def get_entity_relations(entity_id: Any, project_id: str) -> str:

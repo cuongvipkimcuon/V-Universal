@@ -320,7 +320,11 @@ Trả về JSON với đủ key:
         chat_capped = cap_chat_history_to_tokens(chat_history_text or "")
         relevant_rules_block = (relevant_rules or "").strip() or "(Bước 1 không chọn quy tắc liên quan)"
 
-        planner_prompt = f"""Bạn là Context Planner. Intent đã xác định: **{intent}**. Nhiệm vụ: dựa vào BỨC TRANH TỔNG QUAN dữ liệu dự án dưới đây, quyết định (1) cần LẤY DỮ LIỆU NÀO từ DB (bible, chapter, timeline, relation, chunk), (2) cần đưa LUẬT NÀO vào context (từ các quy tắc liên quan bước 1 đã lọc), (3) chọn rõ các TARGET theo từng nguồn (tên entity trong Bible, từ khóa chunk, entity để xem quan hệ, từ khóa timeline), (4) sinh ra các câu query semantic ngắn gọn cho từng nguồn (bible, relation, timeline, chunk, chapter) để dùng cho bước search semantic. Trả về JSON.
+        planner_prompt = f"""Bạn là Context Planner. Intent đã xác định: **{intent}**. Nhiệm vụ: dựa vào BỨC TRANH TỔNG QUAN dữ liệu dự án dưới đây, quyết định (1) cần LẤY DỮ LIỆU NÀO từ DB (bible, chapter, timeline, relation, chunk), (2) cần đưa LUẬT NÀO vào context (từ các quy tắc liên quan bước 1 đã lọc), (3) chọn rõ các TARGET theo từng nguồn (tên entity trong Bible, từ khóa chunk, entity để xem quan hệ, từ khóa timeline), (4) sinh ra CÂU QUERY SEMANTIC CHO **CHUNK** (có thể là 1 câu hoặc một mảng câu) để dùng cho bước search semantic. KHÔNG sinh query semantic riêng cho bible/relation/timeline/chapter.
+
+LƯU Ý QUAN TRỌNG VỀ CHUNK:
+- Mỗi chunk được lưu kèm `meta_json` với các trường như `chapter_number`, `title`, `chunk_summary`, `chunk_entities` (danh sách entity Bible liên quan).
+- Khi bạn sinh `semantic_queries["chunk"]`, hãy mô tả rõ **nội dung cần tìm** (hành động, sự kiện, cảm xúc, nhịp điệu/pacing chương, xung đột, v.v.) sao cho có thể khớp tốt cả với nội dung chunk lẫn metadata này (đặc biệt là `chunk_summary` và `chunk_entities`).
 
 ƯU TIÊN HÀNG ĐẦU — LẤY TỪ CÂU HỎI USER (đây là phần chính để build context đúng):
 - Nếu câu user có nói RÕ khoảng chương (vd. "chương 1 đến 30", "từ chương 5 tới 10", "các chương 1–20") thì BẮT BUỘC điền chapter_range = [start, end] theo đúng số chương user nói và chapter_range_mode = "range". Đây là thông tin then chốt cho search_context.
@@ -353,23 +357,23 @@ QUY TẮC CỰC KỲ QUAN TRỌNG VỀ CHAPTER RANGE (KHÔNG ĐƯỢC VI PHẠM)
 
 INPUT USER: "{user_prompt}"
 
-Bạn cần trả về:
-- context_needs: mảng ["bible"] | ["relation"] | ["timeline"] | ["chunk"] | ["chapter"] hoặc kết hợp (cần lấy nguồn nào).
-- context_priority: thứ tự ưu tiên (phần tử đầu quan trọng nhất).
-- chapter_range: null hoặc [start, end]. "Chương 1" -> [1,1]; "chương 1 đến 5" -> [1,5]. Khi user hỏi về một ARC (vd. "arc Tuổi thơ"), dựa vào ARC VÀ CHƯƠNG THUỘC ARC để đặt chapter_range = [min, max] các chương thuộc arc đó.
-- chapter_range_mode: "range" | "first" | "latest" | null.
-- target_bible_entities: danh sách TÊN ENTITY trong Bible (mảng string). KHÔNG kèm prefix như [NV], [CHAR] — chỉ dùng phần tên sau khi bỏ prefix.
-- target_chunk_keywords: mảng string, từ khóa/cụm từ để tìm chunk (nếu cần chunk).
-- target_relation_entities: mảng string, entity chính để xem quan hệ (nếu cần relation).
-- target_timeline_keywords: mảng string, từ khóa sự kiện/timeline (nếu cần timeline).
-- query_target: chỉ khi intent=query_Sql: "chapters"|"rules"|"bible_entity"|"chunks"|"timeline"|"relation"|"summary"|"art".
-- data_operation_type, data_operation_target: chỉ khi intent=unified.
-- included_rules_text: chuỗi các quy tắc (từ block QUY TẮC LIÊN QUAN trên) thực sự cần đưa vào context để trả lời. Giữ nguyên định dạng "- ...". Có thể là toàn bộ hoặc subset. Nếu không cần quy tắc nào thì "".
- - semantic_queries: object, mỗi key là một nguồn trong context_needs ("bible","relation","timeline","chunk","chapter"), value là 1 câu query semantic ngắn gọn, rõ nghĩa để dùng khi gọi semantic / vector search cho nguồn đó.
+        Bạn cần trả về:
+        - context_needs: mảng ["bible"] | ["relation"] | ["timeline"] | ["chunk"] | ["chapter"] hoặc kết hợp (cần lấy nguồn nào).
+        - context_priority: thứ tự ưu tiên (phần tử đầu quan trọng nhất).
+        - chapter_range: null hoặc [start, end]. "Chương 1" -> [1,1]; "chương 1 đến 5" -> [1,5]. Khi user hỏi về một ARC (vd. "arc Tuổi thơ"), dựa vào ARC VÀ CHƯƠNG THUỘC ARC để đặt chapter_range = [min, max] các chương thuộc arc đó.
+        - chapter_range_mode: "range" | "first" | "latest" | null.
+        - target_bible_entities: danh sách TÊN ENTITY trong Bible (mảng string). KHÔNG kèm prefix như [NV], [CHAR] — chỉ dùng phần tên sau khi bỏ prefix.
+        - target_chunk_keywords: mảng string, từ khóa/cụm từ để tìm chunk (nếu cần chunk).
+        - target_relation_entities: mảng string, entity chính để xem quan hệ (nếu cần relation).
+        - target_timeline_keywords: mảng string, từ khóa sự kiện/timeline (nếu cần timeline).
+        - query_target: chỉ khi intent=query_Sql: "chapters"|"rules"|"bible_entity"|"chunks"|"timeline"|"relation"|"summary"|"art".
+        - data_operation_type, data_operation_target: chỉ khi intent=unified.
+        - included_rules_text: chuỗi các quy tắc (từ block QUY TẮC LIÊN QUAN trên) thực sự cần đưa vào context để trả lời. Giữ nguyên định dạng "- ...". Có thể là toàn bộ hoặc subset. Nếu không cần quy tắc nào thì "".
+        - semantic_queries: object, **chỉ sử dụng key "chunk"**. Giá trị của `semantic_queries["chunk"]` có thể là **1 câu query semantic (string)** hoặc **một mảng các câu query semantic (list of string)** mô tả rõ nội dung/vấn đề cần tìm trong các chunk. **Không** sinh query semantic riêng cho bible/relation/timeline/chapter.
 
-Trả về JSON (đủ key):
-        {{ "context_needs": [], "context_priority": [], "chapter_range": null, "chapter_range_mode": null, "chapter_range_count": 5, "target_bible_entities": [], "target_chunk_keywords": [], "target_relation_entities": [], "target_timeline_keywords": [], "inferred_prefixes": [], "rewritten_query": "", "query_target": "", "clarification_question": "", "data_operation_type": "", "data_operation_target": "", "update_summary": "", "included_rules_text": "", "semantic_queries": {{}} }}
-Chỉ trả về JSON."""
+        Trả về JSON (đủ key):
+                {{ "context_needs": [], "context_priority": [], "chapter_range": null, "chapter_range_mode": null, "chapter_range_count": 5, "target_bible_entities": [], "target_chunk_keywords": [], "target_relation_entities": [], "target_timeline_keywords": [], "inferred_prefixes": [], "rewritten_query": "", "query_target": "", "clarification_question": "", "data_operation_type": "", "data_operation_target": "", "update_summary": "", "included_rules_text": "", "semantic_queries": {{}} }}
+        Chỉ trả về JSON."""
 
         try:
             response = AIService.call_openrouter(
@@ -417,8 +421,21 @@ Chỉ trả về JSON."""
             "data_operation_target": (data.get("data_operation_target") or "").strip(),
             "query_target": (data.get("query_target") or "").strip(),
             "included_rules_text": included_rules if included_rules else None,
-            "semantic_queries": data.get("semantic_queries") if isinstance(data.get("semantic_queries"), dict) else {},
+            "semantic_queries": {},
         }
+        # Chỉ giữ semantic_queries cho nguồn "chunk"; cho phép LLM trả về 1 câu (string) hoặc một mảng câu cho chunk.
+        raw_semantic = data.get("semantic_queries") if isinstance(data.get("semantic_queries"), dict) else {}
+        if isinstance(raw_semantic, dict):
+            chunk_sem = raw_semantic.get("chunk")
+            if isinstance(chunk_sem, list):
+                # Giữ nguyên dạng list để executor quyết định cách sử dụng; lọc bỏ phần tử rỗng.
+                cleaned = [str(x).strip() for x in chunk_sem if str(x).strip()]
+                if cleaned:
+                    result["semantic_queries"] = {"chunk": cleaned}
+            elif isinstance(chunk_sem, str):
+                s = chunk_sem.strip()
+                if s:
+                    result["semantic_queries"] = {"chunk": s}
         # Ưu tiên dùng chunk khi đã có bible/relation/timeline để tận dụng link (chunk_bible_links, chunk_timeline_links).
         needs = result["context_needs"] or []
         if isinstance(needs, list):
@@ -968,7 +985,7 @@ Hãy trả về ĐÚNG MỘT JSON với format:
         "data_operation_type": "", 
         "data_operation_target": "", 
         "query_target": "",
-        "semantic_queries": {{}}  // object, mỗi key là một nguồn trong context_needs ("bible","relation","timeline","chunk","chapter"), value là 1 câu query semantic ngắn gọn để đi semantic search tay.
+        "semantic_queries": {{}}  // object: chỉ dùng key "chunk". Giá trị có thể là 1 câu query semantic (string) HOẶC một mảng các câu query semantic (list of string) để đi semantic search trên bảng chunks. Không sinh query riêng cho bible/relation/timeline/chapter.
         "target_files": [],
         "target_bible_entities": [],
         "clarification_question": ""

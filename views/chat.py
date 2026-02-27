@@ -1843,12 +1843,28 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
                                                     has_chapter_full = True
                                                     break
 
-                                    if full_response_text and (not has_chapter_full) and not is_answer_sufficient(
-                                        prompt,
-                                        full_response_text,
-                                        (context_text or "")[:1000],
-                                        router_out.get("context_needs"),
+                                    if (
+                                        full_response_text
+                                        and (not has_chapter_full)
+                                        and not is_answer_sufficient(
+                                            prompt,
+                                            full_response_text,
+                                            (context_text or "")[:1000],
+                                            router_out.get("context_needs"),
+                                        )
                                     ):
+                                        # V10: chỉ fallback đọc full chapter cho các intent review chương / logic / pacing
+                                        # hoặc search_context có context_needs chứa "chapter".
+                                        if not Config.ENABLE_FALLBACK_FULL_CHAPTER:
+                                            pass
+                                        else:
+                                            fallback_intent = (router_out.get("intent") or "").strip().lower()
+                                            needs = router_out.get("context_needs") or []
+                                            if fallback_intent not in ("search_context", "check_chapter_logic", "analyze_pacing"):
+                                                pass
+                                            elif "chapter" not in needs:
+                                                pass
+                                            else:
                                         ch_range = router_out.get("chapter_range")
                                         start, end = None, None
                                         if ch_range and len(ch_range) >= 2:
