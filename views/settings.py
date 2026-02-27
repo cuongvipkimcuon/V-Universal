@@ -147,6 +147,25 @@ def render_settings_tab():
                     st.error(str(e))
             st.divider()
             try:
+                r_ar = supabase.table("settings").select("value").eq("key", "enable_auto_reverse_full_chapter").execute()
+                current_ar = (r_ar.data and r_ar.data[0] and str(r_ar.data[0].get("value") or "") == "1")
+            except Exception:
+                current_ar = False
+            auto_reverse_full = st.toggle(
+                "Auto reverse full chapter (luồng cũ)",
+                value=current_ar,
+                key="enable_auto_reverse_full_chapter_toggle",
+                help="Bật: sau Bible search, tự load thêm nội dung full chương liên quan entity (📄 CHUONG X: Auto) — tốn token. Tắt (mặc định): chỉ dùng Bible → chunk đã link, không đổ full chương.",
+            )
+            if st.button("💾 Lưu Auto reverse full chapter", key="save_auto_reverse_full"):
+                try:
+                    val_ar = "1" if auto_reverse_full else "0"
+                    supabase.table("settings").upsert({"key": "enable_auto_reverse_full_chapter", "value": val_ar}, on_conflict="key").execute()
+                    st.toast("Đã lưu.")
+                except Exception as e:
+                    st.error(str(e))
+            st.divider()
+            try:
                 r2 = supabase.table("settings").select("value").eq("key", "max_llm_calls_per_turn").execute()
                 max_llm_val = 5
                 if r2.data and r2.data[0] is not None:

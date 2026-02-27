@@ -562,10 +562,23 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
             sources.append("📚 Bible Search")
             context_parts_meta.append({"source": "bible", "chapter_numbers": list(bible_chapter_nums), "text": bible_context})
 
-        # Reverse lookup từ Bible entity -> chương liên quan -> full content (budget thấp hơn, ưu tiên theo scope)
+        # Reverse lookup từ Bible entity -> chương liên quan -> full content (luồng cũ, phình token).
+        # Mặc định TẮT; chỉ bật khi user bật "Auto reverse full chapter (luồng cũ)" trong Settings → V8 & Observability.
+        # Luồng mới: chỉ dùng Bible → chunk (get_chunks_for_bible_entities, get_event_action_chunks_for_characters) đã gộp ở bước Chunk.
+        _enable_auto_reverse_full_chapter = False
         try:
-            # Nếu đã gần hết budget context thì bỏ qua bước auto reverse lookup nặng
-            if not _over_budget() and max_context_tokens and total_tokens < max_context_tokens * 0.85:
+            if max_context_tokens:
+                svc = init_services()
+                if svc and svc.get("supabase"):
+                    r_ar = svc["supabase"].table("settings").select("value").eq("key", "enable_auto_reverse_full_chapter").execute()
+                    if r_ar.data and r_ar.data[0] and str(r_ar.data[0].get("value") or "").strip() == "1":
+                        _enable_auto_reverse_full_chapter = True
+        except Exception:
+            pass
+        try:
+            if not _enable_auto_reverse_full_chapter:
+                pass
+            elif not _over_budget() and max_context_tokens and total_tokens < max_context_tokens * 0.85:
                 related_chapter_nums_list = get_related_chapter_nums(project_id, target_bible_entities or [])
                 if related_chapter_nums_list:
                     # Ưu tiên chương nằm trong scope hiện tại (chapter_numbers) hoặc range_bounds_bible nếu có
