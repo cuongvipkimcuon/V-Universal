@@ -1846,6 +1846,7 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
                                     if (
                                         full_response_text
                                         and (not has_chapter_full)
+                                        and Config.ENABLE_FALLBACK_FULL_CHAPTER
                                         and not is_answer_sufficient(
                                             prompt,
                                             full_response_text,
@@ -1855,92 +1856,85 @@ Chỉ trả về code trong block ```python ... ```, không giải thích."""
                                     ):
                                         # V10: chỉ fallback đọc full chapter cho các intent review chương / logic / pacing
                                         # hoặc search_context có context_needs chứa "chapter".
-                                        if not Config.ENABLE_FALLBACK_FULL_CHAPTER:
-                                            pass
-                                        else:
-                                            fallback_intent = (router_out.get("intent") or "").strip().lower()
-                                            needs = router_out.get("context_needs") or []
-                                            if fallback_intent not in ("search_context", "check_chapter_logic", "analyze_pacing"):
-                                                pass
-                                            elif "chapter" not in needs:
-                                                pass
-                                            else:
-                                        ch_range = router_out.get("chapter_range")
-                                        start, end = None, None
-                                        if ch_range and len(ch_range) >= 2:
-                                            start, end = int(ch_range[0]), int(ch_range[1])
-                                            start, end = min(start, end), max(start, end)
-                                        if start is None or end is None:
-                                            related_nums = get_related_chapter_nums(
-                                                project_id, router_out.get("target_bible_entities") or []
-                                            )
-                                            if related_nums:
-                                                start, end = min(related_nums), max(related_nums)
-                                        # Thêm chương xuất hiện nhiều trong context (chunk, bible, timeline, relation)
-                                        if isinstance(meta, list) and meta:
-                                            from collections import Counter
-                                            cnt = Counter()
-                                            for p in meta:
-                                                src = (p.get("source") or "").strip().lower()
-                                                if src in ("chunk", "bible", "timeline", "relation"):
-                                                    for num in p.get("chapter_numbers") or []:
-                                                        try:
-                                                            cnt[int(num)] += 1
-                                                        except (TypeError, ValueError):
-                                                            pass
-                                            if cnt:
-                                                extra = [n for n, _ in cnt.most_common(5)]
-                                                all_nums = set(extra)
-                                                if start is not None:
-                                                    all_nums.add(start)
-                                                if end is not None:
-                                                    all_nums.add(end)
-                                                if all_nums:
-                                                    start = min(all_nums) if start is None else min(start, min(all_nums))
-                                                    end = max(all_nums) if end is None else max(end, max(all_nums))
-                                        if start is not None and end is not None:
-                                            fallback_text, _ = ContextManager.load_chapters_by_range(
-                                                project_id, start, end,
-                                                token_limit=ContextManager.DEFAULT_CHAPTER_TOKEN_LIMIT,
-                                            )
-                                            if fallback_text:
-                                                # Bỏ CHUNK, BIBLE, TIMELINE, RELATION của các chương sắp load ra khỏi context để nhẹ
-                                                chapters_to_load = set(range(start, end + 1))
-                                                strip_sources = {"chunk", "bible", "timeline", "relation"}
-                                                base_parts = []
-                                                if meta:
-                                                    for p in meta:
-                                                        src = (p.get("source") or "").strip().lower()
-                                                        nums = set()
-                                                        for n in (p.get("chapter_numbers") or []):
+                                        fallback_intent = (router_out.get("intent") or "").strip().lower()
+                                        needs = router_out.get("context_needs") or []
+                                        if fallback_intent in ("search_context", "check_chapter_logic", "analyze_pacing") and "chapter" in needs:
+                                            ch_range = router_out.get("chapter_range")
+                                            start, end = None, None
+                                            if ch_range and len(ch_range) >= 2:
+                                                start, end = int(ch_range[0]), int(ch_range[1])
+                                                start, end = min(start, end), max(start, end)
+                                            if start is None or end is None:
+                                                related_nums = get_related_chapter_nums(
+                                                    project_id, router_out.get("target_bible_entities") or []
+                                                )
+                                                if related_nums:
+                                                    start, end = min(related_nums), max(related_nums)
+                                            # Thêm chương xuất hiện nhiều trong context (chunk, bible, timeline, relation)
+                                            if isinstance(meta, list) and meta:
+                                                from collections import Counter
+                                                cnt = Counter()
+                                                for p in meta:
+                                                    src = (p.get("source") or "").strip().lower()
+                                                    if src in ("chunk", "bible", "timeline", "relation"):
+                                                        for num in p.get("chapter_numbers") or []:
                                                             try:
-                                                                nums.add(int(n))
+                                                                cnt[int(num)] += 1
                                                             except (TypeError, ValueError):
                                                                 pass
-                                                        if src in strip_sources and nums and (nums & chapters_to_load):
-                                                            continue
-                                                        base_parts.append(p.get("text") or "")
-                                                else:
-                                                    base_parts = [context_text or ""]
-                                                base_context = "\n\n".join(p for p in base_parts if (p or "").strip())
-                                                extended_context = (base_context or "") + "\n\n--- NỘI DUNG CHƯƠNG (FALLBACK - đọc đầy đủ để trả lời đủ ý) ---\n" + fallback_text[:8000]
-                                                retry_messages = [
-                                                    {"role": "system", "content": run_instruction + "\n\nTHÔNG TIN NGỮ CẢNH (CONTEXT):\n" + extended_context + "\n\nTrả lời ĐẦY ĐỦ dựa trên context, đặc biệt nội dung chương vừa bổ sung."},
-                                                    {"role": "user", "content": prompt},
-                                                ]
-                                                try:
-                                                    retry_resp = AIService.call_openrouter(
-                                                        messages=retry_messages,
-                                                        model=model,
-                                                        temperature=run_temperature,
-                                                        max_tokens=active_persona.get("max_tokens", 4000),
-                                                    )
-                                                    new_answer = (retry_resp.choices[0].message.content or "").strip()
-                                                    if new_answer:
-                                                        full_response_text = new_answer
-                                                        debug_notes.append("📄 Fallback read full content")
-                                                except Exception:
-                                                    pass
+                                                if cnt:
+                                                    extra = [n for n, _ in cnt.most_common(5)]
+                                                    all_nums = set(extra)
+                                                    if start is not None:
+                                                        all_nums.add(start)
+                                                    if end is not None:
+                                                        all_nums.add(end)
+                                                    if all_nums:
+                                                        start = min(all_nums) if start is None else min(start, min(all_nums))
+                                                        end = max(all_nums) if end is None else max(end, max(all_nums))
+                                            if start is not None and end is not None:
+                                                fallback_text, _ = ContextManager.load_chapters_by_range(
+                                                    project_id, start, end,
+                                                    token_limit=ContextManager.DEFAULT_CHAPTER_TOKEN_LIMIT,
+                                                )
+                                                if fallback_text:
+                                                    # Bỏ CHUNK, BIBLE, TIMELINE, RELATION của các chương sắp load ra khỏi context để nhẹ
+                                                    chapters_to_load = set(range(start, end + 1))
+                                                    strip_sources = {"chunk", "bible", "timeline", "relation"}
+                                                    base_parts = []
+                                                    if meta:
+                                                        for p in meta:
+                                                            src = (p.get("source") or "").strip().lower()
+                                                            nums = set()
+                                                            for n in (p.get("chapter_numbers") or []):
+                                                                try:
+                                                                    nums.add(int(n))
+                                                                except (TypeError, ValueError):
+                                                                    pass
+                                                            if src in strip_sources and nums and (nums & chapters_to_load):
+                                                                continue
+                                                            base_parts.append(p.get("text") or "")
+                                                    else:
+                                                        base_parts = [context_text or ""]
+                                                    base_context = "\n\n".join(p for p in base_parts if (p or "").strip())
+                                                    extended_context = (base_context or "") + "\n\n--- NỘI DUNG CHƯƠNG (FALLBACK - đọc đầy đủ để trả lời đủ ý) ---\n" + fallback_text[:8000]
+                                                    retry_messages = [
+                                                        {"role": "system", "content": run_instruction + "\n\nTHÔNG TIN NGỮ CẢNH (CONTEXT):\n" + extended_context + "\n\nTrả lời ĐẦY ĐỦ dựa trên context, đặc biệt nội dung chương vừa bổ sung."},
+                                                        {"role": "user", "content": prompt},
+                                                    ]
+                                                    try:
+                                                        retry_resp = AIService.call_openrouter(
+                                                            messages=retry_messages,
+                                                            model=model,
+                                                            temperature=run_temperature,
+                                                            max_tokens=active_persona.get("max_tokens", 4000),
+                                                        )
+                                                        new_answer = (retry_resp.choices[0].message.content or "").strip()
+                                                        if new_answer:
+                                                            full_response_text = new_answer
+                                                            debug_notes.append("📄 Fallback read full content")
+                                                    except Exception:
+                                                        pass
 
                                     reminder = _get_logic_reminder(project_id)
                                     if reminder:
