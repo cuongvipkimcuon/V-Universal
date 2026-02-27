@@ -703,7 +703,16 @@ def _worker_data_analyze_chunk(
         edited = data.get("chunks") or []
     else:
         strategy = analyze_split_strategy(content, file_type="story", context_hint="Đoạn văn có ý nghĩa")
-        chunks_list = execute_split_logic(content, strategy.get("split_type", "by_length"), strategy.get("split_value", "2000"))
+        stype = strategy.get("split_type", "by_length")
+        sval = str(strategy.get("split_value", "2000")).strip()
+        if stype == "by_length":
+            from utils.chunk_tools import split_text_by_length_with_overlap
+            chunk_size = int(sval) if sval.isdigit() else 2000
+            chunk_size = max(500, min(chunk_size, 50000))
+            overlap = min(200, chunk_size // 10)
+            chunks_list = split_text_by_length_with_overlap(content, chunk_size=chunk_size, overlap=overlap)
+        else:
+            chunks_list = execute_split_logic(content, stype, sval)
         if not chunks_list:
             chunks_list = execute_split_logic(content, "by_length", "2000")
         edited = [{"title": c.get("title", ""), "content": (c.get("content") or "").strip(), "order": c.get("order", i + 1)} for i, c in enumerate(chunks_list)]
@@ -734,7 +743,7 @@ def _worker_data_analyze_chunk(
                 "arc_id": arc_id,
                 "content": txt,
                 "raw_content": txt,
-                "meta_json": {"source": "data_analyze", "chapter": chap_num, "title": chk.get("title", "")},
+                "meta_json": {"source": "data_analyze", "chapter_number": chap_num, "title": chk.get("title", "")},
                 "sort_order": sort_val,
             }
             ok, _, payload_ready = run_logic_check_then_save_chunk(project_id, row, supabase)

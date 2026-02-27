@@ -53,6 +53,8 @@ class ReverseLookupAssembler:
         """
         Build one block of context for a chunk in strict order:
         [MACRO CONTEXT - ARC] -> [MESO CONTEXT - CHAPTER] -> [MICRO EVIDENCE - CHUNK].
+        V8.x: MICRO EVIDENCE dùng "window" các chunk lân cận trong cùng chương
+        (vd. chunk trước và sau) để LLM có đủ ngữ cảnh đoạn, không phải 1 chunk lẻ.
         """
         data = ReverseLookupAssembler.get_chunk_with_parents(chunk_id)
         if not data:
@@ -74,20 +76,62 @@ class ReverseLookupAssembler:
                     (chapter.get("summary") or "").strip() or "(none)",
                 )
             )
-        meta = chunk.get("meta_json") or {}
-        if isinstance(meta, str):
-            try:
-                import json
-                meta = json.loads(meta) if meta else {}
-            except Exception:
-                meta = {}
-        source_meta = meta.get("source_metadata", meta)
-        if isinstance(source_meta, dict):
-            source_str = ", ".join("%s=%s" % (k, v) for k, v in source_meta.items())
-        else:
-            source_str = str(source_meta)
-        content = (chunk.get("content") or chunk.get("raw_content") or "").strip()
-        parts.append("[MICRO EVIDENCE - REVERSE SOURCE: %s]\nContent: %s" % (source_str or "(none)", content))
+        # MICRO: thay vì chỉ 1 chunk lẻ, lấy window các chunk lân cận trong cùng chương (ví dụ chunk trước/sau).
+        supabase = ReverseLookupAssembler._supabase()
+        neighbor_window = 1  # ±1 chunk quanh chunk chính
+        neighbor_chunks: List[Dict[str, Any]] = []
+        try:
+            if supabase and chapter and chunk.get("sort_order") is not None:
+                story_id = chunk.get("story_id")
+                chapter_id = chapter.get("id") or chunk.get("chapter_id")
+                if story_id and chapter_id:
+                    sort_val = int(chunk.get("sort_order") or 0)
+                    r = (
+                        supabase.table("chunks")
+                        .select("id, content, raw_content, meta_json, sort_order")
+                        .eq("story_id", story_id)
+                        .eq("chapter_id", chapter_id)
+                        .gte("sort_order", sort_val - neighbor_window)
+                        .lte("sort_order", sort_val + neighbor_window)
+                        .order("sort_order")
+                        .execute()
+                    )
+                    neighbor_chunks = list(r.data or [])
+        except Exception:
+            neighbor_chunks = []
+        if not neighbor_chunks:
+            neighbor_chunks = [chunk]
+
+        micro_blocks = []
+        for nc in neighbor_chunks:
+            meta = nc.get("meta_json") or {}
+            if isinstance(meta, str):
+                try:
+                    import json
+                    meta = json.loads(meta) if meta else {}
+                except Exception:
+                    meta = {}
+            source_meta = meta.get("source_metadata", meta)
+            if isinstance(source_meta, dict):
+                source_str = ", ".join("%s=%s" % (k, v) for k, v in source_meta.items())
+            else:
+                source_str = str(source_meta)
+            title = ""
+            if isinstance(meta, dict):
+                title = (meta.get("title") or "") if meta else ""
+            if not title and isinstance(source_meta, dict):
+                title = (source_meta.get("title") or "") if source_meta else ""
+            sort_label = nc.get("sort_order")
+            header = "[MICRO EVIDENCE - REVERSE SOURCE: %s]" % (source_str or "(none)")
+            if sort_label is not None or title:
+                header += " (chunk #%s%s)" % (
+                    str(sort_label) if sort_label is not None else "?",
+                    f" - {title}" if title else "",
+                )
+            content = (nc.get("content") or nc.get("raw_content") or "").strip()
+            micro_blocks.append(f"{header}\nContent: {content}")
+
+        parts.append("\n\n".join(micro_blocks))
         return "\n\n".join(parts)
 
     @staticmethod

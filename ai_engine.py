@@ -243,7 +243,8 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
         return total_tokens >= max_context_tokens * 0.92
 
     # Giới hạn từng lô (token hoặc số mục) để không ảnh hưởng lô khác
-    CHUNK_MAX_TOKENS = 6000
+    # Tăng để LLM có đủ không gian cho cửa sổ chunk dày hơn (chunk vector + chunk theo chapter + reverse từ bible).
+    CHUNK_MAX_TOKENS = 20000
     BIBLE_MAX_ITEMS = 15
     RELATION_TOP_K = 15
     RELATION_MAX_ITEMS = 80
@@ -276,18 +277,50 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
             query_for_chunk, project_id,
             arc_id=current_arc_id if not arc_ids else None,
             arc_ids=arc_ids if arc_ids else None,
-            top_k=20,
+            top_k=40,
             query_embedding=query_emb,
         )
         if not chunk_rows and (current_arc_id or arc_ids):
-            chunk_rows = search_chunks_vector(query_for_chunk, project_id, arc_id=None, arc_ids=None, top_k=20, query_embedding=query_emb)
+            chunk_rows = search_chunks_vector(query_for_chunk, project_id, arc_id=None, arc_ids=None, top_k=40, query_embedding=query_emb)
         chunk_rows = filter_context_items_by_embedding(chunk_rows)
         chunk_chapter_nums = set()
         if chunk_rows and ReverseLookupAssembler:
-            chunk_ids = [str(c.get("id")) for c in chunk_rows if c.get("id")]
-            if chunk_ids:
+            chunk_ids_primary = [str(c.get("id")) for c in chunk_rows if c.get("id")]
+            # Ưu tiên chunk trúng vector, nhưng có thể bổ sung thêm:
+            # - Chunk theo chapter_range (scope user hỏi).
+            # - Chunk reverse từ Bible (entity trong planner).
+            extra_chunk_ids: List[str] = []
+            bible_chunk_ids: List[str] = []
+            if range_bounds_bible:
+                try:
+                    start_rb, end_rb = int(range_bounds_bible[0]), int(range_bounds_bible[1])
+                    target_ch_nums = list(range(start_rb, end_rb + 1))
+                except (TypeError, ValueError, IndexError):
+                    target_ch_nums = []
+                if target_ch_nums:
+                    try:
+                        extra_chunk_ids = ContextManager.get_chunks_for_chapters(
+                            project_id, target_ch_nums, max_chunks=60
+                        )
+                    except Exception:
+                        extra_chunk_ids = []
+            if target_bible_entities:
+                try:
+                    bible_chunk_ids = ContextManager.get_chunks_for_bible_entities(
+                        project_id, target_bible_entities, max_chunks=60
+                    )
+                except Exception:
+                    bible_chunk_ids = []
+            # Gộp và dedupe: chunk vector trước, rồi tới chunk theo chương, rồi chunk từ bible.
+            all_chunk_ids: List[str] = []
+            seen_ids = set()
+            for cid in (chunk_ids_primary or []) + (extra_chunk_ids or []) + (bible_chunk_ids or []):
+                if cid and cid not in seen_ids:
+                    seen_ids.add(cid)
+                    all_chunk_ids.append(cid)
+            if all_chunk_ids:
                 chunk_ctx, chunk_sources, chunk_tokens = ContextManager.build_context_with_chunk_reverse_lookup(
-                    project_id, chunk_ids, current_arc_id, token_limit=CHUNK_MAX_TOKENS
+                    project_id, all_chunk_ids, current_arc_id, token_limit=CHUNK_MAX_TOKENS
                 )
                 if chunk_ctx:
                     for c in chunk_rows:
@@ -296,10 +329,19 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
                             try:
                                 import json as _j
                                 m = _j.loads(c["meta_json"]) if isinstance(c["meta_json"], str) else c["meta_json"]
-                                if m.get("chapter_number") is not None:
-                                    chunk_chapter_nums.add(int(m["chapter_number"]))
+                                ch_num = m.get("chapter_number") or m.get("chapter")
+                                if ch_num is not None:
+                                    chunk_chapter_nums.add(int(ch_num))
                             except Exception:
                                 pass
+                    # Nếu có thêm chunk theo chương mục tiêu, đảm bảo chapter_numbers phản ánh đúng để router/planner biết đã có semantic cho các chương đó.
+                    if range_bounds_bible:
+                        try:
+                            start_rb, end_rb = int(range_bounds_bible[0]), int(range_bounds_bible[1])
+                            for n in range(start_rb, end_rb + 1):
+                                chunk_chapter_nums.add(int(n))
+                        except (TypeError, ValueError, IndexError):
+                            pass
                     context_parts.append(chunk_ctx)
                     total_tokens += chunk_tokens
                     sources.extend(chunk_sources)
@@ -514,26 +556,46 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
                 context_parts.append("[TIMELINE] Chưa có dữ liệu timeline_events. Trả lời dựa trên Bible/chương nếu có.")
                 sources.append("📅 Timeline (empty)")
 
-    # Kiến trúc giống router: primary = retrieval (chunk, bible, timeline, relation); fallback = load full chương khi retrieval mỏng.
-    # Fallback khi: (1) không có semantic nào, HOẶC (2) tổng retrieval < ngưỡng → load full chương; khi load vẫn giữ bible/chunk... (dùng remaining budget).
-    # Ngưỡng 50k: áp dụng V6 + V7 (cùng build_context), tránh chỉ vài chunk đã đủ token nên không load full chương.
-    MIN_RETRIEVAL_TOKENS_FOR_NO_CHAPTER_FALLBACK = 50000
+    # Kiến trúc giống router: primary = retrieval (chunk, bible, timeline, relation);
+    # fallback = load full chương CHỈ KHI không tìm được bất kỳ chunk/bible/relation/timeline nào
+    # thuộc các chương mà user đã đề cập (chapter_range).
     if intent == "search_context" and range_bounds_bible and not _over_budget():
-        has_semantic_context = False
-        for meta in context_parts_meta or []:
-            src = (meta.get("source") or "").strip().lower()
-            if src in ("chunk", "bible", "timeline", "relation"):
-                text_meta = (meta.get("text") or "").strip()
-                if text_meta:
-                    has_semantic_context = True
-                    break
+        has_semantic_for_target_chapters = False
+        target_ch_set = set()
         try:
             start_rb, end_rb = int(range_bounds_bible[0]), int(range_bounds_bible[1])
-            threshold = MIN_RETRIEVAL_TOKENS_FOR_NO_CHAPTER_FALLBACK
+            if start_rb <= end_rb:
+                target_ch_set = {int(n) for n in range(start_rb, end_rb + 1)}
         except (TypeError, ValueError, IndexError):
-            threshold = MIN_RETRIEVAL_TOKENS_FOR_NO_CHAPTER_FALLBACK
-        retrieval_below_threshold = total_tokens < threshold
-        if not has_semantic_context or retrieval_below_threshold:
+            target_ch_set = set()
+
+        if target_ch_set:
+            for meta in context_parts_meta or []:
+                src = (meta.get("source") or "").strip().lower()
+                if src in ("chunk", "bible", "timeline", "relation"):
+                    text_meta = (meta.get("text") or "").strip()
+                    ch_nums = meta.get("chapter_numbers") or []
+                    if not text_meta or not ch_nums:
+                        continue
+                    try:
+                        ch_in_meta = {int(x) for x in ch_nums if x is not None}
+                    except Exception:
+                        continue
+                    if ch_in_meta & target_ch_set:
+                        has_semantic_for_target_chapters = True
+                        break
+        else:
+            # Nếu không resolve được chapter_range rõ ràng, fallback về kiểm tra có semantic tổng quát hay không.
+            for meta in context_parts_meta or []:
+                src = (meta.get("source") or "").strip().lower()
+                if src in ("chunk", "bible", "timeline", "relation"):
+                    text_meta = (meta.get("text") or "").strip()
+                    if text_meta:
+                        has_semantic_for_target_chapters = True
+                        break
+
+        # Chỉ khi KHÔNG có bất kỳ semantic nào (chunk/bible/relation/timeline) thuộc chapter_range thì mới load full chương.
+        if not has_semantic_for_target_chapters:
             try:
                 start_rb, end_rb = int(range_bounds_bible[0]), int(range_bounds_bible[1])
             except (TypeError, ValueError, IndexError):
@@ -559,7 +621,7 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
                     )
                     if fallback_text:
                         context_parts.append(
-                            "\n--- NỘI DUNG CHƯƠNG (FALLBACK - retrieval dưới ngưỡng hoặc không có semantic; vẫn giữ Bible/chunk nếu còn token) ---\n"
+                            "\n--- NỘI DUNG CHƯƠNG (FALLBACK - không tìm thấy chunk/bible/relation/timeline thuộc chapter_range; vẫn giữ Bible/chunk nếu còn token) ---\n"
                             + fallback_text
                         )
                         total_tokens += AIService.estimate_tokens(fallback_text)
@@ -614,6 +676,161 @@ class ContextManager:
         parts.append("Summary: %s" % ((arc.get("summary") or "").strip() or "(none)"))
         text = "\n".join(parts)
         return text, AIService.estimate_tokens(text)
+
+    @staticmethod
+    def get_chunks_for_chapters(
+        project_id: str,
+        chapter_numbers: List[int],
+        max_chunks: int = 60,
+    ) -> List[str]:
+        """
+        Lấy danh sách id chunk thuộc các chương được chỉ định (chapter_numbers) của project.
+        Dùng để ưu tiên chunk theo chapter_range thay vì load full chapter.
+        """
+        if not project_id or not chapter_numbers:
+            return []
+        try:
+            services = init_services()
+            if not services:
+                return []
+            supabase = services["supabase"]
+        except Exception:
+            return []
+
+        try:
+            # Resolve chapter_ids từ chapter_numbers
+            ch_set = {int(n) for n in chapter_numbers if n is not None}
+            if not ch_set:
+                return []
+            r = (
+                supabase.table("chapters")
+                .select("id, chapter_number")
+                .eq("story_id", project_id)
+                .in_("chapter_number", list(ch_set))
+                .execute()
+            )
+            rows = list(r.data or [])
+            chapter_ids = [row["id"] for row in rows if row.get("id")]
+            if not chapter_ids:
+                return []
+            cr = (
+                supabase.table("chunks")
+                .select("id, chapter_id, sort_order")
+                .eq("story_id", project_id)
+                .in_("chapter_id", chapter_ids)
+                .order("chapter_id")
+                .order("sort_order")
+                .limit(max_chunks)
+                .execute()
+            )
+            chunks = list(cr.data or [])
+            out_ids: List[str] = []
+            for row in chunks:
+                cid = row.get("id")
+                if cid:
+                    out_ids.append(str(cid))
+            return out_ids
+        except Exception:
+            return []
+
+    @staticmethod
+    def get_chunks_for_bible_entities(
+        project_id: str,
+        entity_names: List[str],
+        max_chunks: int = 60,
+    ) -> List[str]:
+        """
+        Reverse lookup từ Bible -> Chunk:
+        - Ưu tiên source_chunk_id trên story_bible (nếu có).
+        - Bổ sung chunk_id từ chunk_bible_links.
+        - Nếu vẫn còn slot, dùng source_chapter của entity để lấy thêm chunk theo chương.
+        """
+        if not project_id or not entity_names:
+            return []
+        try:
+            services = init_services()
+            if not services:
+                return []
+            supabase = services["supabase"]
+        except Exception:
+            return []
+
+        norm_names = [str(n).strip() for n in entity_names if n and str(n).strip()]
+        if not norm_names:
+            return []
+
+        bible_ids: List[Any] = []
+        chunk_ids: List[str] = []
+        chapter_nums: List[int] = []
+        try:
+            # Tìm entity theo tên (ilike); giới hạn mỗi tên để tránh quá nặng.
+            for name in norm_names:
+                try:
+                    r = (
+                        supabase.table("story_bible")
+                        .select("id, source_chapter, source_chunk_id")
+                        .eq("story_id", project_id)
+                        .ilike("entity_name", f"%{name}%")
+                        .limit(30)
+                        .execute()
+                    )
+                except Exception:
+                    continue
+                for row in (r.data or []):
+                    bid = row.get("id")
+                    if bid and bid not in bible_ids:
+                        bible_ids.append(bid)
+                    scid = row.get("source_chunk_id")
+                    if scid and scid not in chunk_ids:
+                        chunk_ids.append(str(scid))
+                    ch_num = row.get("source_chapter")
+                    if ch_num is not None:
+                        try:
+                            val = int(ch_num)
+                            if val > 0:
+                                chapter_nums.append(val)
+                        except Exception:
+                            continue
+
+            # Từ chunk_bible_links: chunk_id liên kết với các bible entity đã tìm được.
+            if bible_ids and len(chunk_ids) < max_chunks:
+                try:
+                    cb = (
+                        supabase.table("chunk_bible_links")
+                        .select("chunk_id, bible_entry_id")
+                        .eq("story_id", project_id)
+                        .in_("bible_entry_id", bible_ids)
+                        .limit(max_chunks * 2)
+                        .execute()
+                    )
+                    for row in (cb.data or []):
+                        cid = row.get("chunk_id")
+                        if cid and str(cid) not in chunk_ids:
+                            chunk_ids.append(str(cid))
+                            if len(chunk_ids) >= max_chunks:
+                                break
+                except Exception:
+                    pass
+
+            # Nếu vẫn còn slot, dùng chương chứa entity để lấy thêm chunk theo chương.
+            if len(chunk_ids) < max_chunks and chapter_nums:
+                try:
+                    extra = ContextManager.get_chunks_for_chapters(
+                        project_id,
+                        chapter_numbers=chapter_nums,
+                        max_chunks=max_chunks * 2,
+                    )
+                    for cid in extra:
+                        if cid not in chunk_ids:
+                            chunk_ids.append(cid)
+                            if len(chunk_ids) >= max_chunks:
+                                break
+                except Exception:
+                    pass
+
+            return chunk_ids[:max_chunks]
+        except Exception:
+            return []
 
     @staticmethod
     def build_context_with_chunk_reverse_lookup(

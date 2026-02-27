@@ -612,7 +612,16 @@ def _do_extract_chunking(supabase, project_id: str, chapter_id, arc_id, chap_num
     if ids:
         supabase.table("chunks").delete().in_("id", ids).execute()
     strategy = analyze_split_strategy(content, file_type="story", context_hint="Đoạn văn có ý nghĩa")
-    chunks_list = execute_split_logic(content, strategy.get("split_type", "by_length"), strategy.get("split_value", "2000"))
+    stype = strategy.get("split_type", "by_length")
+    sval = str(strategy.get("split_value", "2000")).strip()
+    if stype == "by_length":
+        from utils.chunk_tools import split_text_by_length_with_overlap
+        chunk_size = int(sval) if sval.isdigit() else 2000
+        chunk_size = max(500, min(chunk_size, 50000))
+        overlap = min(200, chunk_size // 10)
+        chunks_list = split_text_by_length_with_overlap(content, chunk_size=chunk_size, overlap=overlap)
+    else:
+        chunks_list = execute_split_logic(content, stype, sval)
     if not chunks_list:
         chunks_list = execute_split_logic(content, "by_length", "2000")
     edited = [{"title": c.get("title", ""), "content": (c.get("content") or "").strip(), "order": c.get("order", i + 1)} for i, c in enumerate(chunks_list or [])]
@@ -626,7 +635,7 @@ def _do_extract_chunking(supabase, project_id: str, chapter_id, arc_id, chap_num
             "arc_id": arc_id,
             "content": txt,
             "raw_content": txt,
-            "meta_json": {"source": "data_operation_jobs", "chapter": chap_num, "title": chk.get("title", "")},
+            "meta_json": {"source": "data_operation_jobs", "chapter_number": chap_num, "title": chk.get("title", "")},
             "sort_order": chk.get("order", idx + 1),
         }
         supabase.table("chunks").insert(payload).execute()
@@ -649,7 +658,12 @@ def _do_extract_chunking_batch(supabase, project_id: str, sub: List[int], by_num
         return
     strategy = analyze_split_strategy(first_content, file_type="story", context_hint="Đoạn văn có ý nghĩa")
     stype = strategy.get("split_type", "by_length")
-    sval = strategy.get("split_value", "2000")
+    sval = str(strategy.get("split_value", "2000")).strip()
+    use_overlap = stype == "by_length"
+    if use_overlap:
+        chunk_size = int(sval) if sval.isdigit() else 2000
+        chunk_size = max(500, min(chunk_size, 50000))
+        overlap_size = min(200, chunk_size // 10)
 
     for ch_num in sub:
         chapter = by_num.get(ch_num)
@@ -666,7 +680,11 @@ def _do_extract_chunking_batch(supabase, project_id: str, sub: List[int], by_num
         ids = [x["id"] for x in (r.data or []) if x.get("id")]
         if ids:
             supabase.table("chunks").delete().in_("id", ids).execute()
-        chunks_list = execute_split_logic(content, stype, sval)
+        if use_overlap:
+            from utils.chunk_tools import split_text_by_length_with_overlap
+            chunks_list = split_text_by_length_with_overlap(content, chunk_size=chunk_size, overlap=overlap_size)
+        else:
+            chunks_list = execute_split_logic(content, stype, sval)
         if not chunks_list:
             chunks_list = execute_split_logic(content, "by_length", "2000")
         for idx, chk in enumerate(chunks_list or []):
@@ -679,7 +697,7 @@ def _do_extract_chunking_batch(supabase, project_id: str, sub: List[int], by_num
                 "arc_id": arc_id,
                 "content": txt,
                 "raw_content": txt,
-                "meta_json": {"source": "data_operation_jobs", "chapter": ch_num, "title": chk.get("title", "")},
+                "meta_json": {"source": "data_operation_jobs", "chapter_number": ch_num, "title": chk.get("title", "")},
                 "sort_order": chk.get("order", idx + 1),
             }
             try:

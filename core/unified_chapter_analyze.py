@@ -14,9 +14,9 @@ from core.user_data_save_pipeline import (
 # Max ký tự nội dung đưa vào 1 lần LLM (tránh vượt context). Tăng để trích nhiều dữ liệu hơn.
 UNIFIED_MAX_CONTENT_CHARS = 75_000
 
-# Chunk fallback: kích thước mục tiêu và overlap (câu)
+# Chunk fallback: kích thước mục tiêu và overlap (ký tự) để chunk sau có ngữ cảnh đoạn trước
 CHUNK_TARGET_SIZE = 2000
-CHUNK_OVERLAP_SENTENCES = 2
+CHUNK_OVERLAP_CHARS = 200
 
 # Batch size cho insert/delete (tránh vượt giới hạn PostgREST)
 BATCH_INSERT_SIZE = 200
@@ -24,12 +24,11 @@ BATCH_DELETE_IDS = 500
 
 
 def _fallback_semantic_chunks(content: str) -> List[Dict[str, Any]]:
-    """Tách nội dung theo đoạn/câu có overlap khi LLM không trả về chunks. Công nghệ: paragraph-first, rồi sentence với overlap."""
+    """Tách nội dung theo đoạn (paragraph-first) có overlap ký tự khi LLM không trả về chunks."""
     if not content or not content.strip():
         return []
     text = content.strip()
     out = []
-    # Bước 1: tách theo đoạn (2+ newline)
     paragraphs = re.split(r"\n\s*\n", text)
     current = []
     current_len = 0
@@ -44,8 +43,15 @@ def _fallback_semantic_chunks(content: str) -> List[Dict[str, Any]]:
             if chunk_text:
                 out.append({"title": f"Phần {order}", "content": chunk_text, "order": order})
                 order += 1
-            current = [para]
-            current_len = plen
+            # Overlap: đưa đoạn cuối (CHUNK_OVERLAP_CHARS) của chunk vừa tạo vào đầu chunk tiếp theo
+            overlap_len = min(CHUNK_OVERLAP_CHARS, len(chunk_text))
+            overlap_prefix = chunk_text[-overlap_len:].strip() if overlap_len else ""
+            if overlap_prefix:
+                current = [overlap_prefix, para]
+                current_len = len(overlap_prefix) + 2 + plen
+            else:
+                current = [para]
+                current_len = plen
         else:
             current.append(para)
             current_len += plen
@@ -409,7 +415,7 @@ def run_unified_chapter_analyze(
                 "arc_id": arc_id,
                 "content": txt,
                 "raw_content": txt,
-                "meta_json": {"source": "unified_chapter_analyze", "chapter": chapter_number, "title": title},
+                "meta_json": {"source": "unified_chapter_analyze", "chapter_number": chapter_number, "title": title},
                 "sort_order": order,
             }
             ok, _, payload_ready = validate_and_prepare_chunk(project_id, row, supabase)
