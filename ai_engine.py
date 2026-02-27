@@ -286,6 +286,13 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
     target_chunk_keywords = router_result.get("target_chunk_keywords") or []
     target_relation_entities = router_result.get("target_relation_entities") or []
     target_timeline_keywords = router_result.get("target_timeline_keywords") or []
+    # V9.x: semantic_queries từ context_planner / planner_V7_light — query semantic riêng cho từng nguồn
+    semantic_queries = router_result.get("semantic_queries") or {}
+    if not isinstance(semantic_queries, dict):
+        semantic_queries = {}
+    semantic_chunk_query = (semantic_queries.get("chunk") or "").strip()
+    semantic_bible_query = (semantic_queries.get("bible") or "").strip()
+    semantic_relation_query = (semantic_queries.get("relation") or "").strip()
     query_emb = ctx.get("query_embedding")
     raw_inferred = router_result.get("inferred_prefixes") or []
     valid_keys = Config.get_valid_prefix_keys()
@@ -297,8 +304,10 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
     # Thứ tự ưu tiên: chunk → bible → relation → timeline (không load full chapter ở đây; full chapter chỉ khi fallback)
     # 1) Chunk (vector, scope)
     if "chunk" in context_needs and not _over_budget():
-        # Ưu tiên từ khóa chunk do planner suy ra; fallback về rewritten_query
-        if target_chunk_keywords:
+        # Ưu tiên câu query semantic cho chunk; sau đó tới từ khóa do planner suy ra; fallback về rewritten_query
+        if semantic_chunk_query:
+            query_for_chunk = semantic_chunk_query[:300]
+        elif target_chunk_keywords:
             # Ghép các keyword thành một câu truy vấn súc tích
             query_for_chunk = " ; ".join(str(k) for k in target_chunk_keywords if k)[:300]
         else:
@@ -451,9 +460,10 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
                         rel_block = f"> [RELATION]:\n{rel_text}\n\n"
                 part = format_bible_context_by_sections(raw_list)
                 bible_context += f"\n--- {entity.upper()} ---\n{rel_block}{part}\n"
-        if not bible_context and query_for_vec:
+        bible_vec_query = semantic_bible_query or query_for_vec
+        if not bible_context and bible_vec_query:
             raw_list = HybridSearch.smart_search_hybrid_raw(
-                query_for_vec, project_id, top_k=10, inferred_prefixes=inferred_prefixes,
+                bible_vec_query, project_id, top_k=10, inferred_prefixes=inferred_prefixes,
                 query_embedding=query_emb,
                 chapter_numbers=chapter_numbers if arc_ids else None,
             )
@@ -561,8 +571,10 @@ def _intent_handle_llm_with_context(router_result: Dict, ctx: Dict) -> None:
 
     # 3) Relation (vector, scope)
     if "relation" in context_needs and not _over_budget():
-        # Ưu tiên entity chính do planner suy ra; fallback về rewritten_query
-        if target_relation_entities:
+        # Ưu tiên query semantic cho relation; sau đó tới entity chính do planner suy ra; fallback về rewritten_query
+        if semantic_relation_query:
+            rel_query = semantic_relation_query[:300]
+        elif target_relation_entities:
             rel_query = " ; ".join(str(e) for e in target_relation_entities if e)[:300]
         else:
             rel_query = query_for_vec or "quan hệ"

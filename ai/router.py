@@ -320,7 +320,7 @@ Trả về JSON với đủ key:
         chat_capped = cap_chat_history_to_tokens(chat_history_text or "")
         relevant_rules_block = (relevant_rules or "").strip() or "(Bước 1 không chọn quy tắc liên quan)"
 
-        planner_prompt = f"""Bạn là Context Planner. Intent đã xác định: **{intent}**. Nhiệm vụ: dựa vào BỨC TRANH TỔNG QUAN dữ liệu dự án dưới đây, quyết định (1) cần LẤY DỮ LIỆU NÀO từ DB (bible, chapter, timeline, relation, chunk), (2) cần đưa LUẬT NÀO vào context (từ các quy tắc liên quan bước 1 đã lọc), (3) chọn rõ các TARGET theo từng nguồn (tên entity trong Bible, từ khóa chunk, entity để xem quan hệ, từ khóa timeline). Trả về JSON.
+        planner_prompt = f"""Bạn là Context Planner. Intent đã xác định: **{intent}**. Nhiệm vụ: dựa vào BỨC TRANH TỔNG QUAN dữ liệu dự án dưới đây, quyết định (1) cần LẤY DỮ LIỆU NÀO từ DB (bible, chapter, timeline, relation, chunk), (2) cần đưa LUẬT NÀO vào context (từ các quy tắc liên quan bước 1 đã lọc), (3) chọn rõ các TARGET theo từng nguồn (tên entity trong Bible, từ khóa chunk, entity để xem quan hệ, từ khóa timeline), (4) sinh ra các câu query semantic ngắn gọn cho từng nguồn (bible, relation, timeline, chunk, chapter) để dùng cho bước search semantic. Trả về JSON.
 
 ƯU TIÊN HÀNG ĐẦU — LẤY TỪ CÂU HỎI USER (đây là phần chính để build context đúng):
 - Nếu câu user có nói RÕ khoảng chương (vd. "chương 1 đến 30", "từ chương 5 tới 10", "các chương 1–20") thì BẮT BUỘC điền chapter_range = [start, end] theo đúng số chương user nói và chapter_range_mode = "range". Đây là thông tin then chốt cho search_context.
@@ -365,9 +365,10 @@ Bạn cần trả về:
 - query_target: chỉ khi intent=query_Sql: "chapters"|"rules"|"bible_entity"|"chunks"|"timeline"|"relation"|"summary"|"art".
 - data_operation_type, data_operation_target: chỉ khi intent=unified.
 - included_rules_text: chuỗi các quy tắc (từ block QUY TẮC LIÊN QUAN trên) thực sự cần đưa vào context để trả lời. Giữ nguyên định dạng "- ...". Có thể là toàn bộ hoặc subset. Nếu không cần quy tắc nào thì "".
+ - semantic_queries: object, mỗi key là một nguồn trong context_needs ("bible","relation","timeline","chunk","chapter"), value là 1 câu query semantic ngắn gọn, rõ nghĩa để dùng khi gọi semantic / vector search cho nguồn đó.
 
 Trả về JSON (đủ key):
-        {{ "context_needs": [], "context_priority": [], "chapter_range": null, "chapter_range_mode": null, "chapter_range_count": 5, "target_bible_entities": [], "target_chunk_keywords": [], "target_relation_entities": [], "target_timeline_keywords": [], "inferred_prefixes": [], "rewritten_query": "", "query_target": "", "clarification_question": "", "data_operation_type": "", "data_operation_target": "", "update_summary": "", "included_rules_text": "" }}
+        {{ "context_needs": [], "context_priority": [], "chapter_range": null, "chapter_range_mode": null, "chapter_range_count": 5, "target_bible_entities": [], "target_chunk_keywords": [], "target_relation_entities": [], "target_timeline_keywords": [], "inferred_prefixes": [], "rewritten_query": "", "query_target": "", "clarification_question": "", "data_operation_type": "", "data_operation_target": "", "update_summary": "", "included_rules_text": "", "semantic_queries": {{}} }}
 Chỉ trả về JSON."""
 
         try:
@@ -416,6 +417,7 @@ Chỉ trả về JSON."""
             "data_operation_target": (data.get("data_operation_target") or "").strip(),
             "query_target": (data.get("query_target") or "").strip(),
             "included_rules_text": included_rules if included_rules else None,
+            "semantic_queries": data.get("semantic_queries") if isinstance(data.get("semantic_queries"), dict) else {},
         }
         # Ưu tiên dùng chunk khi đã có bible/relation/timeline để tận dụng link (chunk_bible_links, chunk_timeline_links).
         needs = result["context_needs"] or []
@@ -843,16 +845,58 @@ Chỉ trả về JSON."""
         if project_id:
             rules_context = get_mandatory_rules(project_id)
             bible_index = get_bible_index(project_id, max_tokens=1200)
+        # V9.x: lấy thêm overview rút gọn giống context_planner
+        # để Planner V7 light thấy được arcs, chapter mapping, và tổng quan relation/timeline/chunks.
+        relation_summary = "0 quan hệ"
+        timeline_summary = "0 sự kiện"
+        chunks_summary = "0 chunks"
+        bible_index_overview = ""
+        project_name = "(Không tên)"
+        arcs_summary = "(Trống)"
+        arc_chapters_summary = "(Trống)"
+        chapter_list_from_overview = "(Trống)"
+        prefix_setup_str = ""
+        if project_id:
+            try:
+                overview = get_project_overview(project_id or "", bible_max_tokens=1200)
+                project_name = overview.get("project_name") or project_name
+                relation_summary = overview.get("relation_summary") or relation_summary
+                timeline_summary = overview.get("timeline_summary") or timeline_summary
+                chunks_summary = overview.get("chunks_summary") or chunks_summary
+                bible_index_overview = overview.get("bible_index") or ""
+                arcs_summary = overview.get("arcs_summary") or arcs_summary
+                arc_chapters_summary = overview.get("arc_chapters_summary") or arc_chapters_summary
+                chapter_list_from_overview = overview.get("chapter_list_str") or chapter_list_from_overview
+            except Exception:
+                pass
+            try:
+                prefix_setup = Config.get_prefix_setup()
+                prefix_setup_str = "\n".join(
+                    f"- [{p.get('prefix_key', '')}]: {p.get('description', '')}" for p in (prefix_setup or [])
+                ) if prefix_setup else "(Chưa cấu hình Bible Prefix.)"
+            except Exception:
+                prefix_setup_str = "(Chưa cấu hình Bible Prefix.)"
+        if not bible_index and bible_index_overview:
+            bible_index = bible_index_overview
         chat_history_capped = cap_chat_history_to_tokens(chat_history_text or "")
-        chapter_list_str = get_chapter_list_for_router(project_id) if project_id else "(Trống)"
+        # Ưu tiên danh sách chương từ overview (đã được tối ưu cho router/planner); fallback sang helper cũ nếu cần.
+        chapter_list_str = chapter_list_from_overview
+        if (not chapter_list_str or chapter_list_str == "(Trống)") and project_id:
+            chapter_list_str = get_chapter_list_for_router(project_id)
+        if not chapter_list_str:
+            chapter_list_str = "(Trống)"
         planner_prompt = f"""### VAI TRÒ
 Bạn là **Planner V7** cho hệ thống V7-Universal. Nhiệm vụ: từ câu hỏi của User, đưa ra **KẾ HOẠCH tối đa 3 bước**, mỗi bước 1 intent rõ ràng để Executor V7 có thể:
 - Lấy đúng context cần thiết (theo chương, Bible, timeline, relation, chunk...)
 - Thực hiện các thao tác phân tích / thống kê / unified / web_search tương ứng.
 
 ### 1. DỮ LIỆU ĐẦU VÀO (CHỈ DÙNG ĐỂ QUYẾT ĐỊNH PLAN, KHÔNG PHẢI NỘI DUNG CHÍNH XÁC)
+- TÊN DỰ ÁN: {project_name}
 - QUY TẮC DỰ ÁN (rút gọn): {rules_context[:800]}
 - DANH SÁCH ENTITY (Bible - index rút gọn): {bible_index[:1000] if bible_index else "(Trống)"}
+- ARC & CHƯƠNG: ARCS={arcs_summary} | ARC_VS_CHAPTER={arc_chapters_summary}
+- PREFIX ENTITY: {prefix_setup_str or "(Chưa cấu hình Bible Prefix.)"}
+- TỔNG QUAN RELATION/TIMELINE/CHUNKS: RELATION={relation_summary} | TIMELINE={timeline_summary} | CHUNKS={chunks_summary}
 - DANH SÁCH CHƯƠNG (số - tên): {chapter_list_str}
 - LỊCH SỬ CHAT (rút gọn): {chat_history_capped[:600]}
 - GỢI Ý TỪ BƯỚC 1 (intent_only): {intent_from_step1 or "search_context"} — chỉ dùng tham khảo, bạn được quyền chọn intent khác nếu hợp lý hơn.
@@ -924,6 +968,7 @@ Hãy trả về ĐÚNG MỘT JSON với format:
         "data_operation_type": "", 
         "data_operation_target": "", 
         "query_target": "",
+        "semantic_queries": {{}}  // object, mỗi key là một nguồn trong context_needs ("bible","relation","timeline","chunk","chapter"), value là 1 câu query semantic ngắn gọn để đi semantic search tay.
         "target_files": [],
         "target_bible_entities": [],
         "clarification_question": ""
@@ -947,7 +992,7 @@ LƯU Ý:
                 ],
                 model=_get_default_tool_model(),
                 temperature=0.1,
-                max_tokens=500,
+                max_tokens=700,
                 response_format={"type": "json_object"},
             )
             content = response.choices[0].message.content
@@ -1018,6 +1063,7 @@ LƯU Ý:
                     "data_operation_type": args.get("data_operation_type") or "",
                     "data_operation_target": args.get("data_operation_target") or "",
                     "query_target": args.get("query_target") or "",
+                    "semantic_queries": args.get("semantic_queries") if isinstance(args.get("semantic_queries"), dict) else {},
                 },
                 "dependency": s.get("dependency"),
             })
